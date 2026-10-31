@@ -157,11 +157,20 @@ struct KernelObject
     }
 };
 
+void RegisterKernelObject(uint32_t handle);
+void UnregisterKernelObject(uint32_t handle);
+bool IsValidKernelHandle(uint32_t handle);
+
 template<typename T, typename... Args>
 inline T* CreateKernelObject(Args&&... args)
 {
     static_assert(std::is_base_of_v<KernelObject, T>);
-    return g_userHeap.AllocPhysical<T>(std::forward<Args>(args)...);
+    T* obj = g_userHeap.AllocPhysical<T>(std::forward<Args>(args)...);
+    if (obj)
+    {
+        RegisterKernelObject(g_memory.MapVirtual(obj));
+    }
+    return obj;
 }
 
 template<typename T = KernelObject>

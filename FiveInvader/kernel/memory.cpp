@@ -1,5 +1,6 @@
 #include <stdafx.h>
 #include "memory.h"
+#include <os/logger.h>
 
 static constexpr size_t AlignDown(size_t value, size_t alignment) noexcept
 {
@@ -9,6 +10,39 @@ static constexpr size_t AlignDown(size_t value, size_t alignment) noexcept
 static constexpr size_t AlignUp(size_t value, size_t alignment) noexcept
 {
     return (value + (alignment - 1)) & ~(alignment - 1);
+}
+
+#include <execinfo.h>
+
+static void UnmappedIndirectHandler(PPCContext& ctx, uint8_t* base)
+{
+    static std::atomic<int> s_unmappedCount{0};
+    if (s_unmappedCount++ < 25) {
+        LOGF_ERROR("[PPC Indirect] Called UNMAPPED indirect function! target(r12)=0x{:08X} r1=0x{:08X}",
+                   ctx.r12.u32, ctx.r1.u32);
+
+        // Walk guest stack frames
+        uint32_t sp = ctx.r1.u32;
+        for (int frame = 0; frame < 16 && sp >= 0x70000000 && sp < 0x90000000; ++frame) {
+            uint32_t old_sp = PPC_LOAD_U32(sp);
+            if (old_sp <= sp || old_sp >= 0x90000000) break;
+            uint32_t lr = PPC_LOAD_U32(old_sp - 8);
+            LOGF_ERROR("  [Guest BT #{}] sp=0x{:08X} lr=0x{:08X}", frame, sp, lr);
+            sp = old_sp;
+        }
+
+        void* callstack[32];
+        int frames = backtrace(callstack, 32);
+        char** strs = backtrace_symbols(callstack, frames);
+        if (strs) {
+            for (int i = 0; i < frames; ++i) {
+                LOGF_ERROR("  [Host BT #{}] {}", i, strs[i]);
+            }
+            free(strs);
+        }
+    }
+    // Set return value to 0 to minimize cascading null crashes
+    ctx.r3.u64 = 0;
 }
 
 Memory::Memory()
@@ -39,6 +73,12 @@ Memory::Memory()
     // Some titles (e.g., GTA V) legitimately touch low memory (including address 0).
     // Do not install a null-page guard in that case.
 #endif
+
+    // Pre-populate the indirect function lookup table with an unmapped handler
+    // so any unmapped indirect call emits an actionable error instead of a null crash.
+    PPCFunc** table = (PPCFunc**)(base + PPC_IMAGE_BASE + PPC_IMAGE_SIZE);
+    constexpr size_t kFuncTableEntries = PPC_CODE_SIZE / 4;
+    std::fill_n(table, kFuncTableEntries, &UnmappedIndirectHandler);
 
     for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
     {

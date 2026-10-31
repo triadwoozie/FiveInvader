@@ -2045,12 +2045,39 @@ uint32_t XGetAVPack()
 
 void XamLoaderTerminateTitle()
 {
-    LOG_UTILITY("!!! STUB !!!");
+    LOG_WARNING("[XamLoaderTerminateTitle] Guest requested title termination!");
 }
 
-void XamGetExecutionId()
+struct XAM_EXECUTION_ID {
+    be<uint32_t> m_media_id;
+    be<uint32_t> m_version;
+    be<uint32_t> m_base_version;
+    be<uint32_t> m_title_id;
+    uint8_t m_platform;
+    uint8_t m_executable_type;
+    uint8_t m_disc_num;
+    uint8_t m_discs_total;
+    be<uint32_t> m_flags;
+};
+
+uint32_t XamGetExecutionId(uint32_t pExecutionId)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    if (pExecutionId != 0) {
+        auto* execId = reinterpret_cast<XAM_EXECUTION_ID*>(g_memory.Translate(pExecutionId));
+        if (execId) {
+            execId->m_media_id = 0x545408A7;
+            execId->m_version = 0x00010000;
+            execId->m_base_version = 0x00010000;
+            execId->m_title_id = 0x545408A7;
+            execId->m_platform = 1;         // Xbox 360
+            execId->m_executable_type = 1;  // Title
+            execId->m_disc_num = 2;         // Disc 2 (Play Disc)
+            execId->m_discs_total = 2;
+            execId->m_flags = 0;
+            LOGF_INFO("[TRACE] XamGetExecutionId: Populated TitleID=0x545408A7 at 0x{:08X}", pExecutionId);
+        }
+    }
+    return 0; // STATUS_SUCCESS
 }
 
 void XamLoaderLaunchTitle()
@@ -2152,7 +2179,7 @@ uint32_t NtOpenFile(
     g_ntFileHandles.emplace(handleValue, h);
 
     *FileHandle = handleValue;
-    LOGF_IMPL(Utility, "NtOpenFile", "Opened file handle 0x{:08X} for {}", handleValue, resolved.string());
+    LOGF_INFO("[TRACE] NtOpenFile: '{}' -> handle=0x{:08X}", guestPath, handleValue);
     if (IoStatusBlock)
     {
         IoStatusBlock->Status = STATUS_SUCCESS;
@@ -2621,6 +2648,7 @@ uint32_t NtCreateFile
     g_ntFileHandles.emplace(handleValue, h);
 
     *FileHandle = handleValue;
+    LOGF_INFO("[TRACE] NtCreateFile: '{}' (disp={}) -> handle=0x{:08X}", guestPath, CreateDisposition, handleValue);
     if (IoStatusBlock)
     {
         IoStatusBlock->Status = STATUS_SUCCESS;
@@ -2690,9 +2718,43 @@ uint32_t NtClose(uint32_t handle)
     }
 }
 
-void NtSetInformationFile()
+uint32_t NtSetInformationFile(
+    uint32_t FileHandle,
+    XIO_STATUS_BLOCK* IoStatusBlock,
+    void* FileInformation,
+    uint32_t Length,
+    uint32_t FileInformationClass)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    LOGF_INFO("[TRACE] NtSetInformationFile: handle=0x{:08X} class={} len={}", 
+              FileHandle, FileInformationClass, Length);
+
+    if (FileHandle == GUEST_INVALID_HANDLE_VALUE || !IsKernelObject(FileHandle))
+        return STATUS_INVALID_HANDLE;
+
+    NtFileHandle* hFile = nullptr;
+    if (auto it = g_ntFileHandles.find(FileHandle); it != g_ntFileHandles.end() && it->second && it->second->magic == kNtFileHandleMagic)
+    {
+        hFile = it->second;
+    }
+
+    if (hFile && FileInformation)
+    {
+        // FilePositionInformation = 14
+        if (FileInformationClass == 14 && Length >= sizeof(uint64_t))
+        {
+            uint64_t newPos = ByteSwap(*reinterpret_cast<uint64_t*>(FileInformation));
+            hFile->stream.clear();
+            hFile->stream.seekg(newPos, std::ios::beg);
+            LOGF_INFO("[TRACE] NtSetInformationFile: Seek handle=0x{:08X} to pos={}", FileHandle, newPos);
+        }
+    }
+
+    if (IoStatusBlock)
+    {
+        IoStatusBlock->Status = STATUS_SUCCESS;
+        IoStatusBlock->Information = Length;
+    }
+    return STATUS_SUCCESS;
 }
 
 uint32_t FscSetCacheElementCount()
@@ -2736,6 +2798,11 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         if (++s_nullWaitCount <= 5)
         {
             LOGF_WARNING("[NtWaitEx] NULL handle wait #{} - returning STATUS_SUCCESS to unblock", s_nullWaitCount);
+        }
+        int64_t timeoutValue = Timeout ? Timeout->get() : 0;
+        if (timeoutValue != 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         return STATUS_SUCCESS;  // Return success to let caller proceed
     }
@@ -2785,22 +2852,21 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
     // VBlank removed - following UnleashedRecomp pattern (no force-firing)
     // Game progresses naturally without interrupt-driven timing
 
-    if (IsKernelObject(Handle))
+    KernelObject* obj = nullptr;
+    uint8_t objType = 0xFF;
+
+    if (IsValidKernelHandle(Handle))
     {
-        // FIX: Handle can be either:
-        // 1. A kernel object handle (from NtCreateSemaphore/NtCreateEvent) - directly a KernelObject*
-        // 2. A guest dispatcher object address (XKSEMAPHORE/XKEVENT from KeInitialize*) - needs QueryKernelObject
-        
-        // Check if this is a guest dispatcher object by looking at the header
+        obj = GetKernelObject(Handle);
+    }
+    else if (Handle < PPC_MEMORY_SIZE && g_memory.base != nullptr)
+    {
         XDISPATCHER_HEADER* header = reinterpret_cast<XDISPATCHER_HEADER*>(g_memory.Translate(Handle));
-        uint8_t objType = header->Type;
-        
-        KernelObject* obj = nullptr;
+        objType = header->Type;
         
         // Type 5 = Semaphore, Type 0/1 = Event (synchronization/notification)
         if (objType == 5)
         {
-            // Guest XKSEMAPHORE - use QueryKernelObject to get actual Semaphore
             obj = QueryKernelObject<Semaphore>(*header);
             if (s_waitCount <= 30 || (Handle >= 0xEB2D0000 && Handle < 0xEB2E0000))
             {
@@ -2810,7 +2876,6 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         }
         else if (objType == 0 || objType == 1)
         {
-            // Guest XKEVENT - use QueryKernelObject to get actual Event
             obj = QueryKernelObject<Event>(*header);
             if (s_waitCount <= 30)
             {
@@ -2818,59 +2883,58 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
                             s_waitCount, Handle, objType, obj ? "OK" : "NULL");
             }
         }
-        else
+        else if (header->WaitListHead.Flink == OBJECT_SIGNATURE)
         {
-            // Likely a direct kernel object handle (from NtCreate*)
-            obj = GetKernelObject(Handle);
-        }
-        
-        if (!obj)
-        {
-            LOGF_WARNING("[NtWaitEx] #{} handle=0x{:08X} type={} - no kernel object found!", s_waitCount, Handle, objType);
-            return STATUS_TIMEOUT;
-        }
-        
-
-        // KERNEL POLICY: Fail-open during Boot/Init
-        if (timeout == INFINITE && ShouldFailOpenWait()) {
-            uint32_t result = obj->Wait(10);  // Short wait instead of infinite
-            if (result == STATUS_TIMEOUT) {
-                static int s_failOpenObj = 0;
-                ++s_failOpenObj;
-                if (s_failOpenObj <= 50 || s_failOpenObj % 1000 == 0) {
-                    LOGF_WARNING("[FAIL-OPEN] NtWaitEx #{} infinite->success handle=0x{:08X} caller=0x{:08X}", 
-                                s_failOpenObj, Handle, callerLR);
-                }
-                return STATUS_SUCCESS;
+            uint32_t blink = header->WaitListHead.Blink.get();
+            if (IsValidKernelHandle(blink))
+            {
+                obj = GetKernelObject(blink);
             }
-            return result;
         }
+    }
 
-        // POST-INIT: timeout=0 polls should return success to allow scheduler to proceed
-        // The game polls with timeout=0 waiting for frame signals - VBlank timer provides timing
-        if (timeout == 0 && !ShouldFailOpenWait()) {
-            // After init, timeout=0 polls are frame sync checks
-            // Return success to let scheduler invoke render callback
-            static int s_postInitPoll = 0;
-            if (++s_postInitPoll <= 5) {
-                LOGF_WARNING("[NtWaitEx] POST-INIT timeout=0 poll #{} returning SUCCESS", s_postInitPoll);
+    if (!obj)
+    {
+        static int s_invalidWaitCount = 0;
+        if (++s_invalidWaitCount <= 20 || s_invalidWaitCount % 10000 == 0)
+        {
+            LOGF_WARNING("[NtWaitEx] #{} handle=0x{:08X} (type={}) - no valid kernel object found! (occurrence #{})", 
+                        s_waitCount, Handle, objType, s_invalidWaitCount);
+        }
+        if (timeout != 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return ShouldFailOpenWait() ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+    }
+
+    // KERNEL POLICY: Fail-open during Boot/Init
+    if (timeout == INFINITE && ShouldFailOpenWait()) {
+        uint32_t result = obj->Wait(10);  // Short wait instead of infinite
+        if (result == STATUS_TIMEOUT) {
+            static int s_failOpenObj = 0;
+            ++s_failOpenObj;
+            if (s_failOpenObj <= 50 || s_failOpenObj % 1000 == 0) {
+                LOGF_WARNING("[FAIL-OPEN] NtWaitEx #{} infinite->success handle=0x{:08X} caller=0x{:08X}", 
+                            s_failOpenObj, Handle, callerLR);
             }
             return STATUS_SUCCESS;
         }
-        
-        return obj->Wait(timeout);
-    }
-    else
-    {
-        // Don't crash on unknown handles - just return timeout
-        static int s_unknownWaitCount = 0;
-        if (++s_unknownWaitCount <= 10)
-        {
-            LOGF_WARNING("[NtWaitEx] Unrecognized handle 0x{:08X} (occurrence #{})", Handle, s_unknownWaitCount);
-        }
+        return result;
     }
 
-    return STATUS_TIMEOUT;
+    // POST-INIT: timeout=0 polls should return success to allow scheduler to proceed
+    // The game polls with timeout=0 waiting for frame signals - VBlank timer provides timing
+    if (timeout == 0 && !ShouldFailOpenWait()) {
+        // After init, timeout=0 polls are frame sync checks
+        // Return success to let scheduler invoke render callback
+        static int s_postInitPoll = 0;
+        if (++s_postInitPoll <= 5) {
+            LOGF_WARNING("[NtWaitEx] POST-INIT timeout=0 poll #{} returning SUCCESS", s_postInitPoll);
+        }
+        return STATUS_SUCCESS;
+    }
+    
+    return obj->Wait(timeout);
 }
 
 uint32_t NtWriteFile(
@@ -3013,9 +3077,10 @@ uint32_t ExGetXConfigSetting(uint16_t Category, uint16_t Setting, void* Buffer, 
     return 0;
 }
 
-void NtQueryVirtualMemory()
+uint32_t NtQueryVirtualMemory(uint32_t pAddress, uint32_t pInfo, uint32_t pSize, uint32_t pClass, uint32_t pReturnLength)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    LOGF_INFO("[TRACE] NtQueryVirtualMemory: addr=0x{:08X} info=0x{:08X}", pAddress, pInfo);
+    return 0; // STATUS_SUCCESS
 }
 
 #ifndef STATUS_INVALID_PARAMETER
@@ -3026,9 +3091,26 @@ void NtQueryVirtualMemory()
 #define STATUS_NO_MEMORY 0xC0000017
 #endif
 
-void MmQueryStatistics()
+uint32_t MmQueryStatistics(uint32_t pStats)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    if (pStats != 0)
+    {
+        uint8_t* ptr = static_cast<uint8_t*>(g_memory.Translate(pStats));
+        if (ptr)
+        {
+            uint32_t length = ByteSwap(*reinterpret_cast<uint32_t*>(ptr));
+            if (length == 0 || length > 104) length = 104;
+            std::memset(ptr, 0, length);
+            *reinterpret_cast<uint32_t*>(ptr + 0) = ByteSwap(length);
+            *reinterpret_cast<uint32_t*>(ptr + 4) = ByteSwap(131072u); // 512 MB total pages
+            *reinterpret_cast<uint32_t*>(ptr + 8) = ByteSwap(100000u); // Available
+            *reinterpret_cast<uint32_t*>(ptr + 12) = ByteSwap(100000u); // Title pool
+            *reinterpret_cast<uint32_t*>(ptr + 16) = ByteSwap(20000u);  // System pool
+            *reinterpret_cast<uint32_t*>(ptr + 20) = ByteSwap(1000u);   // Reserved
+            LOGF_INFO("[TRACE] MmQueryStatistics populated at 0x{:08X}", pStats);
+        }
+    }
+    return 0; // STATUS_SUCCESS
 }
 
 // Track all created Event handles so VdSwap can signal them to unblock workers
@@ -3056,7 +3138,7 @@ uint32_t NtCreateEvent(be<uint32_t>* handle, void* objAttributes, uint32_t event
     // Log AFTER creation to confirm success
     if (s_count <= 30)
     {
-        LOGF_IMPL(Utility, "NtCreateEvent", "#{} CREATED handle=0x{:08X} type={} initial={}",
+        LOGF_INFO("[TRACE] NtCreateEvent: #{} handle=0x{:08X} type={} initial={}",
                   s_count, h, eventType, initialState);
     }
     
@@ -3161,6 +3243,10 @@ uint32_t KeDelayExecutionThread(uint32_t WaitMode, bool Alertable, be<int64_t>* 
         return STATUS_USER_APC;
 
     uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
+    static std::atomic<int> s_delayCount{0};
+    if (s_delayCount++ < 50 || s_delayCount % 100 == 0) {
+        LOGF_INFO("[TRACE] KeDelayExecutionThread(timeout={}ms)", timeout);
+    }
 
 #ifdef _WIN32
     Sleep(timeout);
@@ -3735,7 +3821,7 @@ uint32_t NtReadFile(
     const uint64_t offset = ByteOffset ? static_cast<uint64_t>(ByteOffset->get()) : 0ull;
     if (s_readCount <= 50 || s_readCount % 500 == 0)
     {
-        LOGF_IMPL(Utility, "NtReadFile", "#{} handle=0x{:08X} len={} offset=0x{:X} event=0x{:08X}", 
+        LOGF_INFO("[TRACE] NtReadFile: #{} handle=0x{:08X} len=0x{:X} offset=0x{:X} event=0x{:08X}", 
                   s_readCount, FileHandle, Length, offset, Event);
     }
     
@@ -4290,8 +4376,8 @@ void VdInitializeRingBuffer(uint32_t physAddr, uint32_t sizeLog2)
     g_gpuRingBuffer.ringBufferSize = 1u << sizeLog2;
     g_gpuRingBuffer.initialized = true;
     
-    LOGF_UTILITY("ringBufferBase=0x{:08X} sizeLog2={} size={}", 
-                 physAddr, sizeLog2, g_gpuRingBuffer.ringBufferSize);
+    LOGF_INFO("[TRACE] VdInitializeRingBuffer: base=0x{:08X} sizeLog2={} size=0x{:X}", 
+              physAddr, sizeLog2, g_gpuRingBuffer.ringBufferSize);
 }
 
 // Scan a command buffer for PM4 packets (helper function)
@@ -4520,6 +4606,7 @@ void VdQueryVideoMode(XVIDEO_MODE* vm)
     vm->VideoStandard = 1;
     vm->Unknown4A = 0x4A;
     vm->Unknown01 = 0x01;
+    LOGF_INFO("[TRACE] VdQueryVideoMode() -> 1280x720 60Hz");
 }
 
 void VdGetCurrentDisplayInformation()
@@ -4595,10 +4682,7 @@ void VdSetGraphicsInterruptCallback(uint32_t callback, uint32_t userData)
 uint32_t VdInitializeEngines()
 {
     g_gpuRingBuffer.enginesInitialized = true;
-    
-    LOG_UTILITY("enginesInitialized = true");
-    
-    
+    LOGF_INFO("[TRACE] VdInitializeEngines() -> SUCCESS");
     return 1;
 }
 
@@ -4734,6 +4818,10 @@ void KeUnlockL2()
 bool KeSetEvent(XKEVENT* pEvent, uint32_t Increment, bool Wait)
 {
     // SONIC APPROACH: Direct kernel object signal - no SyncTable
+    static std::atomic<int> s_setEventCount{0};
+    if (s_setEventCount++ < 30) {
+        LOGF_INFO("[TRACE] KeSetEvent: event=0x{:08X}", (uint32_t)((uint8_t*)pEvent - g_memory.base));
+    }
     bool result = QueryKernelObject<Event>(*pEvent)->Set();
 
     ++g_keSetEventGeneration;
@@ -4764,6 +4852,13 @@ uint32_t KeWaitForSingleObject(XDISPATCHER_HEADER* Object, uint32_t WaitReason, 
 {
     // SONIC APPROACH: Simple direct kernel object wait - no SyncTable
     const uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
+    static std::atomic<int> s_keWaitCount{0};
+    if (s_keWaitCount++ < 50 || s_keWaitCount % 200 == 0) {
+        LOGF_INFO("[TRACE] KeWaitForSingleObject: #{} obj=0x{:08X} type={} timeout={}ms",
+                  s_keWaitCount.load(),
+                  Object ? (uint32_t)((uint8_t*)Object - g_memory.base) : 0,
+                  Object ? Object->Type : -1, timeout);
+    }
 
     switch (Object->Type)
     {
@@ -4843,6 +4938,10 @@ uint32_t KeTlsGetValue(uint32_t dwTlsIndex)
 
 uint32_t KeTlsSetValue(uint32_t dwTlsIndex, uint32_t lpTlsValue)
 {
+    static std::atomic<int> s_tlsSetCount{0};
+    if (s_tlsSetCount++ < 50) {
+        LOGF_INFO("[TRACE] KeTlsSetValue: slot={} val=0x{:08X}", dwTlsIndex, lpTlsValue);
+    }
     PPCContext* ctx = GetPPCContext();
     
     if (!ctx || ctx->r13.u32 == 0 || ctx->r13.u32 < 0x80000000)
@@ -4874,11 +4973,13 @@ uint32_t KeTlsAlloc()
     {
         size_t index = g_tlsFreeIndices.back();
         g_tlsFreeIndices.pop_back();
+        LOGF_INFO("[TRACE] KeTlsAlloc() -> slot {}", index);
         return static_cast<uint32_t>(index);
     }
     
     // Allocate new slot
     size_t index = g_tlsNextIndex++;
+    LOGF_INFO("[TRACE] KeTlsAlloc() -> slot {}", index);
     
     // Warn if exceeding guest TLS capacity (still works via host fallback)
     if (index >= MAX_GUEST_TLS_SLOTS)
@@ -5123,6 +5224,9 @@ uint32_t NtResumeThread(GuestThreadHandle* hThread, uint32_t* suspendCount)
 {
     assert(hThread != GetKernelObject(CURRENT_THREAD_HANDLE));
 
+    if (suspendCount != nullptr)
+        *suspendCount = 1;
+
     hThread->suspended = false;
     hThread->suspended.notify_all();
 
@@ -5164,24 +5268,41 @@ uint32_t NtReleaseSemaphore(uint32_t Handle, uint32_t ReleaseCount, int32_t* Pre
     static int s_count = 0;
     ++s_count;
     
-    // FIX: Handle is a guest address that needs to be resolved via kernel object system
-    // Previously this took Semaphore* directly which caused signals to go to wrong objects
-    if (!IsKernelObject(Handle))
+    KernelObject* obj = nullptr;
+    if (IsValidKernelHandle(Handle))
+    {
+        obj = GetKernelObject(Handle);
+    }
+    else if (Handle < PPC_MEMORY_SIZE && g_memory.base != nullptr)
+    {
+        XDISPATCHER_HEADER* header = reinterpret_cast<XDISPATCHER_HEADER*>(g_memory.Translate(Handle));
+        if (header->Type == 5)
+        {
+            obj = QueryKernelObject<Semaphore>(*header);
+        }
+        else if (header->Type == 0 || header->Type == 1)
+        {
+            obj = QueryKernelObject<Event>(*header);
+        }
+        else if (header->WaitListHead.Flink == OBJECT_SIGNATURE)
+        {
+            uint32_t blink = header->WaitListHead.Blink.get();
+            if (IsValidKernelHandle(blink))
+            {
+                obj = GetKernelObject(blink);
+            }
+        }
+    }
+
+    if (!obj)
     {
         if (s_count <= 20 || s_count % 100 == 0)
         {
-            LOGF_WARNING("[NtReleaseSemaphore] #{} Invalid handle 0x{:08X}", s_count, Handle);
+            LOGF_WARNING("[NtReleaseSemaphore] #{} Invalid or unresolvable handle 0x{:08X}", s_count, Handle);
         }
         return STATUS_INVALID_HANDLE;
     }
     uint32_t callerLR = GET_CALLER_LR();
-    
-    KernelObject* obj = GetKernelObject(Handle);
-    if (!obj)
-    {
-        LOGF_WARNING("[NtReleaseSemaphore] #{} Null kernel object for handle 0x{:08X}", s_count, Handle);
-        return STATUS_INVALID_HANDLE;
-    }
     
     // Check if this is actually a semaphore
     Semaphore* sem = dynamic_cast<Semaphore*>(obj);
@@ -5251,9 +5372,14 @@ void StfsCreateDevice()
     LOG_UTILITY("!!! STUB !!!");
 }
 
-void NtFlushBuffersFile()
+uint32_t NtFlushBuffersFile(uint32_t FileHandle, XIO_STATUS_BLOCK* IoStatusBlock)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    if (IoStatusBlock)
+    {
+        IoStatusBlock->Status = STATUS_SUCCESS;
+        IoStatusBlock->Information = 0;
+    }
+    return STATUS_SUCCESS;
 }
 
 void KeQuerySystemTime(be<uint64_t>* time)
@@ -5423,7 +5549,10 @@ uint32_t ExCreateThread(be<uint32_t>* handle, uint32_t stackSize, be<uint32_t>* 
 
     LOGF_WARNING("[ExCreateThread] Creating thread entry=0x{:08X} r3=0x{:08X} r4=0x{:08X} flags=0x{:X}", 
                  entry, r3, r4, creationFlags);
-    *handle = GetKernelHandle(GuestThread::Start({ entry, r3, r4, creationFlags }, &hostThreadId));
+    GuestThreadHandle* thObj = GuestThread::Start({ entry, r3, r4, creationFlags }, &hostThreadId);
+    if (handle != nullptr) {
+        *handle = GetKernelHandle(thObj);
+    }
     LOGF_UTILITY("0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}, 0x{:X}, 0x{:X} {:X}",
         (intptr_t)handle, stackSize, (intptr_t)threadId, xApiThreadStartup, startAddress, startContext, creationFlags, hostThreadId);
     if (threadId != nullptr)
@@ -8157,3 +8286,495 @@ PPC_FUNC(RenderTriggerStub) {
 // =============================================================================
 // =============================================================================
 // =============================================================================
+
+// =============================================================================
+// RAGE Small Block Allocator (SBA) / Slab Page Formatter Hook
+// =============================================================================
+// sub_82380A50 formats newly allocated 4096-byte pages into singly linked chunks
+// for a small block allocator bucket. When chunk count <= 2, the underflowed
+// 'addic. r9, r3, -2' / 'mtctr' loop loops 4.2 billion times.
+// We provide a strong implementation that safely skips the loop if count <= 2.
+// =============================================================================
+PPC_EXTERN_FUNC(__savegprlr_26);
+PPC_EXTERN_FUNC(__restgprlr_26);
+PPC_EXTERN_FUNC(sub_82AA08A0);
+PPC_EXTERN_FUNC(sub_823C0348);
+
+// =============================================================================
+// Hash Table / Category String Hasher
+// =============================================================================
+// sub_82D925B8 formats 8 category strings and hashes them into an array at r31.
+// =============================================================================
+PPC_FUNC(sub_82D925B8) {
+	PPC_FUNC_PROLOGUE();
+	PPCCRRegister cr0{};
+	PPCCRRegister cr6{};
+	uint32_t ea{};
+	PPC_STORE_U32(ctx.r1.u32 + -8, ctx.r12.u32);
+	__savegprlr_26(ctx, base);
+	ea = -176 + ctx.r1.u32;
+	PPC_STORE_U32(ea, ctx.r1.u32);
+	ctx.r1.u32 = ea;
+	ctx.r11.s64 = -2088828928;
+	ctx.r30.u64 = ctx.r4.u64;
+	ctx.r10.s64 = ctx.r11.s64 + 3384;
+	ctx.r11.s64 = -2113601536;
+	ctx.r31.u64 = ctx.r3.u64;
+	ctx.r29.s64 = 8;
+	ctx.r27.s64 = ctx.r10.s64 - ctx.r3.s64;
+	ctx.r26.s64 = 0;
+	ctx.r28.s64 = ctx.r11.s64 + 20196;
+
+	LOGF_INFO("[TRACE sub_82D925B8] Start 8-iteration category hash: r3=0x{:08X} r4=0x{:08X}",
+	          ctx.r3.u32, ctx.r4.u32);
+
+	for (int iter = 0; iter < 8; ++iter) {
+		cr6.compare<uint32_t>(ctx.r30.u32, 0, ctx.xer);
+		PPC_STORE_U8(ctx.r1.u32 + 80, ctx.r26.u8);
+		if (!cr6.eq) {
+			ctx.r5.u64 = ctx.r28.u64;
+			ctx.r6.u64 = PPC_LOAD_U32(ctx.r27.u32 + ctx.r31.u32);
+			ctx.r7.u64 = ctx.r30.u64;
+			ctx.r4.s64 = 32;
+			ctx.r3.s64 = ctx.r1.s64 + 80;
+			uint64_t saved_r27 = ctx.r27.u64;
+			uint64_t saved_r28 = ctx.r28.u64;
+			uint64_t saved_r30 = ctx.r30.u64;
+			uint64_t saved_r31 = ctx.r31.u64;
+			sub_82AA08A0(ctx, base);
+			ctx.r4.s64 = 0;
+			ctx.r3.s64 = ctx.r1.s64 + 80;
+			sub_823C0348(ctx, base);
+			ctx.r27.u64 = saved_r27;
+			ctx.r28.u64 = saved_r28;
+			ctx.r30.u64 = saved_r30;
+			ctx.r31.u64 = saved_r31;
+		} else {
+			ctx.r3.u64 = ctx.r26.u64;
+		}
+
+		PPC_STORE_U32(ctx.r31.u32 + 0, ctx.r3.u32);
+		LOGF_INFO("[TRACE sub_82D925B8] iter {}/8: [0x{:08X}] = 0x{:08X}", 
+		          iter + 1, ctx.r31.u32, ctx.r3.u32);
+		ctx.r31.s64 = ctx.r31.s64 + 4;
+	}
+
+	ctx.r29.s64 = 0;
+	ctx.r1.s64 = ctx.r1.s64 + 176;
+	__restgprlr_26(ctx, base);
+	return;
+}
+
+
+PPC_FUNC(sub_82380A50)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCRegister ctr{};
+    PPCCRRegister cr0{};
+    PPCCRRegister cr6{};
+    uint32_t ea{};
+    PPC_STORE_U32(ctx.r1.u32 + -8, ctx.r12.u32);
+    PPC_STORE_U64(ctx.r1.u32 + -24, ctx.r30.u64);
+    PPC_STORE_U64(ctx.r1.u32 + -16, ctx.r31.u64);
+    ea = -112 + ctx.r1.u32;
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    ctx.r31.u64 = ctx.r3.u64;
+    ctx.r30.u64 = ctx.r4.u64;
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_82380A90;
+loc_82380A78:
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);
+    cr6.compare<int32_t>(ctx.r10.s32, 0, ctx.xer);
+    if (cr6.gt) goto loc_82380AB0;
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (!cr6.eq) goto loc_82380A78;
+loc_82380A90:
+    ctx.r5.s64 = 4096;
+    ctx.r4.s64 = 4080;
+    ctx.r3.u64 = ctx.r30.u64;
+    sub_82374FC0(ctx, base);
+    ctx.r11.u64 = ctx.r3.u64;
+    cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+    if (!cr6.eq) goto loc_82380AC8;
+    goto loc_82380B7C;
+loc_82380AB0:
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);
+    ctx.r10.s64 = ctx.r10.s64 + -1;
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    PPC_STORE_U32(ctx.r11.u32 + 8, ctx.r10.u32);
+    PPC_STORE_U32(ctx.r11.u32 + 12, ctx.r9.u32);
+    goto loc_82380B7C;
+loc_82380AC8:
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r30.u32 + 528);
+    ctx.r8.s64 = 1;
+    ctx.r7.s64 = ctx.r11.s64 - ctx.r10.s64;
+    ctx.xer.ca = (ctx.r7.s32 < 0) & ((ctx.r7.u32 & 0xFFF) != 0);
+    ctx.r10.s64 = ctx.r7.s32 >> 12;
+    ctx.r9.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 27) & 0x7FFFFFF;
+    ctx.r6.u64 = ctx.r10.u32 & 0x1F;
+    ctx.r5.s64 = ctx.r9.s64 + 133;
+    ctx.r4.u64 = ctx.r6.u8 & 0x20 ? 0 : (ctx.r8.u32 << (ctx.r6.u8 & 0x3F));
+    ctx.r10.u64 = __builtin_rotateleft64(ctx.r5.u32 | (ctx.r5.u64 << 32), 2) & 0xFFFFFFFC;
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r10.u32 + ctx.r30.u32);
+    ctx.r9.u64 = ctx.r4.u64 | ctx.r3.u64;
+    PPC_STORE_U32(ctx.r10.u32 + ctx.r30.u32, ctx.r9.u32);
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+    cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_82380B08;
+    PPC_STORE_U32(ctx.r10.u32 + 0, ctx.r11.u32);
+loc_82380B08:
+    ctx.r7.s64 = 0;
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r13.u32 + 0);
+    ctx.r8.s64 = 176;
+    PPC_STORE_U32(ctx.r11.u32 + 0, ctx.r7.u32);
+    ctx.r6.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+    PPC_STORE_U32(ctx.r11.u32 + 4, ctx.r6.u32);
+    ctx.r10.u64 = PPC_LOAD_U16(ctx.r31.u32 + 6);
+    ctx.r5.s64 = ctx.r10.s64 + -1;
+    PPC_STORE_U32(ctx.r11.u32 + 16, ctx.r31.u32);
+    PPC_STORE_U32(ctx.r11.u32 + 8, ctx.r5.u32);
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r8.u32 + ctx.r9.u32);
+    PPC_STORE_U32(ctx.r11.u32 + 20, ctx.r4.u32);
+    ctx.r10.u64 = PPC_LOAD_U16(ctx.r31.u32 + 4);
+    ctx.r10.u64 = ctx.r10.u64 + ctx.r11.u64;
+    ctx.r10.s64 = ctx.r10.s64 + 32;
+    PPC_STORE_U32(ctx.r11.u32 + 12, ctx.r10.u32);
+    ctx.r3.u64 = PPC_LOAD_U16(ctx.r31.u32 + 6);
+
+    {
+        uint16_t cSize = PPC_LOAD_U16(ctx.r31.u32 + 4);
+        uint16_t cCount = static_cast<uint16_t>(ctx.r3.u16);
+        static std::atomic<int> s_allocCalls{0};
+        if (s_allocCalls++ < 20) {
+            LOGF_INFO("[TRACE sub_82380A50] bucket=0x{:08X} chunkSize={} chunkCount={} page=0x{:08X}", 
+                      ctx.r31.u32, cSize, cCount, ctx.r11.u32);
+        }
+    }
+
+    ctx.xer.ca = ctx.r3.u32 > 1;
+    ctx.r9.s64 = ctx.r3.s64 + -2;
+    cr0.compare<int32_t>(ctx.r9.s32, 0, ctx.xer);
+    if (cr0.eq || ctx.r3.u32 <= 2) goto loc_82380B70;
+    ctx.r8.u64 = PPC_LOAD_U16(ctx.r31.u32 + 4);
+    ctr.u64 = ctx.r9.u64;
+loc_82380B5C:
+    ctx.r9.u64 = ctx.r8.u64 + ctx.r10.u64;
+    PPC_STORE_U32(ctx.r10.u32 + 0, ctx.r9.u32);
+    ctx.r8.u64 = PPC_LOAD_U16(ctx.r31.u32 + 4);
+    ctx.r10.u64 = ctx.r8.u64 + ctx.r10.u64;
+    --ctr.u64;
+    if (ctr.u32 != 0) goto loc_82380B5C;
+loc_82380B70:
+    PPC_STORE_U32(ctx.r10.u32 + 0, ctx.r7.u32);
+    ctx.r3.s64 = ctx.r11.s64 + 32;
+    PPC_STORE_U32(ctx.r31.u32 + 0, ctx.r11.u32);
+loc_82380B7C:
+    ctx.r1.s64 = ctx.r1.s64 + 112;
+    ctx.r12.u64 = PPC_LOAD_U32(ctx.r1.u32 + -8);
+    ctx.r30.u64 = PPC_LOAD_U64(ctx.r1.u32 + -24);
+    ctx.r31.u64 = PPC_LOAD_U64(ctx.r1.u32 + -16);
+    return;
+}
+
+// =============================================================================
+// RAGE Worker Thread Pool Startup Hook
+// =============================================================================
+PPC_EXTERN_FUNC(sub_83639F48);
+PPC_EXTERN_FUNC(sub_83196A28);
+
+PPC_FUNC(sub_831977F8)
+{
+    LOGF_WARNING("[sub_831977F8] Initializing RAGE worker thread pool (4 workers)");
+
+    // 1. Mark pool active: *(0x83BB1800 + 32808) = 1
+    PPC_STORE_U32(0x83BB1800 + 32808, 1);
+
+    // 2. Spawn exactly 4 worker threads for CPU cores 1, 2, 3, 5
+    uint32_t r30 = 0x83BB1800 + 32824;
+    for (uint32_t i = 0; i < 4; i++)
+    {
+        // Thread name in caller stack buffer (r1 + 80)
+        char nameBuf[64];
+        snprintf(nameBuf, sizeof(nameBuf), "WorkerThread_%u", i);
+        uint32_t nameGuestAddr = ctx.r1.u32 + 80;
+        memcpy(base + nameGuestAddr, nameBuf, strlen(nameBuf) + 1);
+
+        // Call sub_83639F48 to create event
+        PPCContext eventCtx = ctx;
+        eventCtx.r3.u64 = 0;
+        eventCtx.r4.u64 = 0;
+        eventCtx.r5.u64 = 0;
+        eventCtx.r6.u64 = 0;
+        sub_83639F48(eventCtx, base);
+        uint32_t eventHandle = eventCtx.r3.u32;
+
+        // Store event handle at 0x83BB1800 + 32812 + (i * 4)
+        PPC_STORE_U32(r30 - 12, eventHandle);
+
+        // Core assignment: 1, 2, 3, 5
+        uint32_t core = (i + 1 == 4) ? 5 : (i + 1);
+        PPCContext threadCtx = ctx;
+        threadCtx.r3.u64 = 0x83197450;
+        threadCtx.r4.u64 = i;
+        threadCtx.r5.u64 = 65536;
+        threadCtx.r6.u64 = 1;
+        threadCtx.r7.u64 = nameGuestAddr;
+        threadCtx.r8.u64 = core;
+        threadCtx.r9.u64 = 0;
+        sub_83196A28(threadCtx, base);
+        uint32_t threadHandle = threadCtx.r3.u32;
+
+        // Store thread handle at r30 + 4
+        r30 += 4;
+        PPC_STORE_U32(r30, threadHandle);
+        LOGF_INFO("[sub_831977F8] Worker {} event=0x{:08X} threadHandle=0x{:08X} core={}", 
+                  i, eventHandle, threadHandle, core);
+    }
+    LOGF_WARNING("[sub_831977F8] Successfully initialized 4 worker threads! Worker pool ready.");
+}
+
+// =============================================================================
+// RAGE Memory Allocator Hooks (sub_8255DC20 / sub_8255DC88)
+// =============================================================================
+// In RAGE engine, global operator new / sysMemAllocator::Allocate is routed
+// through sub_8255DC20, which loads the thread allocator from [r13+0] + 120 (0x78)
+// and invokes allocator->Allocate(size, alignment, flags).
+// Similarly, operator delete is routed through sub_8255DC88 -> allocator->Free(ptr).
+//
+// If the thread TLS allocator is not yet initialized (or points to an unmapped
+// vtable), calling the indirect function pointer causes an immediate SIGSEGV.
+// Here we provide direct allocation using g_userHeap when the vtable is unmapped,
+// ensuring early engine allocations (e.g. sub_8343F7F8 container initialization)
+// succeed smoothly.
+// =============================================================================
+
+extern "C" void __imp__sub_8255DC20(PPCContext& ctx, uint8_t* base);
+extern "C" void __imp__sub_8255DC88(PPCContext& ctx, uint8_t* base);
+
+PPC_FUNC(sub_8255DC20)
+{
+    static uint32_t s_allocCount = 0;
+    ++s_allocCount;
+
+    uint32_t size = ctx.r3.u32;
+    uint32_t alignment = ctx.r4.u32 ? ctx.r4.u32 : 16;
+    if (alignment < 16) alignment = 16;
+
+    // Check if the thread has a valid allocator vtable in TLS
+    uint32_t threadCtx = (ctx.r13.u32 != 0) ? PPC_LOAD_U32(ctx.r13.u32 + 0) : 0;
+    uint32_t allocator = (threadCtx != 0) ? PPC_LOAD_U32(threadCtx + 120) : 0;
+    uint32_t vtable = (allocator != 0) ? PPC_LOAD_U32(allocator + 0) : 0;
+    uint32_t allocFn = (vtable != 0) ? PPC_LOAD_U32(vtable + 8) : 0;
+
+    if (s_allocCount <= 20 || (s_allocCount % 500 == 0))
+    {
+        LOGF_INFO("[ALLOC] sub_8255DC20 #{} size={} align={} threadCtx=0x{:08X} alloc=0x{:08X} allocFn=0x{:08X}",
+                  s_allocCount, size, alignment, threadCtx, allocator, allocFn);
+    }
+
+    if (allocFn != 0)
+    {
+        __imp__sub_8255DC20(ctx, base);
+        return;
+    }
+
+    // Direct guest heap allocation
+    void* hostPtr = nullptr;
+    if (alignment > 16)
+    {
+        hostPtr = g_userHeap.AllocPhysical(size, alignment);
+    }
+    if (!hostPtr)
+    {
+        hostPtr = g_userHeap.Alloc(size);
+    }
+    if (!hostPtr && alignment <= 16)
+    {
+        hostPtr = g_userHeap.AllocPhysical(size, alignment);
+    }
+
+    if (hostPtr)
+    {
+        uint32_t guestAddr = g_memory.MapVirtual(reinterpret_cast<uint8_t*>(hostPtr));
+        ctx.r3.u32 = guestAddr;
+        if (s_allocCount <= 30 || (s_allocCount % 500 == 0) || size > 500000)
+        {
+            LOGF_INFO("[ALLOC] sub_8255DC20 #{} size={} align={} -> 0x{:08X}", 
+                      s_allocCount, size, alignment, guestAddr);
+        }
+    }
+    else
+    {
+        ctx.r3.u32 = 0;
+        LOGF_ERROR("[ALLOC] sub_8255DC20 #{} FAILED for size={}", s_allocCount, size);
+    }
+}
+
+PPC_FUNC(sub_8255DC88)
+{
+    uint32_t guestAddr = ctx.r3.u32;
+    if (guestAddr == 0) return;
+
+    // Don't attempt to free static image memory
+    if (guestAddr >= 0x82000000 && guestAddr < 0x83DB8000)
+    {
+        return;
+    }
+
+    uint32_t threadCtx = (ctx.r13.u32 != 0) ? PPC_LOAD_U32(ctx.r13.u32 + 0) : 0;
+    uint32_t allocator = (threadCtx != 0) ? PPC_LOAD_U32(threadCtx + 120) : 0;
+    uint32_t vtable = (allocator != 0) ? PPC_LOAD_U32(allocator + 0) : 0;
+    uint32_t freeFn = (vtable != 0) ? PPC_LOAD_U32(vtable + 16) : 0;
+
+    LOGF_INFO("[FREE] sub_8255DC88 ptr=0x{:08X} threadCtx=0x{:08X} alloc=0x{:08X} vtable=0x{:08X} freeFn=0x{:08X}",
+              guestAddr, threadCtx, allocator, vtable, freeFn);
+
+    if (freeFn != 0)
+    {
+        __imp__sub_8255DC88(ctx, base);
+        return;
+    }
+
+    // Only free if pointer falls within our host heaps and is 16-byte aligned
+    if ((guestAddr % 16) == 0 && ((guestAddr >= 0x20000 && guestAddr < 0x7FEA0000) || guestAddr >= 0x83DB8000))
+    {
+        void* hostPtr = g_memory.Translate(guestAddr);
+        if (hostPtr)
+        {
+            g_userHeap.Free(hostPtr);
+        }
+    }
+    else
+    {
+        LOGF_WARNING("[FREE] sub_8255DC88 skipping unmanaged/unaligned free ptr=0x{:08X}", guestAddr);
+    }
+}
+
+// =============================================================================
+// CRT & RAGE Memcpy Hooks (sub_83642890, sub_83641FE0, sub_823CFAF0)
+// =============================================================================
+// On PowerPC / Xenon, CRT memcpy / XMemCpy / RAGE memcpy use AltiVec vector
+// instructions and the dcbzl (data cache block zero) instruction to zero 128-byte
+// cache lines ahead of the destination. In lifted C++, dcbzl is translated to:
+//   memset(base + ((...) & ~127), 0, 128);
+// which overwrites memory past buffer bounds and triggers segmentation faults
+// on unaligned or boundary-crossing buffers during file streaming and engine init.
+// Replacing these functions with native std::memmove guarantees memory safety,
+// eliminates out-of-bounds dcbzl zeroing, and achieves maximum host throughput.
+// =============================================================================
+
+PPC_FUNC(sub_83642890)
+{
+    uint32_t dst = ctx.r3.u32;
+    uint32_t src = ctx.r4.u32;
+    uint32_t size = ctx.r5.u32;
+
+    if (size > 0 && dst != 0 && src != 0)
+    {
+        if ((uint64_t)dst + size <= PPC_MEMORY_SIZE && (uint64_t)src + size <= PPC_MEMORY_SIZE)
+        {
+            std::memmove(base + dst, base + src, size);
+        }
+        else
+        {
+            LOGF_ERROR("[MEMCPY] sub_83642890 OUT OF BOUNDS! dst=0x{:08X} src=0x{:08X} size={}", dst, src, size);
+        }
+    }
+    // ctx.r3 remains dst
+}
+
+PPC_FUNC(sub_83641FE0)
+{
+    uint32_t dst = ctx.r3.u32;
+    uint32_t src = ctx.r4.u32;
+    uint32_t size = ctx.r5.u32;
+
+    if (size > 0 && dst != 0 && src != 0)
+    {
+        if ((uint64_t)dst + size <= PPC_MEMORY_SIZE && (uint64_t)src + size <= PPC_MEMORY_SIZE)
+        {
+            std::memmove(base + dst, base + src, size);
+        }
+        else
+        {
+            LOGF_ERROR("[MEMCPY] sub_83641FE0 OUT OF BOUNDS! dst=0x{:08X} src=0x{:08X} size={}", dst, src, size);
+        }
+    }
+    // ctx.r3 remains dst
+}
+
+PPC_FUNC(sub_823CFAF0)
+{
+    uint32_t dst = ctx.r3.u32;
+    uint32_t src = ctx.r4.u32;
+    int32_t size = ctx.r5.s32;
+
+    static uint32_t s_memcpyCount = 0;
+    if (++s_memcpyCount <= 20 || s_memcpyCount % 500 == 0 || size > 1000000)
+    {
+        LOGF_INFO("[MEMCPY] sub_823CFAF0 #{} dst=0x{:08X} src=0x{:08X} size={}", 
+                  s_memcpyCount, dst, src, size);
+    }
+
+    if (size > 0 && dst != 0 && src != 0)
+    {
+        // Guard against out-of-bounds guest memory access
+        if ((uint64_t)dst + (uint32_t)size <= PPC_MEMORY_SIZE && (uint64_t)src + (uint32_t)size <= PPC_MEMORY_SIZE)
+        {
+            std::memmove(base + dst, base + src, size);
+        }
+        else
+        {
+            LOGF_ERROR("[MEMCPY] sub_823CFAF0 OUT OF BOUNDS! dst=0x{:08X} src=0x{:08X} size={}", dst, src, size);
+        }
+    }
+    // ctx.r3 remains dst
+}
+
+PPC_FUNC(sub_831E3240)
+{
+    uint32_t stream = ctx.r3.u32;
+    if (stream == 0 || stream >= PPC_MEMORY_SIZE)
+    {
+        ctx.r3.s64 = 0;
+        return;
+    }
+
+    uint32_t device = PPC_LOAD_U32(stream + 0);
+    uint32_t handle = PPC_LOAD_U32(stream + 4);
+
+    LOGF_INFO("[TRACE] sub_831E3240 (fiStream::Close): stream=0x{:08X} device=0x{:08X} handle=0x{:08X}",
+              stream, device, handle);
+
+    if (device != 0 && device < PPC_MEMORY_SIZE)
+    {
+        uint32_t vtable = PPC_LOAD_U32(device + 0);
+        if (vtable >= PPC_CODE_BASE && vtable < PPC_MEMORY_SIZE)
+        {
+            uint32_t closeFn = PPC_LOAD_U32(vtable + 48);
+            if (closeFn >= PPC_CODE_BASE && closeFn < PPC_CODE_BASE + PPC_CODE_SIZE)
+            {
+                ctx.r3.u64 = device;
+                ctx.r4.u64 = handle;
+                PPC_CALL_INDIRECT_FUNC(closeFn);
+            }
+            else
+            {
+                LOGF_WARNING("[TRACE] sub_831E3240: device=0x{:08X} vtable=0x{:08X} invalid closeFn=0x{:08X}",
+                             device, vtable, closeFn);
+            }
+        }
+    }
+
+    // Clear handle and device in stream struct
+    PPC_STORE_U32(stream + 4, 0xFFFFFFFF);
+    PPC_STORE_U32(stream + 0, 0);
+    ctx.r3.s64 = 0;
+}
+
+
+
+
