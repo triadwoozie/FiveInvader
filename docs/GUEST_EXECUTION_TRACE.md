@@ -151,3 +151,43 @@ The runtime cleanly progresses through:
 - **Shader Streaming**: Successfully loaded `game:\common\shaders\fxl_final_final\im.fxc` (multiple 8 KB blocks at `0xA90000`, `0xA92000`, `0xA94000`) and `preload.list` directly from `common.rpf` via `NtReadFile`.
 - **Engine Synchronization**: Over 226 kernel semaphores tracked and synchronized. RAGE audio and render worker threads running their 30ms wait cycles continuously with zero crashes.
 
+---
+
+## Phase 4C Advance: Vector Destructor Guards, Directory Read EOF, Hash Map Rehash, and RPF7 TOC Binary Search
+
+### 1. Critical Section NULL Dereference Guards
+- **Issue**: Calls to `RtlLeaveCriticalSection` and `RtlEnterCriticalSection` during teardown of temporary allocator scopes occasionally passed a NULL `XRTL_CRITICAL_SECTION*` pointer, triggering host segmentation faults inside `be<int>::get()`.
+- **Fix**: Added null-pointer validation checks to `RtlLeaveCriticalSection`, `RtlEnterCriticalSection`, `RtlTryEnterCriticalSection`, `RtlInitializeCriticalSection`, and `RtlInitializeCriticalSectionAndSpinCount` in `imports.cpp`.
+
+### 2. Vector Deleting Destructor Protections (`sub_829A3AC8` & `sub_827AA6C0`)
+- **Issue**: `sub_829A3AC8` (16-byte elements) and `sub_827AA6C0` (20-byte elements) iterate over arrays calling object destructors (`vtable[0]`). On uninitialized elements with NULL vtables, `PPC_LOOKUP_FUNC` underflowed `(0 - PPC_CODE_BASE) * 2`, dereferencing unmapped memory at offset ~4GB.
+- **Fix**: Replaced weak recomp symbols with strong C++ implementations in `imports.cpp`. Both destructors now validate `arr >= 0x10000`, check `vtable` and `dtor` against `[PPC_CODE_BASE, PPC_CODE_BASE + PPC_CODE_SIZE]`, and ensure `target != nullptr` before invoking the virtual destructor.
+
+### 3. Channel State Reset & BSS Bounds Check (`sub_832301B8`)
+- **Issue**: In `sub_8299D028`, audio/player channel state was cleared by passing an uninitialized count from cold BSS memory (`count = 235341577`), writing past memory limits and crashing.
+- **Fix**: Implemented strong `PPC_FUNC(sub_832301B8)` in `imports.cpp` enforcing `count <= 128` and skipping any channel slots where base address `< 0x10000`.
+
+### 4. Elimination of 1.44M Spin Loop in Directory `NtReadFile`
+- **Issue**: RAGE's `fiStream` opened directory root `game:\` (`0xA8CD7730`), and repeatedly called `NtReadFile`. Because `NtReadFile` returned `STATUS_INVALID_PARAMETER` without delay or EOF notification, RAGE looped 1.44 million times per 10 seconds.
+- **Fix**: In `imports.cpp:NtReadFile`, directory handles now signal their completion event, set `IoStatusBlock->Information = 0`, and return `STATUS_END_OF_FILE`. RAGE cleanly concludes enumeration and calls `fiStream::Close`.
+
+### 5. Hash Map Rehash Cycle Protection (`sub_83159B48`)
+- **Issue**: During rehash/resize of RAGE hash maps in `sub_827E1F60` -> `sub_83159B48`, circular linked lists or concurrent node updates caused the bucket reallocation loop to spin infinitely on the main guest thread.
+- **Fix**: Implemented strong `PPC_FUNC(sub_83159B48)` in `imports.cpp`. Allocates new bucket memory via `sub_8255DC60`, clears it, and safely migrates all nodes with cycle detection (`loopLimit < 10000`), updating `map + 4` (capacity) and freeing old buckets via `sub_8255DCC0`.
+
+### 6. Guarded XML Token Parser Dispatch (`sub_831C1A68`)
+- **Issue**: Inside XML header parsing, `sub_831C1A68` invoked an indirect function pointer `PPC_CALL_INDIRECT_FUNC(ctr.u32)`. When parsing invalid or empty token lists, `ctr.u32` was 0, crashing host execution.
+- **Fix**: Implemented strong `PPC_FUNC(sub_831C1A68)` in `imports.cpp` validating `fn >= PPC_CODE_BASE && fn < PPC_CODE_BASE + PPC_CODE_SIZE` and checking `target != nullptr`.
+
+### 7. Crash-Proof RPF7 Binary Search TOC Lookup (`sub_831E0BE8`)
+- **Issue**: XenonRecomp lifted `rpfArchive::FindEntry` (`sub_831E0BE8`) with multiple exit branches when an entry is not found. On `r5 > r31`, the function exited without clearing `r3`. Callers like `sub_831E1340` (`fiDevice::GetFileAttributes`) treated the non-zero `r3` as a valid entry pointer, immediately dereferencing `0(r3)` and segfaulting.
+- **Fix**: Implemented strong `PPC_FUNC(sub_831E0BE8)` in `imports.cpp`. Performs case-insensitive binary search across RPF7 TOC entries, verifies directory traversal flags (`(entryHdr >> 40) & 0x7FFFFF == 0x7FFFFF`), and guarantees `ctx.r3 = 0` whenever an entry is not found.
+
+### 8. Milestone Reached: Primary GPU Ring Buffer (256 MB) & Full RPF Asset Pipeline
+With these resolutions in place, the runtime achieves:
+- **Mounting**: `common.rpf` (1923 entries), `xbox360a.rpf` (155 entries), `xbox360b.rpf` (141 entries), and Disc 1 install partitions (`part0.rpf`–`part3.rpf`).
+- **Configuration Parsing**: `installpartitions.meta`, `settings.meta`, and `gameconfig.xml` cleanly parsed and closed.
+- **Primary GPU Ring Buffer**: Successfully initialized 256 MB GPU command buffer at `0x834ECCE0` (`sizeLog2=28`, `size=0x10000000`) with writeback at `0x05EEE5BC`.
+- **Phase 4C Script & Asset Streaming**: Over 84 guest threads active, streaming main game packages and shaders continuously without crashes.
+
+

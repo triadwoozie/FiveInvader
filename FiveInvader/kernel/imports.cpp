@@ -1694,7 +1694,7 @@ struct Semaphore final : KernelObject, HostObject<XKSEMAPHORE>
                 {
                     if (std::chrono::steady_clock::now() >= deadline)
                         return STATUS_TIMEOUT;
-                    count.wait(0);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             }
         }
@@ -2850,11 +2850,15 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
     static int s_waitCount = 0;
     ++s_waitCount;
     uint32_t callerLR = GET_CALLER_LR();
+    bool isMainThread = (g_kernelMainThreadIdSet && std::this_thread::get_id() == g_kernelMainThreadId);
     
-    if (s_waitCount <= 20 || s_waitCount % 500 == 0)
+    if (s_waitCount <= 30 || s_waitCount % 500 == 0)
     {
-        LOGF_IMPL(Utility, "NtWaitEx", "#{} handle=0x{:08X} timeout={} caller=0x{:08X}",
-                  s_waitCount, Handle, timeout, callerLR);
+        std::stringstream ssTid, ssMain;
+        ssTid << std::this_thread::get_id();
+        ssMain << g_kernelMainThreadId;
+        LOGF_WARNING("[NtWaitEx] #{} handle=0x{:08X} timeout={} isMain={} tid={} mainTid={}",
+                  s_waitCount, Handle, timeout, isMainThread, ssTid.str(), ssMain.str());
     }
     
     // POST-INIT FIX: timeout=0 polls are frame sync checks
@@ -2926,9 +2930,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
     }
 
     // KERNEL POLICY: Fail-open during Boot/Init only for the main thread (workers must sleep on queues)
-    bool isMainThread = (g_kernelMainThreadIdSet && std::this_thread::get_id() == g_kernelMainThreadId);
-    bool isSemaphore = (dynamic_cast<Semaphore*>(obj) != nullptr);
-    if (timeout == INFINITE && ShouldFailOpenWait() && isMainThread && !isSemaphore) {
+    if (timeout == INFINITE && ShouldFailOpenWait() && isMainThread) {
         uint32_t result = obj->Wait(10);  // Short wait instead of infinite
         if (result == STATUS_TIMEOUT) {
             static int s_failOpenObj = 0;
@@ -3920,15 +3922,25 @@ uint32_t NtReadFile(
         return STATUS_SUCCESS;
     }
 
-    // Directories can't be read as files.
+    // Directories can't be read as files. Return EOF so callers terminate scan/read loops.
     if (auto dit = g_ntDirHandles.find(FileHandle); dit != g_ntDirHandles.end() && dit->second && dit->second->magic == kNtDirHandleMagic)
     {
+        static int s_dirReadCount = 0;
+        if (++s_dirReadCount <= 10 || s_dirReadCount % 1000 == 0) {
+            uint32_t callerLR = GET_CALLER_LR();
+            LOGF_WARNING("[NtReadFile] Reading directory handle 0x{:08X} ('{}') as file (count={}) caller=0x{:08X} -> returning STATUS_END_OF_FILE",
+                         FileHandle, dit->second->path.string(), s_dirReadCount, callerLR);
+        }
         if (IoStatusBlock)
         {
-            IoStatusBlock->Status = STATUS_INVALID_PARAMETER;
+            IoStatusBlock->Status = STATUS_END_OF_FILE;
             IoStatusBlock->Information = 0;
         }
-        return STATUS_INVALID_PARAMETER;
+        signalCompletionEvent();
+        if (s_dirReadCount > 5) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return STATUS_END_OF_FILE;
     }
 
     auto it = g_ntFileHandles.find(FileHandle);
@@ -4175,6 +4187,9 @@ uint32_t KeSetAffinityThread(uint32_t Thread, uint32_t Affinity, be<uint32_t>* l
 
 void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
 {
+    if (!cs)
+        return;
+
     // printf("RtlLeaveCriticalSection");
     cs->RecursionCount = cs->RecursionCount.get() - 1;
 
@@ -4188,6 +4203,9 @@ void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
 
 void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 {
+    if (!cs)
+        return;
+
     static int s_count = 0;
     static int s_waitCount = 0;
     ++s_count;
@@ -4269,6 +4287,9 @@ void RtlCompareMemoryUlong()
 
 uint32_t RtlInitializeCriticalSection(XRTL_CRITICAL_SECTION* cs)
 {
+    if (!cs)
+        return 0xC0000008;
+
     // printf("RtlInitializeCriticalSection %x\n", cs);
     cs->Header.Absolute = 0;
     cs->LockCount = -1;
@@ -5082,6 +5103,9 @@ void XexGetModuleHandle()
 
 bool RtlTryEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 {
+    if (!cs)
+        return false;
+
     // printf("RtlTryEnterCriticalSection\n");
     be<uint32_t> thisThread = g_ppcContext->r13.u32;
     assert(thisThread != NULL);
@@ -5101,6 +5125,9 @@ bool RtlTryEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 
 void RtlInitializeCriticalSectionAndSpinCount(XRTL_CRITICAL_SECTION* cs, uint32_t spinCount)
 {
+    if (!cs)
+        return;
+
     // printf("RtlInitializeCriticalSectionAndSpinCount\n");
     cs->Header.Absolute = (spinCount + 255) >> 8;
     cs->LockCount = -1;
@@ -8918,14 +8945,14 @@ PPC_FUNC(sub_8250D988)
             // Advance GPU read pointer to catch up with CPU write pointer
             PPC_STORE_U32(pReadPtr + 0, writePtr);
         }
+    }
 
-        if (g_gpuRingBuffer.readPtrWritebackAddr != 0)
+    if (g_gpuRingBuffer.readPtrWritebackAddr != 0)
+    {
+        uint32_t* hostPtr = reinterpret_cast<uint32_t*>(g_memory.Translate(g_gpuRingBuffer.readPtrWritebackAddr));
+        if (hostPtr)
         {
-            uint32_t* hostPtr = reinterpret_cast<uint32_t*>(g_memory.Translate(g_gpuRingBuffer.readPtrWritebackAddr));
-            if (hostPtr)
-            {
-                *hostPtr = writePtr;
-            }
+            *hostPtr = writePtr;
         }
     }
 
@@ -9439,6 +9466,427 @@ PPC_FUNC(sub_823F4118)
 
     ctx.r3.s64 = count;
 }
+
+PPC_FUNC(sub_829A3AC8)
+{
+    uint32_t arr = ctx.r4.u32;
+    int32_t count = ctx.r5.s32;
+
+    static int s_dtorCount = 0;
+    ++s_dtorCount;
+    if (s_dtorCount <= 30 || s_dtorCount % 500 == 0) {
+        LOGF_WARNING("[sub_829A3AC8] Vector dtor #{} arr=0x{:08X} count={}", s_dtorCount, arr, count);
+    }
+
+    if (arr >= 0x10000 && count > 0 && count < 100000)
+    {
+        uint32_t oldSp = ctx.r1.u32;
+        ctx.r1.u32 -= 112;
+        PPC_STORE_U32(ctx.r1.u32, oldSp);
+
+        uint32_t elem = arr;
+        for (int32_t i = 0; i < count; ++i)
+        {
+            uint32_t vtable = PPC_LOAD_U32(elem);
+            if (vtable >= PPC_CODE_BASE && vtable < (PPC_CODE_BASE + PPC_CODE_SIZE))
+            {
+                uint32_t dtor = PPC_LOAD_U32(vtable);
+                if (dtor >= PPC_CODE_BASE && dtor < (PPC_CODE_BASE + PPC_CODE_SIZE))
+                {
+                    auto target = PPC_LOOKUP_FUNC(base, dtor);
+                    if (target != nullptr)
+                    {
+                        ctx.r3.u64 = elem;
+                        ctx.r4.u64 = 0;
+                        target(ctx, base);
+                    }
+                }
+            }
+            elem += 16;
+        }
+
+        ctx.r1.u32 = oldSp;
+    }
+
+    // Free array memory
+    if (arr >= 0x10000)
+    {
+        ctx.r3.u64 = arr;
+        sub_8255DCC0(ctx, base);
+    }
+}
+
+PPC_FUNC(sub_827AA6C0)
+{
+    uint32_t arr = ctx.r4.u32;
+    int32_t count = ctx.r5.s32;
+
+    static int s_dtorCount = 0;
+    ++s_dtorCount;
+    if (s_dtorCount <= 30 || s_dtorCount % 500 == 0) {
+        LOGF_WARNING("[sub_827AA6C0] Vector dtor #{} arr=0x{:08X} count={}", s_dtorCount, arr, count);
+    }
+
+    if (arr >= 0x10000 && count > 0 && count < 100000)
+    {
+        uint32_t oldSp = ctx.r1.u32;
+        ctx.r1.u32 -= 112;
+        PPC_STORE_U32(ctx.r1.u32, oldSp);
+
+        uint32_t elem = arr;
+        for (int32_t i = 0; i < count; ++i)
+        {
+            uint32_t vtable = PPC_LOAD_U32(elem);
+            if (vtable >= PPC_CODE_BASE && vtable < (PPC_CODE_BASE + PPC_CODE_SIZE))
+            {
+                uint32_t dtor = PPC_LOAD_U32(vtable);
+                if (dtor >= PPC_CODE_BASE && dtor < (PPC_CODE_BASE + PPC_CODE_SIZE))
+                {
+                    auto target = PPC_LOOKUP_FUNC(base, dtor);
+                    if (target != nullptr)
+                    {
+                        ctx.r3.u64 = elem;
+                        ctx.r4.u64 = 0;
+                        target(ctx, base);
+                    }
+                }
+            }
+            elem += 20; // 20-byte structs
+        }
+
+        ctx.r1.u32 = oldSp;
+    }
+
+    // Free array memory
+    if (arr >= 0x10000)
+    {
+        ctx.r3.u64 = arr;
+        sub_8255DCC0(ctx, base);
+    }
+}
+
+
+PPC_FUNC(sub_832301B8)
+{
+    uint32_t r3 = ctx.r3.u32;
+    if (r3 < 0x10000) return;
+
+    int32_t count = static_cast<int32_t>(PPC_LOAD_U32(r3));
+    if (count <= 0 || count > 128) {
+        // 776-byte channel holds at most ~64-128 slots. If count > 128 it is uninitialized BSS garbage.
+        return;
+    }
+
+    static int s_callCount = 0;
+    if (++s_callCount <= 10) {
+        LOGF_INFO("[sub_832301B8] #{} r3=0x{:08X} count={}", s_callCount, r3, count);
+    }
+
+    // r7 points to static default state at 0x8383D120
+    uint32_t r7 = 0x8383D120;
+
+    for (int32_t r4 = 0; r4 < count; ++r4)
+    {
+        uint32_t r5 = r3 + 8 + (r4 * 4);
+        uint32_t r11 = PPC_LOAD_U32(r5 + 512);
+        if (s_callCount <= 2 && r4 < 10) {
+            LOGF_WARNING("[sub_832301B8] r4={} r5=0x{:08X} r11=0x{:08X}", r4, r5, r11);
+        }
+        if (r11 < 0x10000) {
+            // Null or invalid slot - skip to prevent writing to page zero
+            continue;
+        }
+
+        uint8_t flag38 = PPC_LOAD_U8(r11 + 38);
+        uint8_t flag39 = PPC_LOAD_U8(r11 + 39);
+        bool cond = (flag38 != 0 && flag39 == 0);
+        if (!cond) {
+            uint32_t val40 = PPC_LOAD_U32(r11 + 40);
+            if ((val40 & 1) != 0) {
+                continue;
+            }
+        }
+
+        PPC_STORE_U32(r11 + 4, 0);
+        uint32_t r9_0 = PPC_LOAD_U32(r7 + 0);
+        PPC_STORE_U32(r11 + 12, r9_0);
+        uint32_t r9_4 = PPC_LOAD_U32(r7 + 4);
+        PPC_STORE_U32(r11 + 16, r9_4);
+        uint32_t r8 = PPC_LOAD_U32(r11 + 44);
+        uint32_t r10_8 = PPC_LOAD_U32(r7 + 8);
+        PPC_STORE_U32(r11 + 20, r10_8);
+
+        if (r8 >= 0x10000) {
+            uint8_t byte37 = PPC_LOAD_U8(r11 + 37);
+            uint32_t idx = static_cast<uint32_t>(byte37) * 20;
+            uint32_t baseAddr = r8 + idx;
+            PPC_STORE_U32(baseAddr + 0, 0);
+            PPC_STORE_U32(baseAddr + 8, r9_0);
+            PPC_STORE_U32(baseAddr + 12, r9_4);
+            PPC_STORE_U32(baseAddr + 16, r10_8);
+        }
+    }
+}
+
+PPC_FUNC(sub_83159B48)
+{
+    uint32_t mapPtr = ctx.r3.u32;
+    uint32_t newCap = ctx.r4.u32 & 0xFFFF;
+    uint16_t rawNewCap = ctx.r4.u16;
+
+    static int s_rehashCount = 0;
+    ++s_rehashCount;
+    if (s_rehashCount <= 50 || s_rehashCount % 100 == 0) {
+        uint16_t oldCap = (mapPtr >= 0x10000) ? PPC_LOAD_U16(mapPtr + 4) : 0;
+        uint16_t oldElemCount = (mapPtr >= 0x10000) ? PPC_LOAD_U16(mapPtr + 6) : 0;
+        LOGF_WARNING("[sub_83159B48] Rehash #{} map=0x{:08X} oldCap={} oldElems={} newCap={}",
+                     s_rehashCount, mapPtr, oldCap, oldElemCount, newCap);
+    }
+
+    if (mapPtr < 0x10000 || newCap == 0)
+        return;
+
+    // Allocate new bucket array (newCap * 4 bytes, aligned to 4)
+    uint32_t allocSize = (newCap <= 0x3FFF) ? (newCap * 4) : 0xFFFFFFFF;
+    ctx.r3.u64 = allocSize;
+    ctx.r4.u64 = 4;
+    sub_8255DC60(ctx, base);
+    uint32_t newBuckets = ctx.r3.u32;
+    if (newBuckets < 0x10000) {
+        LOGF_ERROR("[sub_83159B48] Allocation failed for newBuckets! size={}", allocSize);
+        return;
+    }
+
+    // Zero the new buckets array
+    memset(base + newBuckets, 0, newCap * 4);
+
+    uint16_t oldCap = PPC_LOAD_U16(mapPtr + 4);
+    uint32_t oldBuckets = PPC_LOAD_U32(mapPtr + 0);
+
+    if (oldCap != 0 && oldBuckets >= 0x10000)
+    {
+        for (uint32_t bucketIdx = 0; bucketIdx < oldCap; ++bucketIdx)
+        {
+            uint32_t node = PPC_LOAD_U32(oldBuckets + bucketIdx * 4);
+            int loopLimit = 0;
+            while (node >= 0x10000 && loopLimit++ < 10000)
+            {
+                uint32_t nextNode = PPC_LOAD_U32(node + 8);
+                uint32_t hash = PPC_LOAD_U32(node + 0);
+                uint32_t newIdx = hash % newCap;
+                uint32_t currentHead = PPC_LOAD_U32(newBuckets + newIdx * 4);
+                PPC_STORE_U32(node + 8, currentHead);
+                PPC_STORE_U32(newBuckets + newIdx * 4, node);
+                node = nextNode;
+            }
+            if (loopLimit >= 10000) {
+                LOGF_ERROR("[sub_83159B48] CYCLE DETECTED in bucketIdx={} oldBuckets=0x{:08X} node=0x{:08X}",
+                           bucketIdx, oldBuckets, node);
+            }
+        }
+    }
+
+    // Update map fields
+    PPC_STORE_U16(mapPtr + 4, rawNewCap);
+    if (oldBuckets >= 0x10000) {
+        ctx.r3.u64 = oldBuckets;
+        sub_8255DCC0(ctx, base);
+    }
+    PPC_STORE_U32(mapPtr + 0, newBuckets);
+}
+
+PPC_FUNC(sub_831C1A68)
+{
+    // Stack allocation of 128 bytes
+    uint32_t oldSp = ctx.r1.u32;
+    ctx.r1.u32 -= 128;
+    PPC_STORE_U32(ctx.r1.u32, oldSp);
+
+    uint32_t in_r3 = ctx.r3.u32;
+    uint32_t in_r4 = ctx.r4.u32;
+
+    PPC_STORE_U32(ctx.r1.u32 + 88, in_r3);
+    PPC_STORE_U32(ctx.r1.u32 + 80, 0);
+    PPC_STORE_U32(ctx.r1.u32 + 84, 0);
+
+    ctx.r3.u64 = ctx.r1.u32 + 80;
+    sub_82FAFBF8(ctx, base);
+
+    uint32_t r31 = PPC_LOAD_U32(ctx.r1.u32 + 84);
+    uint32_t returnVal = 0xFFFFFFFF; // -1
+
+    static int s_c1a68Count = 0;
+    ++s_c1a68Count;
+    if (s_c1a68Count <= 30 || s_c1a68Count % 100 == 0) {
+        LOGF_INFO("[sub_831C1A68] #{} r3=0x{:08X} r4=0x{:08X} r31=0x{:08X}",
+                  s_c1a68Count, in_r3, in_r4, r31);
+    }
+
+    int loopCount = 0;
+    while (r31 != 0 && r31 >= 0x10000 && loopCount++ < 1000)
+    {
+        uint32_t fn = PPC_LOAD_U32(r31 + 8);
+        uint32_t arg = PPC_LOAD_U32(r31 + 4);
+
+        if (fn >= PPC_CODE_BASE && fn < (PPC_CODE_BASE + PPC_CODE_SIZE))
+        {
+            auto target = PPC_LOOKUP_FUNC(base, fn);
+            if (target != nullptr)
+            {
+                if (arg != 0) {
+                    ctx.r3.u64 = arg;
+                    ctx.r4.u64 = in_r4;
+                } else {
+                    ctx.r3.u64 = in_r4;
+                }
+                target(ctx, base);
+                if ((ctx.r3.u32 & 0xFF) != 0)
+                {
+                    returnVal = PPC_LOAD_U32(r31 + 0);
+                    break;
+                }
+            }
+        }
+        else
+        {
+            LOGF_WARNING("[sub_831C1A68] Invalid callback fn=0x{:08X} in element 0x{:08X}", fn, r31);
+        }
+
+        ctx.r3.u64 = ctx.r1.u32 + 80;
+        sub_831B8078(ctx, base);
+        r31 = PPC_LOAD_U32(ctx.r1.u32 + 84);
+    }
+
+    ctx.r1.u32 = oldSp;
+    ctx.r3.s64 = static_cast<int32_t>(returnVal);
+}
+
+PPC_FUNC(sub_831E0BE8)
+{
+    uint32_t archive = ctx.r3.u32;
+    uint32_t pathGuest = ctx.r4.u32;
+
+    if (archive < 0x10000 || pathGuest < 0x10000)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    uint32_t entriesPtr = PPC_LOAD_U32(archive + 16);
+    uint32_t namesPtr = PPC_LOAD_U32(archive + 8);
+    if (entriesPtr < 0x10000 || namesPtr < 0x10000)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    const char* rawPath = reinterpret_cast<const char*>(base + pathGuest);
+    while (*rawPath == '/' || *rawPath == '\\')
+        rawPath++;
+
+    if (*rawPath == '\0')
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    static int s_findCount = 0;
+    ++s_findCount;
+    if (s_findCount <= 30 || s_findCount % 100 == 0) {
+        LOGF_INFO("[sub_831E0BE8] #{} archive=0x{:08X} path='{}'", s_findCount, archive, rawPath);
+    }
+
+    uint8_t shift = PPC_LOAD_U8(archive + 136);
+    uint32_t currentDirEntry = entriesPtr; // root directory entry
+
+    while (*rawPath != '\0')
+    {
+        // Extract component into lowercase buffer
+        char comp[256];
+        size_t compLen = 0;
+        while (*rawPath != '\0' && *rawPath != '/' && *rawPath != '\\' && compLen < sizeof(comp) - 1)
+        {
+            char c = *rawPath++;
+            if (c >= 'A' && c <= 'Z') c += 32;
+            comp[compLen++] = c;
+        }
+        comp[compLen] = '\0';
+
+        // Skip subsequent slashes
+        while (*rawPath == '/' || *rawPath == '\\')
+            rawPath++;
+
+        uint32_t startIdx = PPC_LOAD_U32(currentDirEntry + 8);
+        uint32_t count = PPC_LOAD_U32(currentDirEntry + 12);
+        if (count == 0)
+        {
+            ctx.r3.u64 = 0;
+            return;
+        }
+
+        int32_t low = static_cast<int32_t>(startIdx);
+        int32_t high = static_cast<int32_t>(startIdx + count - 1);
+        uint32_t matchedEntry = 0;
+
+        while (low <= high)
+        {
+            int32_t mid = (low + high) / 2;
+            uint32_t entry = entriesPtr + static_cast<uint32_t>(mid) * 16;
+            uint32_t nameOffset = PPC_LOAD_U32(entry + 4) & 0xFFFF;
+            uint32_t nameAddr = namesPtr + (nameOffset << shift);
+            const char* entryName = reinterpret_cast<const char*>(base + nameAddr);
+
+            int cmp = strcasecmp(comp, entryName);
+            if (cmp < 0)
+            {
+                high = mid - 1;
+            }
+            else if (cmp > 0)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                matchedEntry = entry;
+                break;
+            }
+        }
+
+        if (matchedEntry == 0)
+        {
+            ctx.r3.u64 = 0;
+            return;
+        }
+
+        uint64_t entryHdr = PPC_LOAD_U64(matchedEntry + 0);
+        uint64_t dirFlag = (__builtin_rotateleft64(entryHdr, 24)) & 0x7FFFFF;
+        bool isDir = (dirFlag == 0x7FFFFF);
+
+        if (*rawPath != '\0')
+        {
+            // More segments remain, matched entry must be a directory
+            if (!isDir)
+            {
+                ctx.r3.u64 = 0;
+                return;
+            }
+            currentDirEntry = matchedEntry;
+        }
+        else
+        {
+            // Final segment matched
+            ctx.r3.u64 = matchedEntry;
+            return;
+        }
+    }
+
+    ctx.r3.u64 = 0;
+}
+
+
+
+
+
 
 
 

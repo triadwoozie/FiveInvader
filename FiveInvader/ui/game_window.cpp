@@ -244,7 +244,7 @@ void GameWindow::Init(const char* sdlVideoDriver)
 
     SetTitleBarColour();
 
-    SDL_ShowWindow(s_pWindow);
+    SDL_MinimizeWindow(s_pWindow);
 }
 
 void GameWindow::Update()
@@ -450,7 +450,7 @@ void GameWindow::ResetDimensions()
 
 uint32_t GameWindow::GetWindowFlags()
 {
-    uint32_t flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    uint32_t flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_MINIMIZED;
 
     if (Config::WindowState == EWindowState::Maximised)
         flags |= SDL_WINDOW_MAXIMIZED;

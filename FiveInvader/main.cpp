@@ -219,6 +219,39 @@ void KiSystemStartup()
         }
     }
 
+    // Register Disc 1 Mandatory Install Partitions (part0.rpf - part3.rpf)
+    const char* partitionNames[] = {
+        "545408A700000000", "545408A700000001", "545408A700000002", "545408A700000003"
+    };
+    const char* partFiles[] = {
+        "part0.rpf", "part1.rpf", "part2.rpf", "part3.rpf"
+    };
+
+    for (int i = 0; i < 4; ++i) {
+        auto partPath = GetGamePath() / partFiles[i];
+        if (std::filesystem::exists(partPath)) {
+            std::string partPathStr = (const char*)partPath.u8string().c_str();
+            std::string partDirStr = (const char*)GetGamePath().u8string().c_str();
+            
+            // Register for DLC and marketplace content types
+            auto installContentDLC = XamMakeContent(XCONTENTTYPE_DLC, partitionNames[i]);
+            XamRegisterContent(installContentDLC, partDirStr);
+            XamContentCreateEx(0, partitionNames[i], &installContentDLC, OPEN_EXISTING, nullptr, nullptr, 0, 0, nullptr);
+
+            auto partContentDLC = XamMakeContent(XCONTENTTYPE_DLC, partFiles[i]);
+            XamRegisterContent(partContentDLC, partDirStr);
+
+            // Register roots for both partition hex names and friendly names
+            XamRootCreate(partitionNames[i], partDirStr);
+            std::string partRootName = std::string("part") + std::to_string(i);
+            XamRootCreate(partRootName, partDirStr);
+            std::string installRootName = std::string("install") + std::to_string(i);
+            XamRootCreate(installRootName, partDirStr);
+
+            LOGF_IMPL(Utility, "Main", "Registered Disc 1 Partition {}: {} -> {}", i, partitionNames[i], partPathStr);
+        }
+    }
+
     XAudioInitializeSystem();
 }
 

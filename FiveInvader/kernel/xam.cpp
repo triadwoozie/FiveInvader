@@ -438,6 +438,18 @@ uint32_t XamContentCreateEx(uint32_t dwUserIndex, const char* szRootName, const 
         }
         else
         {
+            std::string contentName(pContentData->szFileName);
+            std::string rootName(szRootName ? szRootName : "");
+            if (contentName.find("545408A70000000") == 0 || contentName.find("part") == 0 ||
+                rootName.find("install") == 0 || rootName.find("part") == 0 || rootName.find("545408A7") == 0)
+            {
+                std::string root = (const char*)GetGamePath().u8string().c_str();
+                XamRootCreate(szRootName, root);
+                if (pdwDisposition)
+                    *pdwDisposition = XCONTENT_EXISTING;
+                return ERROR_SUCCESS;
+            }
+
             if (pdwDisposition)
                 *pdwDisposition = XCONTENT_NEW;
 
