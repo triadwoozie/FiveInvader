@@ -105,6 +105,13 @@ void KernelPhase_EnterRuntime() {
 
 
 
+void sub_831938B8(PPCContext& ctx, uint8_t* base);
+void sub_83193930(PPCContext& ctx, uint8_t* base);
+void sub_831939E0(PPCContext& ctx, uint8_t* base);
+void sub_8250D988(PPCContext& ctx, uint8_t* base);
+void sub_82220140(PPCContext& ctx, uint8_t* base);
+void sub_831C1B10(PPCContext& ctx, uint8_t* base);
+
 namespace {
 
 // Patch a single entry in PPCFuncMappings by guest address
@@ -129,8 +136,12 @@ void PatchSyncPrimitives() {
     fflush(stdout);
     
     // Patch sync primitives - these cause blocking in HUD init
-
-
+    PatchFuncMapping(0x831938B8, &::sub_831938B8);
+    PatchFuncMapping(0x83193930, &::sub_83193930);
+    PatchFuncMapping(0x831939E0, &::sub_831939E0);
+    PatchFuncMapping(0x8250D988, &::sub_8250D988);
+    PatchFuncMapping(0x82220140, &::sub_82220140);
+    PatchFuncMapping(0x831C1B10, &::sub_831C1B10);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -3159,9 +3170,11 @@ uint32_t XexCheckExecutablePrivilege()
     return 0;
 }
 
-void DbgPrint()
+void DbgPrint(const char* format)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    if (format) {
+        LOGF_WARNING("[DbgPrint] {}", format);
+    }
 }
 
 void __C_specific_handler_x()
@@ -4119,20 +4132,10 @@ void ObDereferenceObject(void* object)
     (void)object;
 }
 
-void KeSetBasePriorityThread(GuestThreadHandle* hThread, int priority)
+void KeSetBasePriorityThread(uint32_t threadHandle, int priority)
 {
-#ifdef _WIN32
-    if (priority == 16)
-    {
-        priority = 15;
-    }
-    else if (priority == -16)
-    {
-        priority = -15;
-    }
-
-    SetThreadPriority(hThread == GetKernelObject(CURRENT_THREAD_HANDLE) ? GetCurrentThread() : hThread->thread.native_handle(), priority);
-#endif
+    (void)threadHandle;
+    (void)priority;
 }
 
 uint32_t ObReferenceObjectByHandle(uint32_t handle, uint32_t objectType, be<uint32_t>* object)
@@ -4146,13 +4149,19 @@ void KeQueryBasePriorityThread()
     LOG_UTILITY("!!! STUB !!!");
 }
 
-uint32_t NtSuspendThread(GuestThreadHandle* hThread, uint32_t* suspendCount)
+uint32_t NtSuspendThread(uint32_t threadHandle, be<uint32_t>* suspendCount)
 {
-    assert(hThread != GetKernelObject(CURRENT_THREAD_HANDLE) && hThread->GetThreadId() == GuestThread::GetCurrentThreadId());
+    if (suspendCount != nullptr)
+        *suspendCount = 0;
 
-    hThread->suspended = true;
-    hThread->suspended.wait(true);
-
+    if (IsKernelObject(threadHandle)) {
+        GuestThreadHandle* hThread = GetKernelObject<GuestThreadHandle>(threadHandle);
+        if (hThread) {
+            LOGF_INFO("[TRACE] NtSuspendThread: handle=0x{:08X} (suspending)", threadHandle);
+            hThread->suspended = true;
+            return S_OK;
+        }
+    }
     return S_OK;
 }
 
@@ -5229,16 +5238,22 @@ uint32_t NtClearEvent(Event* handle, uint32_t* previousState)
     return 0;
 }
 
-uint32_t NtResumeThread(GuestThreadHandle* hThread, uint32_t* suspendCount)
+uint32_t NtResumeThread(uint32_t threadHandle, be<uint32_t>* suspendCount)
 {
-    assert(hThread != GetKernelObject(CURRENT_THREAD_HANDLE));
-
     if (suspendCount != nullptr)
         *suspendCount = 1;
 
-    hThread->suspended = false;
-    hThread->suspended.notify_all();
+    if (IsKernelObject(threadHandle)) {
+        GuestThreadHandle* hThread = GetKernelObject<GuestThreadHandle>(threadHandle);
+        if (hThread) {
+            LOGF_INFO("[TRACE] NtResumeThread: handle=0x{:08X} (resuming)", threadHandle);
+            hThread->suspended = false;
+            hThread->suspended.notify_all();
+            return S_OK;
+        }
+    }
 
+    LOGF_WARNING("[TRACE] NtResumeThread: handle=0x{:08X} not found", threadHandle);
     return S_OK;
 }
 
@@ -5540,21 +5555,21 @@ uint32_t ExCreateThread(be<uint32_t>* handle, uint32_t stackSize, be<uint32_t>* 
     }
 
     // Debug: Dump memory at startContext to see what callback should be there
-    if (startContext != 0 && startContext >= 0x82000000 && startContext < 0x84000000)
+    if (startContext != 0 && startContext >= 0x80000000 && startContext < PPC_MEMORY_SIZE)
     {
         uint32_t* ctxMem = reinterpret_cast<uint32_t*>(g_memory.Translate(startContext));
         LOGF_IMPL(Utility, "ExCreateThread", "startContext@0x{:08X}: [0]=0x{:08X}, [1]=0x{:08X}, [2]=0x{:08X}, [3]=0x{:08X}",
             startContext, 
             ByteSwap(ctxMem[0]), ByteSwap(ctxMem[1]), ByteSwap(ctxMem[2]), ByteSwap(ctxMem[3]));
+
+        // If parent thread did not set the allocator in startContext[2], provide master allocator
+        if (ctxMem[2] == 0)
+        {
+            ctxMem[2] = ByteSwap(0x83887168u);
+            LOGF_INFO("[ExCreateThread] Injected master allocator 0x83887168 into startContext@0x{:08X}[2]", startContext);
+        }
     }
 
-
-    // FIX: Force threads to start immediately - suspended threads cause deadlocks
-    // because they cannot signal semaphores that other code waits on
-    if (creationFlags != 0) {
-        LOGF_WARNING("[ExCreateThread] FORCING flags=0 (was 0x{:X}) entry=0x{:08X}", creationFlags, entry);
-        creationFlags = 0;
-    }
 
     LOGF_WARNING("[ExCreateThread] Creating thread entry=0x{:08X} r3=0x{:08X} r4=0x{:08X} flags=0x{:X}", 
                  entry, r3, r4, creationFlags);
@@ -5761,15 +5776,19 @@ uint32_t XAudioGetVoiceCategoryVolumeChangeMask(uint32_t Driver, be<uint32_t>* M
     return 0;
 }
 
-uint32_t KeResumeThread(GuestThreadHandle* object)
+uint32_t KeResumeThread(uint32_t threadHandle)
 {
     static int s_count = 0; ++s_count;
-    assert(object != GetKernelObject(CURRENT_THREAD_HANDLE));
-
-    LOGF_WARNING("[RESUME] KeResumeThread #{} thread=0x{:08X}", s_count, reinterpret_cast<uintptr_t>(object) & 0xFFFFFFFF);
-    
-    object->suspended = false;
-    object->suspended.notify_all();
+    if (IsKernelObject(threadHandle)) {
+        GuestThreadHandle* hThread = GetKernelObject<GuestThreadHandle>(threadHandle);
+        if (hThread) {
+            LOGF_INFO("[RESUME] KeResumeThread #{} thread=0x{:08X}", s_count, threadHandle);
+            hThread->suspended = false;
+            hThread->suspended.notify_all();
+            return 1;
+        }
+    }
+    LOGF_WARNING("[RESUME] KeResumeThread #{} thread=0x{:08X} not found", s_count, threadHandle);
     return 0;
 }
 
@@ -6086,33 +6105,66 @@ void XamFree(void* buffer)
 }
 
 
-uint32_t NtSetTimerEx(void* timerHandle, void* dueTime, void* apcRoutine, void* apcContext, uint32_t resume, uint32_t period, void* previousState)
+uint32_t NtSetTimerEx(uint32_t timerHandle, void* dueTime, void* apcRoutine, void* apcContext, uint32_t resume, uint32_t period, void* previousState)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    LOGF_INFO("[TRACE] NtSetTimerEx: timerHandle=0x{:08X} period={}", timerHandle, period);
+    if (IsKernelObject(timerHandle)) {
+        Event* evt = GetKernelObject<Event>(timerHandle);
+        if (evt) {
+            evt->Set();
+        }
+    }
     return 0;
 }
 
-uint32_t NtCancelTimer(void* timerHandle, void* currentState)
+uint32_t NtCancelTimer(uint32_t timerHandle, uint32_t* currentState)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    LOGF_INFO("[TRACE] NtCancelTimer: timerHandle=0x{:08X}", timerHandle);
+    if (IsKernelObject(timerHandle)) {
+        Event* evt = GetKernelObject<Event>(timerHandle);
+        if (evt) {
+            evt->Reset();
+        }
+    }
+    if (currentState) {
+        *currentState = 0;
+    }
     return 0;
 }
 
-uint32_t NtCreateTimer(void* timerHandle, uint32_t desiredAccess, void* objectAttributes, uint32_t timerType)
+uint32_t NtCreateTimer(be<uint32_t>* timerHandle, uint32_t desiredAccess, void* objectAttributes, uint32_t timerType)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    Event* timerEvt = CreateKernelObject<Event>(true, false);
+    uint32_t h = GetKernelHandle(timerEvt);
+    if (timerHandle) {
+        *timerHandle = h;
+    }
+    LOGF_INFO("[TRACE] NtCreateTimer: handle=0x{:08X} type={}", h, timerType);
     return 0;
 }
 
-uint32_t NtCreateMutant(void* mutantHandle, uint32_t desiredAccess, void* objectAttributes, uint32_t initialOwner)
+uint32_t NtCreateMutant(be<uint32_t>* mutantHandle, uint32_t desiredAccess, void* objectAttributes, uint32_t initialOwner)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    Event* mutantEvt = CreateKernelObject<Event>(false, !initialOwner);
+    uint32_t h = GetKernelHandle(mutantEvt);
+    if (mutantHandle) {
+        *mutantHandle = h;
+    }
+    LOGF_INFO("[TRACE] NtCreateMutant: handle=0x{:08X} initialOwner={}", h, initialOwner);
     return 0;
 }
 
-uint32_t NtReleaseMutant(void* mutantHandle, void* previousCount)
+uint32_t NtReleaseMutant(uint32_t mutantHandle, uint32_t* previousCount)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    if (previousCount) {
+        *previousCount = 1;
+    }
+    if (IsKernelObject(mutantHandle)) {
+        Event* evt = GetKernelObject<Event>(mutantHandle);
+        if (evt) {
+            evt->Set();
+        }
+    }
     return 0;
 }
 
@@ -8663,6 +8715,250 @@ PPC_FUNC(sub_8255DC88)
 }
 
 // =============================================================================
+// RAGE Scoped Allocator Push & Commit Hooks (sub_831938B8, sub_83193930)
+// =============================================================================
+// When pushing a scoped allocator, sub_831938B8 and sub_83193930 query the
+// current allocator from [PCR + 120]. If the current allocator is NULL on a
+// newly spawned guest thread, calling vtable[2] or vtable[6] causes SIGSEGV.
+// These hooks guard the indirect calls and ensure thread safety.
+// =============================================================================
+PPC_FUNC(sub_831938B8)
+{
+    uint32_t r3_in = ctx.r3.u32;
+    uint32_t r4_in = ctx.r4.u32;
+
+    uint32_t r11 = (r3_in != 0 && r3_in < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(r3_in + 8) : 0;
+    if (r11 != 0 && r11 < PPC_MEMORY_SIZE)
+    {
+        PPC_STORE_U32(r11 + 4, r4_in);
+    }
+
+    uint32_t r31 = (ctx.r13.u32 != 0 && ctx.r13.u32 < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(ctx.r13.u32 + 0) : 0;
+    uint32_t currentAlloc = (r31 != 0 && r31 < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(r31 + 120) : 0;
+    if (currentAlloc == 0) currentAlloc = 0x83887168;
+    uint32_t result = 0;
+
+    if (currentAlloc != 0 && currentAlloc >= 0x80000000 && currentAlloc < PPC_MEMORY_SIZE)
+    {
+        uint32_t vtable = PPC_LOAD_U32(currentAlloc + 0);
+        if (vtable != 0 && vtable >= 0x80000000 && vtable < PPC_MEMORY_SIZE)
+        {
+            uint32_t fn = PPC_LOAD_U32(vtable + 8);
+            if (fn >= 0x82000000 && fn < 0x84000000)
+            {
+                ctx.r3.u64 = currentAlloc;
+                ctx.r4.u64 = 0;
+                ctx.r5.u64 = 16;
+                ctx.r6.u64 = 0;
+                PPC_CALL_INDIRECT_FUNC(fn);
+                result = ctx.r3.u32;
+            }
+            else
+            {
+                LOGF_WARNING("[TRACE] sub_831938B8 vtable[2]=0x{:08X} not code, skipping indirect call", fn);
+            }
+        }
+    }
+    else
+    {
+        LOGF_INFO("[TRACE] sub_831938B8 currentAlloc=0x{:08X} (no allocator on thread), skipping indirect call", currentAlloc);
+    }
+
+    uint32_t r7 = (r3_in != 0 && r3_in < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(r3_in + 8) : 0;
+    if (r7 != 0 && r7 < PPC_MEMORY_SIZE)
+    {
+        PPC_STORE_U32(r7 + 0, result);
+    }
+
+    if (r31 != 0 && r31 < PPC_MEMORY_SIZE && r3_in != 0 && r3_in < PPC_MEMORY_SIZE)
+    {
+        uint32_t oldAlloc = PPC_LOAD_U32(r31 + 116);
+        PPC_STORE_U32(r31 + 116, r3_in);
+        PPC_STORE_U32(r3_in + 12, oldAlloc);
+    }
+}
+
+PPC_FUNC(sub_83193930)
+{
+    uint32_t r3_in = ctx.r3.u32;
+    if (r3_in == 0 || r3_in >= PPC_MEMORY_SIZE) return;
+
+    uint32_t r11 = PPC_LOAD_U32(r3_in + 4);
+    uint32_t r8 = r11 + 15;
+    uint32_t r9 = PPC_LOAD_U32(r3_in + 8);
+    uint32_t r5 = r8 & 0xFFFFFFF0;
+    PPC_STORE_U32(r3_in + 4, r5);
+
+    uint32_t r30 = (ctx.r13.u32 != 0 && ctx.r13.u32 < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(ctx.r13.u32 + 0) : 0;
+    uint32_t currentAlloc = (r30 != 0 && r30 < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(r30 + 120) : 0;
+    if (currentAlloc == 0) currentAlloc = 0x83887168;
+
+    if (currentAlloc != 0 && currentAlloc >= 0x80000000 && currentAlloc < PPC_MEMORY_SIZE)
+    {
+        uint32_t vtable = PPC_LOAD_U32(currentAlloc + 0);
+        if (vtable != 0 && vtable >= 0x80000000 && vtable < PPC_MEMORY_SIZE)
+        {
+            uint32_t fn = PPC_LOAD_U32(vtable + 24);
+            if (fn >= 0x82000000 && fn < 0x84000000)
+            {
+                ctx.r3.u64 = currentAlloc;
+                ctx.r4.u64 = (r9 != 0 && r9 < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(r9 + 0) : 0;
+                ctx.r5.u64 = r5;
+                PPC_CALL_INDIRECT_FUNC(fn);
+            }
+            else
+            {
+                LOGF_WARNING("[TRACE] sub_83193930 vtable[6]=0x{:08X} not code, skipping indirect call", fn);
+            }
+        }
+    }
+    else
+    {
+        LOGF_INFO("[TRACE] sub_83193930 currentAlloc=0x{:08X} (no allocator on thread), skipping indirect call", currentAlloc);
+    }
+
+    uint32_t r5_check = PPC_LOAD_U32(r3_in + 4);
+    if (r5_check == 0 && r9 != 0 && r9 < PPC_MEMORY_SIZE)
+    {
+        PPC_STORE_U32(r9 + 0, 0);
+    }
+
+    if (r9 != 0 && r9 < PPC_MEMORY_SIZE)
+    {
+        PPC_STORE_U32(r9 + 4, r5_check);
+    }
+
+    if (r30 != 0 && r30 < PPC_MEMORY_SIZE)
+    {
+        uint32_t r7 = PPC_LOAD_U32(r3_in + 12);
+        PPC_STORE_U32(r30 + 116, r7 ? r7 : 0x83887168);
+    }
+    PPC_STORE_U32(r3_in + 12, 0);
+}
+
+// =============================================================================
+// RAGE Scoped Allocator Pop Hook (sub_831939E0)
+// =============================================================================
+// When popping a scoped allocator, sub_831939E0 restores the previous allocator
+// saved at [r3 + 12]. If the previous allocator was NULL (e.g. at the bottom
+// of the allocator stack on a newly spawned thread), dereferencing it to call
+// vtable slot 4 causes an immediate SIGSEGV. This hook safely performs the call
+// only when prev and its vtable are valid, and always executes the remaining
+// stack cleanup.
+// =============================================================================
+PPC_FUNC(sub_831939E0)
+{
+    uint32_t r31 = ctx.r3.u32;
+    uint32_t prev = PPC_LOAD_U32(r31 + 12);
+    uint32_t r11 = PPC_LOAD_U32(r31 + 8);
+
+    if (prev != 0 && prev >= 0x80000000)
+    {
+        uint32_t vtable = PPC_LOAD_U32(prev + 0);
+        if (vtable != 0 && vtable >= 0x80000000)
+        {
+            uint32_t fn = PPC_LOAD_U32(vtable + 16);
+            if (fn >= 0x82000000 && fn < 0x84000000)
+            {
+                ctx.r3.u64 = prev;
+                ctx.r4.u64 = (r11 != 0) ? PPC_LOAD_U32(r11 + 0) : 0;
+                PPC_CALL_INDIRECT_FUNC(fn);
+            }
+            else
+            {
+                LOGF_WARNING("[TRACE] sub_831939E0 vtable[4]=0x{:08X} not code, skipping indirect call", fn);
+            }
+        }
+    }
+    else
+    {
+        LOGF_INFO("[TRACE] sub_831939E0 prev=0x{:08X} (allocator root), skipping indirect call", prev);
+    }
+
+    uint32_t r6 = (r11 != 0) ? r11 : PPC_LOAD_U32(r31 + 8);
+    if (r6 != 0 && r6 >= 0x80000000)
+    {
+        PPC_STORE_U32(r6 + 4, 0);
+        PPC_STORE_U32(r6 + 0, 0);
+    }
+    PPC_STORE_U32(r31 + 4, 0);
+
+    uint32_t r8 = (ctx.r13.u32 != 0) ? PPC_LOAD_U32(ctx.r13.u32 + 0) : 0;
+    if (r8 != 0 && r8 >= 0x80000000)
+    {
+        PPC_STORE_U32(r8 + 120, prev ? prev : 0x83887168);
+    }
+    PPC_STORE_U32(r31 + 12, 0);
+}
+
+// =============================================================================
+// GPU Ring Buffer Wait & PM4 Dispatch Hooks (sub_8250D988, sub_82220140)
+// =============================================================================
+// GTA V's rendering engine writes PM4 command packets into a ring buffer and
+// calls sub_8250D988 to ensure sufficient free space before continuing.
+// Without an asynchronous physical Xenos GPU advancing the read pointer,
+// the CPU spins in sub_82220140 waiting for read_ptr to catch up with write_ptr.
+//
+// These hooks advance the GPU read pointer to match the write pointer,
+// preventing spinlocks and allowing PM4 command packets to be parsed.
+// =============================================================================
+PPC_FUNC(sub_8250D988)
+{
+    static uint32_t s_flushCount = 0;
+    ++s_flushCount;
+
+    uint32_t dev = ctx.r3.u32;
+    uint32_t writePtr = ctx.r4.u32;
+
+    if (dev != 0 && dev >= 0x80000000)
+    {
+        uint32_t pReadPtr = PPC_LOAD_U32(dev + 11024);
+        if (pReadPtr != 0 && pReadPtr >= 0x80000000)
+        {
+            // Advance GPU read pointer to catch up with CPU write pointer
+            PPC_STORE_U32(pReadPtr + 0, writePtr);
+        }
+
+        if (g_gpuRingBuffer.readPtrWritebackAddr != 0)
+        {
+            uint32_t* hostPtr = reinterpret_cast<uint32_t*>(g_memory.Translate(g_gpuRingBuffer.readPtrWritebackAddr));
+            if (hostPtr)
+            {
+                *hostPtr = writePtr;
+            }
+        }
+    }
+
+    if (s_flushCount <= 20 || (s_flushCount % 200 == 0))
+    {
+        LOGF_INFO("[GPU RING] sub_8250D988 #{} dev=0x{:08X} writePtr=0x{:08X}", s_flushCount, dev, writePtr);
+    }
+
+    ScanRingBufferForPM4Packets();
+}
+
+PPC_FUNC(sub_82220140)
+{
+    uint32_t waitObj = ctx.r3.u32;
+    if (waitObj != 0 && waitObj >= 0x80000000)
+    {
+        uint32_t dev = PPC_LOAD_U32(waitObj + 0);
+        if (dev != 0 && dev >= 0x80000000)
+        {
+            uint32_t pReadPtr = PPC_LOAD_U32(dev + 11024);
+            uint32_t writePtr = PPC_LOAD_U32(dev + 48);
+            if (pReadPtr != 0 && pReadPtr >= 0x80000000 && writePtr != 0)
+            {
+                PPC_STORE_U32(pReadPtr + 0, writePtr);
+            }
+        }
+    }
+
+    // Return 0 so callers immediately exit the spin loop
+    ctx.r3.s64 = 0;
+}
+
+// =============================================================================
 // CRT & RAGE Memcpy Hooks (sub_83642890, sub_83641FE0, sub_823CFAF0)
 // =============================================================================
 // On PowerPC / Xenon, CRT memcpy / XMemCpy / RAGE memcpy use AltiVec vector
@@ -8715,17 +9011,20 @@ PPC_FUNC(sub_83641FE0)
     // ctx.r3 remains dst
 }
 
+#include <dlfcn.h>
+
 PPC_FUNC(sub_823CFAF0)
 {
     uint32_t dst = ctx.r3.u32;
     uint32_t src = ctx.r4.u32;
     int32_t size = ctx.r5.s32;
+    void* callerPtr = __builtin_return_address(0);
 
     static uint32_t s_memcpyCount = 0;
     if (++s_memcpyCount <= 20 || s_memcpyCount % 500 == 0 || size > 1000000)
     {
-        LOGF_INFO("[MEMCPY] sub_823CFAF0 #{} dst=0x{:08X} src=0x{:08X} size={}", 
-                  s_memcpyCount, dst, src, size);
+        LOGF_INFO("[MEMCPY] sub_823CFAF0 #{} dst=0x{:08X} src=0x{:08X} size={} callerPtr={}", 
+                  s_memcpyCount, dst, src, size, callerPtr);
     }
 
     if (size > 0 && dst != 0 && src != 0)
@@ -8741,6 +9040,19 @@ PPC_FUNC(sub_823CFAF0)
         }
     }
     // ctx.r3 remains dst
+}
+
+extern "C" void __imp__sub_831C1B10(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_831C1B10)
+{
+    static uint32_t s_count = 0;
+    if (++s_count <= 20 || s_count % 500 == 0)
+    {
+        void* caller = __builtin_return_address(0);
+        LOGF_INFO("[sub_831C1B10] #{} r3=0x{:08X} r4=0x{:08X} r5={} caller={}",
+                  s_count, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, caller);
+    }
+    __imp__sub_831C1B10(ctx, base);
 }
 
 PPC_FUNC(sub_831E3240)
@@ -8764,11 +9076,14 @@ PPC_FUNC(sub_831E3240)
         if (vtable >= PPC_CODE_BASE && vtable < PPC_MEMORY_SIZE)
         {
             uint32_t closeFn = PPC_LOAD_U32(vtable + 48);
+            LOGF_INFO("[TRACE] sub_831E3240: device=0x{:08X} vtable=0x{:08X} closeFn=0x{:08X}",
+                      device, vtable, closeFn);
             if (closeFn >= PPC_CODE_BASE && closeFn < PPC_CODE_BASE + PPC_CODE_SIZE)
             {
                 ctx.r3.u64 = device;
                 ctx.r4.u64 = handle;
                 PPC_CALL_INDIRECT_FUNC(closeFn);
+                LOGF_INFO("[TRACE] sub_831E3240: closeFn returned.");
             }
             else
             {
@@ -8782,6 +9097,7 @@ PPC_FUNC(sub_831E3240)
     PPC_STORE_U32(stream + 4, 0xFFFFFFFF);
     PPC_STORE_U32(stream + 0, 0);
     ctx.r3.s64 = 0;
+    LOGF_INFO("[TRACE] sub_831E3240 done.");
 }
 
 // =============================================================================

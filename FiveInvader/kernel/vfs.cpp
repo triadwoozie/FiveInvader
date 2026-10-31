@@ -123,6 +123,19 @@ namespace VFS
                s_resolveCount, guestPath.c_str(), normalized.c_str(), stripped.c_str());
         fflush(stdout);
         
+        // Direct file resolution first: if stripped directly exists as a regular file, prefer the exact file
+        {
+            std::filesystem::path directFile = g_extractedRoot / stripped;
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(directFile, ec))
+            {
+                g_stats.cacheHits++;
+                printf("[VFS] FOUND exact file: '%s' -> '%s'\n", guestPath.c_str(), directFile.string().c_str());
+                fflush(stdout);
+                return directFile;
+            }
+        }
+        
         // Check path mappings first
         for (const auto& mapping : g_pathMappings)
         {

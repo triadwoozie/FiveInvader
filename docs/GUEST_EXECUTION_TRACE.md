@@ -123,3 +123,31 @@ The runtime cleanly progresses through:
 3. RAGE worker thread pool initialization (4 worker threads registered).
 4. GPU ring buffer allocation (`0xA5F2DB80`, size 8 KB) and writeback configuration.
 5. Render thread initialization with `0x80150B4C` frame event synchronization.
+
+---
+
+## Phase 4B Advance: XML Parser Switch Dispatches, Thread-Local Allocator Synchronization, and PM4 Packet Processing
+
+### 1. XML Parser Switch Dispatches (`sub_831CB460` & `sub_831CC260`)
+- **Problem**: In GTA V's XML token parser, 17-case switch tables at `0x831CB4A8` and `0x831CC2A8` were disassembled by XenonRecomp as fake `lwz` instructions and dispatched via `PPC_CALL_INDIRECT_FUNC(ctr.u32); return;`. This caused `sub_831CB460` to exit prematurely without clearing the pending token flag (`1239(r30)`), locking `sub_831DAF68` in an infinite XML parsing spinlock.
+- **Fix**: Replaced switch tables with native C++ `switch (ctx.r6.u32)` blocks branching directly to basic block labels (`loc_831CB4EC`, `loc_831CBE84`, etc.), automated via `tools/patch_ppc_xml_switch.py`.
+- **Result**: `installpartitions.meta` parsed completely, advancing immediately into video mode initialization, ring buffer setup, and shader loading.
+
+### 2. Thread-Local Allocator Synchronization (`TLS + 116`, `TLS + 120`, `TLS + 132`)
+- **Root Cause of SIGSEGV**:
+  - In RAGE, `sysMemAllocator` initializes slots in the thread's TLS region: offset 116 (`0x74`, dictionary/string allocator), offset 120 (`0x78`, current allocator), and offset 132 (`0x84`, fallback allocator).
+  - While the main thread initialized these slots in `sub_8255DD58`, worker threads created via `ExCreateThread` were spawned with empty zeroed TLS blocks.
+  - When child threads executed `sub_8321D9F8` or `sub_83213570` to clone packets/resources, they loaded `threadCtx + 116`, received NULL, and called `PPC_CALL_INDIRECT_FUNC(0)` at `0x8321D9F8:5234` / `0x824C2A20:10286`.
+- **Fix**:
+  - `FiveInvader/cpu/guest_thread.cpp`: `GuestThreadContext` now initializes TLS slots 116, 120, and 132 to the master allocator `0x83887168`.
+  - `FiveInvader/kernel/imports.cpp`: `ExCreateThread` validates `startContext[2]` and injects `0x83887168` when NULL.
+  - `FiveInvader/kernel/imports.cpp`: `sub_831938B8`, `sub_83193930`, and `sub_831939E0` fall back to `0x83887168` when no scoped allocator is active.
+  - `ppc_recomp.268.cpp` and `ppc_recomp.269.cpp`: Guarded indirect allocator calls in `sub_8321D9F8` and `sub_83213570`.
+  - `ppc_recomp.28.cpp`: Guarded indirect dispatch in `sub_824C2A20:10286`.
+
+### 3. GPU Ring Buffer & PM4 Command Packet Processing
+- **Ring Buffer**: Initialized at `0xA758E5C0` (size 8 KB) with writeback at `0x0000003C`.
+- **PM4 Packets**: Real Micro-Engine Initialization packets (`ME_INIT` Type 3, opcode `0x48`, count 18) captured and logged.
+- **Shader Streaming**: Successfully loaded `game:\common\shaders\fxl_final_final\im.fxc` (multiple 8 KB blocks at `0xA90000`, `0xA92000`, `0xA94000`) and `preload.list` directly from `common.rpf` via `NtReadFile`.
+- **Engine Synchronization**: Over 226 kernel semaphores tracked and synchronized. RAGE audio and render worker threads running their 30ms wait cycles continuously with zero crashes.
+

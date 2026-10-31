@@ -55,6 +55,13 @@ GuestThreadContext::GuestThreadContext(uint32_t cpuNumber)
     // -------------------------------------------------------------------------
     tls->quirky_slot = 0xFFFFFFFF;                   // 0x10 - Special TLS slot
 
+    // Initialize RAGE thread-local allocator slots (0x74 = 116, 0x78 = 120, 0x84 = 132)
+    // to point to the master allocator so worker threads don't crash on uninitialized allocator slots
+    constexpr uint32_t RAGE_MASTER_ALLOCATOR = 0x83887168;
+    *reinterpret_cast<be<uint32_t>*>(thread + X360_TLS_OFFSET + 116) = RAGE_MASTER_ALLOCATOR;
+    *reinterpret_cast<be<uint32_t>*>(thread + X360_TLS_OFFSET + 120) = RAGE_MASTER_ALLOCATOR;
+    *reinterpret_cast<be<uint32_t>*>(thread + X360_TLS_OFFSET + 132) = RAGE_MASTER_ALLOCATOR;
+
     // -------------------------------------------------------------------------
     // Initialize TEB (Thread Environment Block)
     // -------------------------------------------------------------------------
