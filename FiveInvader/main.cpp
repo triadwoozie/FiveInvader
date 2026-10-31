@@ -32,6 +32,41 @@
 #include <preload_executable.h>
 #include <iostream>
 #include <app.h>
+#ifndef _WIN32
+#include <csignal>
+#include <execinfo.h>
+#include <unistd.h>
+
+static void CrashSignalHandler(int sig, siginfo_t* info, void* ucontext)
+{
+    fprintf(stderr, "\n========== CRASH CAUGHT: signal %d (fault addr=%p) ==========\n", sig, info ? info->si_addr : nullptr);
+    if (g_ppcContext) {
+        fprintf(stderr, "[CRASH_CONTEXT] PPCContext=%p r1=0x%llX r3=0x%llX r4=0x%llX r5=0x%llX r7=0x%llX r8=0x%llX r9=0x%llX r10=0x%llX r13=0x%llX\n",
+            g_ppcContext,
+            (unsigned long long)g_ppcContext->r1.u64,
+            (unsigned long long)g_ppcContext->r3.u64,
+            (unsigned long long)g_ppcContext->r4.u64,
+            (unsigned long long)g_ppcContext->r5.u64,
+            (unsigned long long)g_ppcContext->r7.u64,
+            (unsigned long long)g_ppcContext->r8.u64,
+            (unsigned long long)g_ppcContext->r9.u64,
+            (unsigned long long)g_ppcContext->r10.u64,
+            (unsigned long long)g_ppcContext->r13.u64);
+    } else {
+        fprintf(stderr, "[CRASH_CONTEXT] g_ppcContext is NULL\n");
+    }
+    if (g_memory.base) {
+        uint32_t val83bfbe8c = *reinterpret_cast<uint32_t*>(g_memory.Translate(0x83BFBE8C));
+        fprintf(stderr, "[CRASH_CONTEXT] *0x83BFBE8C = 0x%08X (le: 0x%08X)\n", val83bfbe8c, ByteSwap(val83bfbe8c));
+    }
+    void* frames[64];
+    int count = backtrace(frames, 64);
+    backtrace_symbols_fd(frames, count, STDERR_FILENO);
+    fprintf(stderr, "===============================================================\n");
+    fflush(stderr);
+    _exit(139);
+}
+#endif
 
 #ifdef _WIN32
 #include <timeapi.h>
@@ -269,6 +304,7 @@ uint32_t LdrLoadModule(const std::filesystem::path &path)
     memcpy(g_memory.Translate(image.base), image.data.get(), image.size);
     g_xdbfWrapper = XDBFWrapper(static_cast<uint8_t*>(g_memory.Translate(image.resource_offset)), image.resource_size);
 
+#if 0
     // GTA V Memory Layout Collision Fix
     // Address 0x82003890 aliases with "common.rpf" string in image .rdata section.
     // The game expects this to be heap-backed stream object storage.
@@ -296,6 +332,7 @@ uint32_t LdrLoadModule(const std::filesystem::path &path)
         streamPtr[5] = 0;           // Buffer end (0 = empty)
         streamPtr[6] = 0;           // Capacity (0 = no buffer)
     }
+#endif
     
     // Worker Thread Global Memory Initialization
     // Address range 0x830F5000-0x830F8000 contains worker-related global structures.
@@ -338,6 +375,15 @@ void init()
 
 int main(int argc, char *argv[])
 {
+#ifndef _WIN32
+    struct sigaction sa{};
+    sa.sa_sigaction = CrashSignalHandler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+#endif
+
 #ifdef _WIN32
     timeBeginPeriod(1);
 #endif

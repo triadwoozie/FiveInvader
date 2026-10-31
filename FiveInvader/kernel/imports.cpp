@@ -111,6 +111,11 @@ void sub_831939E0(PPCContext& ctx, uint8_t* base);
 void sub_8250D988(PPCContext& ctx, uint8_t* base);
 void sub_82220140(PPCContext& ctx, uint8_t* base);
 void sub_831C1B10(PPCContext& ctx, uint8_t* base);
+void sub_8257A2A8(PPCContext& ctx, uint8_t* base);
+void sub_825C9768(PPCContext& ctx, uint8_t* base);
+void sub_836B2AB0(PPCContext& ctx, uint8_t* base);
+void sub_82332868(PPCContext& ctx, uint8_t* base);
+void sub_83217D38(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -142,6 +147,11 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x8250D988, &::sub_8250D988);
     PatchFuncMapping(0x82220140, &::sub_82220140);
     PatchFuncMapping(0x831C1B10, &::sub_831C1B10);
+    PatchFuncMapping(0x8257A2A8, &::sub_8257A2A8);
+    PatchFuncMapping(0x825C9768, &::sub_825C9768);
+    PatchFuncMapping(0x836B2AB0, &::sub_836B2AB0);
+    PatchFuncMapping(0x82332868, &::sub_82332868);
+    PatchFuncMapping(0x83217D38, &::sub_83217D38);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -360,6 +370,7 @@ namespace
     enum PM4Type3Opcode {
         PM4_ME_INIT               = 0x48,
         PM4_NOP                   = 0x10,
+        PM4_INDIRECT_BUFFER_PFD   = 0x32,
         PM4_INDIRECT_BUFFER       = 0x3f,
         PM4_WAIT_REG_MEM          = 0x3c,
         PM4_REG_RMW               = 0x21,
@@ -419,6 +430,7 @@ namespace
         switch (opcode) {
             case PM4_ME_INIT: return "ME_INIT";
             case PM4_NOP: return "NOP";
+            case PM4_INDIRECT_BUFFER_PFD: return "INDIRECT_BUFFER_PFD";
             case PM4_INDIRECT_BUFFER: return "INDIRECT_BUFFER";
             case PM4_WAIT_REG_MEM: return "WAIT_REG_MEM";
             case PM4_REG_RMW: return "REG_RMW";
@@ -2100,7 +2112,9 @@ uint32_t XamGetExecutionId(uint32_t pExecutionId)
 
 uint32_t XamLoaderLaunchTitle(uint32_t titlePath, uint32_t flags)
 {
-    LOGF_INFO("[XamLoaderLaunchTitle] titlePath=0x{:08X} flags=0x{:X}", titlePath, flags);
+    const char* str = (titlePath != 0 && g_memory.base != nullptr && titlePath >= 0x10000 && titlePath < PPC_MEMORY_SIZE)
+        ? reinterpret_cast<const char*>(g_memory.base + titlePath) : "(null)";
+    LOGF_INFO("[XamLoaderLaunchTitle] titlePath=0x{:08X} ('{}') flags=0x{:X}", titlePath, str, flags);
     return 0; // STATUS_SUCCESS
 }
 
@@ -2327,6 +2341,28 @@ uint32_t NtCreateFile
         }
     }
     // === END VFS-BASED FILE SERVING ===
+
+    // Xbox 360 harddisk partition probing bypass (e.g. \Device\Harddisk0\partition0)
+    {
+        std::string pathLower = guestPath;
+        std::transform(pathLower.begin(), pathLower.end(), pathLower.begin(), ::tolower);
+        if (pathLower.find("device\\harddisk") != std::string::npos ||
+            pathLower.find("device/harddisk") != std::string::npos)
+        {
+            NtFileHandle* hFile = CreateKernelObject<NtFileHandle>();
+            hFile->path = "/dev/null";
+            hFile->isRpf = false;
+            const uint32_t handleValue = GetKernelHandle(hFile);
+            g_ntFileHandles.emplace(handleValue, hFile);
+            *FileHandle = handleValue;
+            LOGF_INFO("[NtCreateFile] Harddisk partition access '{}' -> handle 0x{:08X}", guestPath, handleValue);
+            if (IoStatusBlock) {
+                IoStatusBlock->Status = STATUS_SUCCESS;
+                IoStatusBlock->Information = 1;
+            }
+            return STATUS_SUCCESS;
+        }
+    }
 
     std::filesystem::path resolved = ResolveGuestPathBestEffort(guestPath);
 
@@ -2882,7 +2918,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
     {
         obj = GetKernelObject(Handle);
     }
-    else if (Handle < PPC_MEMORY_SIZE && g_memory.base != nullptr)
+    else if (Handle >= 0x10000 && Handle <= 0xF0000000 && g_memory.base != nullptr)
     {
         XDISPATCHER_HEADER* header = reinterpret_cast<XDISPATCHER_HEADER*>(g_memory.Translate(Handle));
         objType = header->Type;
@@ -4095,6 +4131,17 @@ uint32_t NtAllocateVirtualMemory(
         return STATUS_SUCCESS;
     }
 
+    if (size > 0x10000000 || (AllocationType & 0x00002000 /* MEM_RESERVE */))
+    {
+        // Virtual address space reservation (entire 4GB guest memory is already mapped in recomp).
+        static uint32_t s_virtualReserveBase = 0x40000000;
+        *BaseAddress = s_virtualReserveBase;
+        *RegionSize = size;
+        LOGF_INFO("[NtAllocateVirtualMemory] Virtual reservation size=0x{:08X} allocType=0x{:X} -> base=0x{:08X}", 
+                  size, AllocationType, s_virtualReserveBase);
+        return STATUS_SUCCESS;
+    }
+
     void* ptr = g_userHeap.AllocPhysical(size, kPageSize);
     if (!ptr)
         return STATUS_NO_MEMORY;
@@ -4199,7 +4246,7 @@ void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
 
     std::atomic_ref owningThread(cs->OwningThread);
     owningThread.store(0);
-    owningThread.notify_one();
+    owningThread.notify_all();
 }
 
 void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
@@ -4211,13 +4258,11 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
     static int s_waitCount = 0;
     ++s_count;
     
-    be<uint32_t> thisThread = g_ppcContext->r13.u32;
-    assert(thisThread != NULL);
+    be<uint32_t> thisThread = (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
 
     std::atomic_ref owningThread(cs->OwningThread);
     
     int loopCount = 0;
-    constexpr int MAX_SPIN_LOOPS = 50;  // Very low - yield() is slow, force-acquire quickly
     
     while (true) 
     {
@@ -4239,20 +4284,18 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
         }
         ++loopCount;
         
-        // After many spins, force acquire the lock to prevent deadlock
-        // This is a workaround for init-time deadlocks where owner is blocked
-        if (loopCount > MAX_SPIN_LOOPS) {
-            if (s_waitCount <= 30) {
-                LOGF_WARNING("[LOCK] FORCE ACQUIRE cs=0x{:08X} after {} spins (owner=0x{:08X} may be blocked)",
-                             reinterpret_cast<uintptr_t>(cs) & 0xFFFFFFFF, loopCount, previousOwner.get());
-            }
-            owningThread.store(thisThread);
-            cs->RecursionCount = 1;
-            return;
+        // Log periodically if waiting for an unusually long time (> 500ms)
+        if (loopCount % 5000 == 0) {
+            LOGF_WARNING("[LOCK] Long wait on cs=0x{:08X} ({} spins, owner=0x{:08X}, thisThread=0x{:08X})",
+                         reinterpret_cast<uintptr_t>(cs) & 0xFFFFFFFF, loopCount, previousOwner.get(), thisThread.get());
         }
         
-        // Brief yield instead of blocking wait
-        std::this_thread::yield();
+        // Yield briefly for quick handoff, sleep slightly if contended
+        if (loopCount < 50) {
+            std::this_thread::yield();
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
     }
 }
 
@@ -4313,12 +4356,14 @@ void KfReleaseSpinLock(uint32_t* spinLock)
 
 void KfAcquireSpinLock(uint32_t* spinLock)
 {
+    if (!spinLock) return;
     std::atomic_ref spinLockRef(*spinLock);
+    uint32_t owner = (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
 
     while (true)
     {
         uint32_t expected = 0;
-        if (spinLockRef.compare_exchange_weak(expected, g_ppcContext->r13.u32))
+        if (spinLockRef.compare_exchange_weak(expected, owner))
             break;
 
         std::this_thread::yield();
@@ -4342,12 +4387,26 @@ bool VdPersistDisplay(uint32_t a1, uint32_t* a2)
     return false;
 }
 
+void FireVBlankCallback();
+void VdCallGraphicsNotificationRoutines(uint32_t type = 0, uint32_t data = 0);
+
 void VdSwap()
 {
-    // MarathonRecomp-style: VdSwap is a stub
-    // Frame presentation is handled by Video::Present() hooked to game's D3D Present
-    // Phase transition and FPS limiting happen in Video::Present()
-    LOG_UTILITY("!!! STUB !!!");
+    static uint32_t s_swapCount = 0;
+    ++s_swapCount;
+    if (s_swapCount <= 10 || (s_swapCount % 60) == 0)
+    {
+        LOGF_INFO("[VdSwap] Frame swap #{}", s_swapCount);
+    }
+
+    // Call Video::Present() to clear/flip Vulkan swapchain
+    Video::Present();
+
+    // Fire VBlank interrupt callback so RAGE render thread advances its frame
+    FireVBlankCallback();
+
+    // Trigger graphics notification routines
+    VdCallGraphicsNotificationRoutines(1, 0);
 }
 
 void VdGetSystemCommandBuffer()
@@ -4368,12 +4427,14 @@ void KeReleaseSpinLockFromRaisedIrql(uint32_t* spinLock)
 
 void KeAcquireSpinLockAtRaisedIrql(uint32_t* spinLock)
 {
+    if (!spinLock) return;
     std::atomic_ref spinLockRef(*spinLock);
+    uint32_t owner = (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
 
     while (true)
     {
         uint32_t expected = 0;
-        if (spinLockRef.compare_exchange_weak(expected, g_ppcContext->r13.u32))
+        if (spinLockRef.compare_exchange_weak(expected, owner))
             break;
 
         std::this_thread::yield();
@@ -4426,9 +4487,9 @@ static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIn
     static bool s_loggedIndirect = false;
     uint32_t packetsFound = 0;
     uint32_t pos = 0;
-    uint32_t maxScan = std::min(bufferDwords, 512u);
+    uint32_t maxScan = std::min(bufferDwords, 1024u);
     
-    while (pos < maxScan && packetsFound < 100) {
+    while (pos < maxScan && packetsFound < 200) {
         uint32_t packet = ByteSwap(buffer[pos]);
         uint32_t type = (packet >> 30) & 0x3;
         
@@ -4437,12 +4498,12 @@ static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIn
             uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
             
             // Log ALL packets from indirect buffers for first few scans
-            if (isIndirect && !s_loggedIndirect && scanCount < 3) {
+            if (isIndirect && !s_loggedIndirect && scanCount < 5) {
                 LOGF_WARNING("[PM4-IB] opcode=0x{:02X}({}) count={} pos={}",
                     opcode, GetPM4OpcodeName(opcode), count, pos);
             }
             
-            // Count by type
+            // Count by type & process fences
             switch (opcode) {
                 case PM4_DRAW_INDX:
                 case PM4_DRAW_INDX_2:
@@ -4460,6 +4521,42 @@ static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIn
                 case PM4_XE_SWAP:
                     g_gpuRingBuffer.pm4SwapCount++;
                     break;
+                case PM4_EVENT_WRITE_SHD:
+                case PM4_EVENT_WRITE_EXT: {
+                    // PM4_EVENT_WRITE_SHD writes a timestamp/fence to memory
+                    // dword 0: event initiator
+                    // dword 1: write address (physical)
+                    // dword 2: write value
+                    if (pos + 3 < maxScan && count >= 3) {
+                        uint32_t destAddr = ByteSwap(buffer[pos + 2]);
+                        uint32_t val = ByteSwap(buffer[pos + 3]);
+                        if (destAddr != 0) {
+                            uint32_t* hostDest = reinterpret_cast<uint32_t*>(g_memory.Translate(destAddr));
+                            if (hostDest) {
+                                *hostDest = ByteSwap(val);
+                            }
+                        }
+                    }
+                    g_gpuRingBuffer.pm4OtherCount++;
+                    break;
+                }
+                case PM4_MEM_WRITE: {
+                    // PM4_MEM_WRITE writes data directly to memory
+                    // dword 0: address
+                    // dword 1: value
+                    if (pos + 2 < maxScan && count >= 2) {
+                        uint32_t destAddr = ByteSwap(buffer[pos + 1]);
+                        uint32_t val = ByteSwap(buffer[pos + 2]);
+                        if (destAddr != 0) {
+                            uint32_t* hostDest = reinterpret_cast<uint32_t*>(g_memory.Translate(destAddr));
+                            if (hostDest) {
+                                *hostDest = ByteSwap(val);
+                            }
+                        }
+                    }
+                    g_gpuRingBuffer.pm4OtherCount++;
+                    break;
+                }
                 default:
                     g_gpuRingBuffer.pm4OtherCount++;
                     break;
@@ -4522,9 +4619,9 @@ void ScanRingBufferForPM4Packets()
     std::vector<std::pair<uint32_t, uint32_t>> indirectBuffers;  // address, size
     uint32_t packetsFound = 0;
     uint32_t pos = 0;
-    uint32_t maxScan = std::min(ringBufferDwords, 256u);
+    uint32_t maxScan = std::min(ringBufferDwords, 512u);
     
-    while (pos < maxScan && packetsFound < 20) {
+    while (pos < maxScan && packetsFound < 50) {
         uint32_t packet = ByteSwap(ringBuffer[pos]);
         uint32_t type = (packet >> 30) & 0x3;
         
@@ -4538,15 +4635,39 @@ void ScanRingBufferForPM4Packets()
                     pos, opcode, GetPM4OpcodeName(opcode), count);
             }
             
-            // Capture INDIRECT_BUFFER addresses
-            if (opcode == PM4_INDIRECT_BUFFER && count >= 2) {
+            // Capture INDIRECT_BUFFER and INDIRECT_BUFFER_PFD addresses
+            if ((opcode == PM4_INDIRECT_BUFFER || opcode == PM4_INDIRECT_BUFFER_PFD) && count >= 2) {
                 uint32_t ibAddr = ByteSwap(ringBuffer[pos + 1]);
                 uint32_t ibSize = ByteSwap(ringBuffer[pos + 2]) & 0xFFFFF;  // Size in dwords
                 indirectBuffers.push_back({ibAddr, ibSize});
                 
-                if (!s_loggedIndirectBuffers && s_scanCount < 3) {
+                if (!s_loggedIndirectBuffers && s_scanCount < 5) {
                     LOGF_WARNING("[PM4] INDIRECT_BUFFER addr=0x{:08X} size={} dwords",
                         ibAddr, ibSize);
+                }
+            }
+            else if (opcode == PM4_EVENT_WRITE_SHD || opcode == PM4_EVENT_WRITE_EXT) {
+                if (pos + 3 < maxScan && count >= 3) {
+                    uint32_t destAddr = ByteSwap(ringBuffer[pos + 2]);
+                    uint32_t val = ByteSwap(ringBuffer[pos + 3]);
+                    if (destAddr != 0) {
+                        uint32_t* hostDest = reinterpret_cast<uint32_t*>(g_memory.Translate(destAddr));
+                        if (hostDest) {
+                            *hostDest = ByteSwap(val);
+                        }
+                    }
+                }
+            }
+            else if (opcode == PM4_MEM_WRITE) {
+                if (pos + 2 < maxScan && count >= 2) {
+                    uint32_t destAddr = ByteSwap(ringBuffer[pos + 1]);
+                    uint32_t val = ByteSwap(ringBuffer[pos + 2]);
+                    if (destAddr != 0) {
+                        uint32_t* hostDest = reinterpret_cast<uint32_t*>(g_memory.Translate(destAddr));
+                        if (hostDest) {
+                            *hostDest = ByteSwap(val);
+                        }
+                    }
                 }
             }
             
@@ -4585,7 +4706,7 @@ void ScanRingBufferForPM4Packets()
     }
     
     // Log summary periodically
-    if (packetsFound > 0 && (s_scanCount % 100 == 0 || !s_scannedOnce)) {
+    if (packetsFound > 0 && (s_scanCount % 50 == 0 || !s_scannedOnce)) {
         LOGF_WARNING("[PM4 SUMMARY] scan={} found={} draws={} shaders={} constants={} swaps={} other={} IB={}",
             s_scanCount, packetsFound,
             g_gpuRingBuffer.pm4DrawCount,
@@ -4671,8 +4792,9 @@ void FireVBlankCallback() {
     if (g_gpuRingBuffer.interruptCallback != 0) {
         // Create a temporary context to call the guest callback
         PPCContext ctx{};
-        ctx.r3.u32 = g_gpuRingBuffer.interruptUserData;
-        ctx.r4.u32 = 0;  // Interrupt type 0 = VBlank
+        ctx.r3.u32 = 1;  // Interrupt reason 1 = VBlank / vertical blank (expected by sub_836B1768)
+        ctx.r4.u32 = g_gpuRingBuffer.interruptUserData;  // Context/userData
+        SetPPCContext(ctx);
         
         auto* callbackFunc = g_memory.FindFunction(g_gpuRingBuffer.interruptCallback);
         if (callbackFunc) {
@@ -4694,7 +4816,7 @@ void StartVBlankTimer() {
     if (!g_vblankTimerRunning.load()) {
         g_vblankTimerRunning.store(true);
         g_vblankThread = std::thread(VBlankTimerThread);
-        printf("[VBlank] Timer started (60Hz)\n");
+        LOGF_INFO("[VBlank] Timer started (60Hz)");
     }
 }
 
@@ -4704,7 +4826,7 @@ void StopVBlankTimer() {
         if (g_vblankThread.joinable()) {
             g_vblankThread.join();
         }
-        printf("[VBlank] Timer stopped\n");
+        LOGF_INFO("[VBlank] Timer stopped");
     }
 }
 
@@ -4713,10 +4835,9 @@ void VdSetGraphicsInterruptCallback(uint32_t callback, uint32_t userData)
     g_gpuRingBuffer.interruptCallback = callback;
     g_gpuRingBuffer.interruptUserData = userData;
     
-    printf("[VdSetGraphicsInterruptCallback] callback=0x%08X userData=0x%08X\n", callback, userData);
+    LOGF_INFO("[VdSetGraphicsInterruptCallback] callback=0x{:08X} userData=0x{:08X}", callback, userData);
     
-    // DISABLED: Forced VBlank timer - let game run naturally (MarathonRecomp approach)
-    // StartVBlankTimer();
+    StartVBlankTimer();
 }
 
 uint32_t VdInitializeEngines()
@@ -4742,9 +4863,13 @@ void VdQueryVideoFlags()
     LOG_UTILITY("!!! STUB !!!");
 }
 
-void VdCallGraphicsNotificationRoutines()
+void VdCallGraphicsNotificationRoutines(uint32_t type, uint32_t data)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    static uint32_t s_notifCount = 0;
+    if (++s_notifCount <= 5 || (s_notifCount % 60) == 0)
+    {
+        LOGF_UTILITY("type={} data={}", type, data);
+    }
 }
 
 void VdInitializeScalerCommandBuffer()
@@ -5108,8 +5233,7 @@ bool RtlTryEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
         return false;
 
     // printf("RtlTryEnterCriticalSection\n");
-    be<uint32_t> thisThread = g_ppcContext->r13.u32;
-    assert(thisThread != NULL);
+    be<uint32_t> thisThread = (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
 
     std::atomic_ref owningThread(cs->OwningThread);
 
@@ -5325,7 +5449,7 @@ uint32_t NtReleaseSemaphore(uint32_t Handle, uint32_t ReleaseCount, int32_t* Pre
     {
         obj = GetKernelObject(Handle);
     }
-    else if (Handle < PPC_MEMORY_SIZE && g_memory.base != nullptr)
+    else if (Handle >= 0x10000 && Handle <= 0xF0000000 && g_memory.base != nullptr)
     {
         XDISPATCHER_HEADER* header = reinterpret_cast<XDISPATCHER_HEADER*>(g_memory.Translate(Handle));
         if (header->Type == 5)
@@ -8414,8 +8538,12 @@ PPC_FUNC(sub_82D925B8) {
 	ctx.r26.s64 = 0;
 	ctx.r28.s64 = ctx.r11.s64 + 20196;
 
-	LOGF_INFO("[TRACE sub_82D925B8] Start 8-iteration category hash: r3=0x{:08X} r4=0x{:08X}",
-	          ctx.r3.u32, ctx.r4.u32);
+	static uint32_t s_callCount = 0;
+	bool shouldLog = (++s_callCount <= 3);
+	if (shouldLog) {
+		LOGF_INFO("[TRACE sub_82D925B8] Start 8-iteration category hash: r3=0x{:08X} r4=0x{:08X}",
+		          ctx.r3.u32, ctx.r4.u32);
+	}
 
 	for (int iter = 0; iter < 8; ++iter) {
 		cr6.compare<uint32_t>(ctx.r30.u32, 0, ctx.xer);
@@ -8443,8 +8571,10 @@ PPC_FUNC(sub_82D925B8) {
 		}
 
 		PPC_STORE_U32(ctx.r31.u32 + 0, ctx.r3.u32);
-		LOGF_INFO("[TRACE sub_82D925B8] iter {}/8: [0x{:08X}] = 0x{:08X}", 
-		          iter + 1, ctx.r31.u32, ctx.r3.u32);
+		if (shouldLog) {
+			LOGF_INFO("[TRACE sub_82D925B8] iter {}/8: [0x{:08X}] = 0x{:08X}", 
+			          iter + 1, ctx.r31.u32, ctx.r3.u32);
+		}
 		ctx.r31.s64 = ctx.r31.s64 + 4;
 	}
 
@@ -8515,6 +8645,25 @@ loc_82380AC8:
     if (cr6.eq) goto loc_82380B08;
     PPC_STORE_U32(ctx.r10.u32 + 0, ctx.r11.u32);
 loc_82380B08:
+    {
+        uint16_t cSize = PPC_LOAD_U16(ctx.r31.u32 + 4);
+        uint16_t cCount = PPC_LOAD_U16(ctx.r31.u32 + 6);
+        if (cSize == 0 || cCount == 0) {
+            uint32_t offset = (ctx.r31.u32 >= ctx.r30.u32) ? (ctx.r31.u32 - ctx.r30.u32) : 296;
+            if (cSize == 0) {
+                uint32_t slot = (offset >= 264) ? ((offset - 264) >> 3) : 4;
+                cSize = (slot > 0) ? static_cast<uint16_t>(slot << 2) : 16;
+                if (cSize < 16) cSize = 16;
+                if (cSize > 2048) cSize = 2048;
+                PPC_STORE_U16(ctx.r31.u32 + 4, cSize);
+            }
+            cCount = (4096 - 32) / cSize;
+            if (cCount == 0) cCount = 1;
+            PPC_STORE_U16(ctx.r31.u32 + 6, cCount);
+            LOGF_INFO("[sub_82380A50] Initialized SBA bucket 0x{:08X} (offset={}) -> chunkSize={} chunkCount={}",
+                      ctx.r31.u32, offset, cSize, cCount);
+        }
+    }
     ctx.r7.s64 = 0;
     ctx.r9.u64 = PPC_LOAD_U32(ctx.r13.u32 + 0);
     ctx.r8.s64 = 176;
@@ -9915,6 +10064,218 @@ PPC_FUNC(sub_831E0BE8)
     ctx.r3.u64 = 0;
 }
 
+PPC_EXTERN_FUNC(sub_8255DC58);
+PPC_EXTERN_FUNC(sub_831CF770);
+void sub_831D1618(PPCContext& ctx, uint8_t* base);
+
+PPC_FUNC(sub_831E20C8)
+{
+    const uint32_t caller = GET_CALLER_LR();
+    LOGF_WARNING("[sub_831E20C8] Fatal XML/AST error handler! caller_lr=0x{:08X} r3=0x{:08X}", caller, ctx.r3.u32);
+    ctx.r3.u64 = 0;
+}
+
+// =============================================================================
+// XML / AST Node Allocator & Factory (sub_831D1618)
+// Resolves switch jump tables at 0x831D1664 (types 0-15) and 0x831D17C8 (types 17-30)
+// =============================================================================
+PPC_FUNC(sub_831D1618)
+{
+    uint32_t nodePtr = ctx.r3.u32;
+    if (nodePtr == 0 || nodePtr < 0x10000)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    uint8_t type = PPC_LOAD_U8(nodePtr + 8);
+
+    static int s_nodeCount = 0;
+    ++s_nodeCount;
+    if (s_nodeCount <= 30 || type == 255)
+    {
+        uint32_t namePtr = PPC_LOAD_U32(nodePtr + 0);
+        const char* name = (namePtr >= 0x10000 && namePtr < PPC_MEMORY_SIZE) ? reinterpret_cast<const char*>(base + namePtr) : "(null)";
+        LOGF_INFO("[sub_831D1618] #{} node=0x{:08X} type={} name='{}'", s_nodeCount, nodePtr, type, name);
+    }
+
+    if (type == 16)
+    {
+        ctx.r3.s64 = 16;
+        sub_8255DC58(ctx, base);
+        uint32_t alloc = ctx.r3.u32;
+        if (alloc == 0)
+        {
+            ctx.r3.u64 = 0;
+            return;
+        }
+        ctx.r4.u64 = nodePtr;
+        sub_831CF770(ctx, base);
+        return;
+    }
+
+    if (type == 255)
+    {
+        ctx.r3.u64 = nodePtr;
+        sub_831E20C8(ctx, base);
+        return;
+    }
+
+    uint32_t vtable = 0;
+    bool isType13 = false;
+
+    if (type <= 15)
+    {
+        switch (type)
+        {
+            case 0: case 1: case 2: case 3:
+            case 4: case 5: case 6: case 7:
+                vtable = 0x82077430; // Block 0x831D1800
+                break;
+            case 8: case 9: case 10:
+                vtable = 0x82077350; // Block 0x831D1830
+                break;
+            case 11:
+                vtable = 0x82077400; // Block 0x831D16CC
+                break;
+            case 12:
+                vtable = 0x82077418; // Block 0x831D16A4
+                break;
+            case 13:
+                vtable = 0x82077368; // Block 0x831D16F4 (12 bytes, child)
+                isType13 = true;
+                break;
+            case 14:
+                vtable = 0x82077380; // Block 0x831D1728
+                break;
+            case 15:
+                vtable = 0x820773D0; // Block 0x831D1750
+                break;
+            default:
+                break;
+        }
+    }
+    else if (type >= 17 && type <= 30)
+    {
+        uint32_t subIdx = type - 17;
+        switch (subIdx)
+        {
+            case 0: case 1: case 5: case 6: case 7:
+                vtable = 0x820773E8; // Block 0x831D1858
+                break;
+            case 2: case 3: case 4: case 10:
+                vtable = 0x82077350; // Block 0x831D1830
+                break;
+            case 8: case 9: case 11: case 12: case 13:
+                vtable = 0x82077430; // Block 0x831D1800
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (vtable == 0)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    if (isType13)
+    {
+        ctx.r3.s64 = 12;
+        sub_8255DC58(ctx, base);
+        uint32_t alloc = ctx.r3.u32;
+        if (alloc == 0)
+        {
+            ctx.r3.u64 = 0;
+            return;
+        }
+        PPC_STORE_U32(alloc + 0, vtable);
+        PPC_STORE_U32(alloc + 4, nodePtr);
+
+        // Recursively create child node
+        uint32_t childNode = PPC_LOAD_U32(nodePtr + 28);
+        ctx.r3.u64 = childNode;
+        sub_831D1618(ctx, base);
+        PPC_STORE_U32(alloc + 8, ctx.r3.u32);
+
+        ctx.r3.u64 = alloc;
+        return;
+    }
+    else
+    {
+        ctx.r3.s64 = 8;
+        sub_8255DC58(ctx, base);
+        uint32_t alloc = ctx.r3.u32;
+        if (alloc == 0)
+        {
+            ctx.r3.u64 = 0;
+            return;
+        }
+        PPC_STORE_U32(alloc + 0, vtable);
+        PPC_STORE_U32(alloc + 4, nodePtr);
+
+        ctx.r3.u64 = alloc;
+        return;
+    }
+}
+
+// =============================================================================
+// AST / Node Virtual Method Dispatcher (sub_831C4EA8)
+// Resolves 31-entry switch jump table at 0x831C4F50
+// =============================================================================
+PPC_FUNC(sub_831C4EA8)
+{
+    uint32_t r31_in = ctx.r3.u32;
+    uint32_t r29_in = ctx.r4.u32;
+    uint32_t r30_in = ctx.r5.u32;
+
+    if (r31_in < 0x10000 || r30_in < 0x10000)
+    {
+        return;
+    }
+
+    uint32_t r8 = PPC_LOAD_U32(r30_in + 4);
+    if (r8 < 0x10000)
+    {
+        return;
+    }
+
+    uint8_t type = PPC_LOAD_U8(r8 + 8);
+
+    if (type <= 30 && type != 255)
+    {
+        uint32_t targetAddr = PPC_LOAD_U32(0x831C4F50 + type * 4);
+        if (targetAddr >= 0x82000000 && targetAddr < 0x84000000)
+        {
+            uint32_t instr = PPC_LOAD_U32(targetAddr + 12);
+            uint32_t vtableOffset = instr & 0xFFFF;
+
+            uint32_t r11_child = PPC_LOAD_U32(r8 + 4);
+            uint32_t arg_r4 = r11_child + r29_in;
+
+            uint32_t vtable = PPC_LOAD_U32(r31_in + 0);
+            if (vtable >= 0x80000000)
+            {
+                uint32_t methodPtr = PPC_LOAD_U32(vtable + vtableOffset);
+                auto* method = g_memory.FindFunction(methodPtr);
+                if (method)
+                {
+                    ctx.r3.u64 = r31_in;
+                    ctx.r4.u64 = arg_r4;
+                    ctx.r5.u64 = r30_in;
+                    method(ctx, base);
+                }
+                else
+                {
+                    LOGF_WARNING("[sub_831C4EA8] Method 0x{:08X} (offset {}) not found", methodPtr, vtableOffset);
+                }
+            }
+        }
+        PPC_STORE_U32(r31_in + 4, 0);
+    }
+}
+
 PPC_FUNC(sub_831D7238)
 {
     uint32_t r3_in = ctx.r3.u32;
@@ -10382,6 +10743,473 @@ PPC_FUNC(sub_83767B20)
     ctx.r4.s64 = priority;
     sub_82283BD8(ctx, base);
 }
+
+PPC_FUNC(sub_82918D28)
+{
+    PPC_FUNC_PROLOGUE();
+    uint32_t poolMgr = PPC_LOAD_U32(0x83BFBE8C);
+    if (poolMgr == 0)
+    {
+        LOG_WARNING("[sub_82918D28] Global pool manager at 0x83BFBE8C is NULL! Calling sub_83210CF0...");
+        uint32_t savedR1 = ctx.r1.u32;
+        sub_83210CF0(ctx, base);
+        ctx.r1.u32 = savedR1;
+        poolMgr = PPC_LOAD_U32(0x83BFBE8C);
+        LOGF_WARNING("[sub_82918D28] After sub_83210CF0: 0x83BFBE8C = 0x{:08X}", poolMgr);
+    }
+    sub_828FC6D8(ctx, base);
+    sub_828FCA78(ctx, base);
+}
+
+// =============================================================================
+// GTA V Language selector & Audio/Channel state manager
+// =============================================================================
+void sub_83639E20(PPCContext& ctx, uint8_t* base);
+void sub_83639D48(PPCContext& ctx, uint8_t* base);
+void sub_8299D170(PPCContext& ctx, uint8_t* base);
+void sub_8245BE60(PPCContext& ctx, uint8_t* base);
+void sub_82988A10(PPCContext& ctx, uint8_t* base);
+void sub_8259C478(PPCContext& ctx, uint8_t* base);
+void sub_824E4C48(PPCContext& ctx, uint8_t* base);
+void sub_82995428(PPCContext& ctx, uint8_t* base);
+void sub_82984778(PPCContext& ctx, uint8_t* base);
+void sub_8274A2D0(PPCContext& ctx, uint8_t* base);
+void sub_82688538(PPCContext& ctx, uint8_t* base);
+void sub_8273DEB8(PPCContext& ctx, uint8_t* base);
+void sub_82453808(PPCContext& ctx, uint8_t* base);
+void sub_825A89E8(PPCContext& ctx, uint8_t* base);
+void sub_825C2C30(PPCContext& ctx, uint8_t* base);
+void sub_825BD7C0(PPCContext& ctx, uint8_t* base);
+
+PPC_FUNC(sub_8257A2A8)
+{
+    PPC_FUNC_PROLOGUE();
+    // Resolves game language: 0 = English
+    ctx.r3.u64 = 0;
+}
+
+PPC_FUNC(sub_825C9768)
+{
+    PPC_FUNC_PROLOGUE();
+    uint32_t caseId = ctx.r3.u32;
+    uint32_t r4 = ctx.r4.u32;
+    if (caseId > 27) return;
+
+    switch (caseId)
+    {
+    case 0:
+    {
+        sub_8299D170(ctx, base);
+        ctx.r3.s64 = 0;
+        sub_8245BE60(ctx, base);
+        ctx.r4.s64 = 250;
+        ctx.r5.s64 = (int32_t)-2084569088 + 3780;
+        sub_82988A10(ctx, base);
+        uint32_t r11 = PPC_LOAD_U32((uint32_t)-2087387136 - 18256);
+        if (!r11) return;
+        r11 = PPC_LOAD_U32(r11 + 4);
+        if (!r11) return;
+        r11 = PPC_LOAD_U32(r11 + 2912);
+        if (!r11)
+        {
+            ctx.r3.s64 = 1827667968 | 14640;
+            ctx.r4.u64 = PPC_LOAD_U32((uint32_t)-2088173568 + 23080);
+            sub_8259C478(ctx, base);
+        }
+        else
+        {
+            uint32_t r11_264 = PPC_LOAD_U32(r11 + 264);
+            uint32_t r10 = PPC_LOAD_U32(r11_264 + 3444);
+            bool b1 = (r10 >> 30) & 1;
+            bool cond1 = false;
+            if (b1) {
+                cond1 = (PPC_LOAD_U32(r11_264 + 3620) != 0);
+            } else {
+                cond1 = (PPC_LOAD_U32(r11_264 + 3624) != 0);
+            }
+            if (cond1) {
+                ctx.r3.s64 = 1827667968 | 14640;
+                ctx.r4.u64 = PPC_LOAD_U32((uint32_t)-2088173568 + 23080);
+                sub_8259C478(ctx, base);
+            } else {
+                uint32_t r10_2 = PPC_LOAD_U32(r11_264 + 3444);
+                bool b2 = (r10_2 >> 30) & 1;
+                bool cond2 = false;
+                if (b2) {
+                    cond2 = (PPC_LOAD_U32(r11_264 + 3620) == 0);
+                }
+                if (cond2) {
+                    sub_824E4C48(ctx, base);
+                    if ((ctx.r3.u32 & 0xFF) == 0) {
+                        ctx.r3.s64 = 77398016 | 6776;
+                        ctx.r4.u64 = PPC_LOAD_U32((uint32_t)-2088173568 + 23080);
+                        sub_8259C478(ctx, base);
+                    } else {
+                        sub_824E4C48(ctx, base);
+                        if ((ctx.r3.u32 & 0xFF) != 0) {
+                            ctx.r3.s64 = 855244800 | 62851;
+                            ctx.r4.u64 = PPC_LOAD_U32((uint32_t)-2088173568 + 23080);
+                            sub_8259C478(ctx, base);
+                        }
+                    }
+                } else {
+                    sub_824E4C48(ctx, base);
+                    if ((ctx.r3.u32 & 0xFF) != 0) {
+                        ctx.r3.s64 = 855244800 | 62851;
+                        ctx.r4.u64 = PPC_LOAD_U32((uint32_t)-2088173568 + 23080);
+                        sub_8259C478(ctx, base);
+                    }
+                }
+            }
+        }
+        if (PPC_LOAD_U8((uint32_t)-2086731776 - 28650) != 0)
+        {
+            ctx.r3.s64 = (int32_t)-1287716864 | 23532;
+            ctx.r4.u64 = PPC_LOAD_U32((uint32_t)-2088173568 + 23080);
+            sub_8259C478(ctx, base);
+        }
+        break;
+    }
+    case 1:
+    {
+        if (r4 != 1) return;
+        ctx.r3.s64 = 300;
+        ctx.r5.s64 = 0;
+        ctx.r6.s64 = 0;
+        uint32_t f_u32 = PPC_LOAD_U32((uint32_t)-2113470464 + 9436);
+        float f_val;
+        memcpy(&f_val, &f_u32, sizeof(float));
+        ctx.f1.f64 = (double)f_val;
+        sub_82995428(ctx, base);
+        uint32_t r11 = PPC_LOAD_U32((uint32_t)-2084175872 - 11968) + 800;
+        PPC_STORE_U32((uint32_t)-2088173568 + 23752, r11);
+        break;
+    }
+    case 3:
+    {
+        sub_82984778(ctx, base);
+        break;
+    }
+    case 7:
+    {
+        uint32_t val = PPC_LOAD_U32((uint32_t)-2088173568 + 23080 + 28);
+        PPC_STORE_U32((uint32_t)-2088173568 - 17920, val);
+        break;
+    }
+    case 10:
+    {
+        if (r4 != 1 && r4 != 3) return;
+        uint32_t r3_val = PPC_LOAD_U32((uint32_t)-2088173568 + 23080 + 40);
+        if (r3_val == 0xFFFFFFFF)
+        {
+            ctx.r3.s64 = (int32_t)-2087911424 - 22296;
+            sub_8274A2D0(ctx, base);
+        }
+        else
+        {
+            sub_82688538(ctx, base);
+            ctx.r4.u64 = ctx.r3.u64;
+            ctx.r3.s64 = (int32_t)-2087911424 - 22296;
+            sub_8273DEB8(ctx, base);
+        }
+        break;
+    }
+    case 12:
+    {
+        uint32_t f0_u = PPC_LOAD_U32((uint32_t)-2113929216 + 3368);
+        uint32_t f13_u = PPC_LOAD_U32((uint32_t)-2113929216 + 3780);
+        uint32_t f12_u = PPC_LOAD_U32((uint32_t)-2113929216 + 4072);
+        uint32_t f11_u = PPC_LOAD_U32((uint32_t)-2113470464 + 23776);
+        float f0, f13, f12, f11;
+        memcpy(&f0, &f0_u, 4);
+        memcpy(&f13, &f13_u, 4);
+        memcpy(&f12, &f12_u, 4);
+        memcpy(&f11, &f11_u, 4);
+        int32_t r11 = (int32_t)PPC_LOAD_U32((uint32_t)-2088173568 + 23080 + 48);
+        uint8_t r9 = PPC_LOAD_U8((uint32_t)-2085552128 + 15083);
+        double f10 = (double)r11;
+        float f9 = (float)f10;
+        float f8 = f9 * f0;
+        float f6 = (-f8 >= 0.0f) ? f13 : f8;
+        float res = f6 * f12 + f11;
+        uint32_t res_u;
+        memcpy(&res_u, &res, 4);
+        PPC_STORE_U32((uint32_t)-2087387136 + 20372, res_u);
+        if (r9 != 0 && r4 == 3)
+        {
+            sub_82453808(ctx, base);
+        }
+        break;
+    }
+    case 27:
+    {
+        if (r4 == 0) return;
+        if (r4 == 1)
+        {
+            uint32_t r11 = PPC_LOAD_U32((uint32_t)-2084175872 - 11968) + 2000;
+            PPC_STORE_U32((uint32_t)-2088173568 + 23892, r11);
+        }
+        ctx.r4.s64 = 212;
+        ctx.r3.u64 = PPC_LOAD_U32((uint32_t)-2088173568 + 23808);
+        uint32_t r11_val = PPC_LOAD_U32((uint32_t)-2088173568 + 23080 + 108);
+        ctx.r5.s64 = 10 - (int64_t)r11_val;
+        sub_825A89E8(ctx, base);
+        sub_825C2C30(ctx, base);
+        ctx.r4.s64 = 2;
+        ctx.r3.u64 = PPC_LOAD_U32((uint32_t)-2088108032 - 28328 + 8);
+        sub_825BD7C0(ctx, base);
+        uint32_t r11_addr = PPC_LOAD_U32((uint32_t)-2088173568 + 23856);
+        PPC_STORE_U8(r11_addr + 168, 1);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+// =============================================================================
+// Xbox 360 D3D / GPU notification packet processor
+// =============================================================================
+void sub_836BAB18(PPCContext& ctx, uint8_t* base);
+void sub_8255DD48(PPCContext& ctx, uint8_t* base);
+void sub_836B81B8(PPCContext& ctx, uint8_t* base);
+void sub_836B7DE8(PPCContext& ctx, uint8_t* base);
+void sub_836B61C8(PPCContext& ctx, uint8_t* base);
+void sub_836B6210(PPCContext& ctx, uint8_t* base);
+
+PPC_FUNC(sub_836B2AB0)
+{
+    PPC_FUNC_PROLOGUE();
+    uint32_t r31_in = ctx.r3.u32;
+    if (!r31_in) return;
+
+    ctx.r31.u64 = r31_in;
+    __imp__KeGetCurrentProcessType(ctx, base);
+    uint32_t r11_ptr = (ctx.r3.s32 == 2) ? 
+        PPC_LOAD_U32((uint32_t)-2113929216 + 2156) : 
+        PPC_LOAD_U32((uint32_t)-2113929216 + 2152);
+
+    ctx.r3.u64 = PPC_LOAD_U32(r11_ptr);
+    uint32_t r11_val = PPC_LOAD_U32(ctx.r31.u32);
+    uint32_t r10 = (r11_val & 0xF) - 1;
+    if (r10 > 11) goto loc_836B2D34;
+
+    {
+        uint32_t byteTableAddr = (uint32_t)-2112880640 + 29272; // 0x82107258
+        uint32_t r0 = PPC_LOAD_U8(byteTableAddr + r10);
+        uint32_t target = 0x836B2B28 + (r0 << 2);
+
+        switch (target)
+        {
+        case 0x836B2B28: goto case_0x836B2B28;
+        case 0x836B2B6C: goto case_0x836B2B6C;
+        case 0x836B2BAC: goto case_0x836B2BAC;
+        case 0x836B2BB8: goto case_0x836B2BB8;
+        case 0x836B2BE8: goto case_0x836B2BE8;
+        case 0x836B2C14: goto case_0x836B2C14;
+        case 0x836B2C44: goto case_0x836B2C44;
+        case 0x836B2C74: goto case_0x836B2C74;
+        case 0x836B2CA4: goto case_0x836B2CA4;
+        case 0x836B2CD4: goto case_0x836B2CD4;
+        case 0x836B2D04: goto case_0x836B2D04;
+        default: goto loc_836B2D34;
+        }
+    }
+
+case_0x836B2B28:
+    if ((r11_val & 0x40000000) != 0) goto loc_836B2D34;
+    if ((r11_val & 0x80000000) != 0)
+    {
+        uint32_t r11_44 = PPC_LOAD_U32(ctx.r31.u32 + 44);
+        uint32_t r9_28 = PPC_LOAD_U32(ctx.r31.u32 + 28);
+        ctx.r4.u32 = r11_44 / 5120;
+        ctx.r3.u64 = r9_28 & 0xFFF;
+        sub_836BAB18(ctx, base);
+    }
+    if ((PPC_LOAD_U32(ctx.r31.u32 + 32) & 0x1) != 0)
+    {
+        PPC_STORE_U32((uint32_t)-2083717120 + 10928, 0);
+    }
+    goto loc_836B2D34;
+
+case_0x836B2B6C:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        ctx.r5.s64 = 13;
+        sub_8250D988(ctx, base);
+    }
+    {
+        uint32_t r11_32 = PPC_LOAD_U32(ctx.r31.u32 + 32);
+        uint32_t r10_48 = PPC_LOAD_U32(ctx.r31.u32 + 48);
+        ctx.r3.u64 = r11_32 & 0xFFFFF000;
+        ctx.r30.u64 = r10_48 & 0xFFFFF000;
+        ctx.r4.s64 = -1317011456;
+        sub_8255DD48(ctx, base);
+        ctx.r3.u64 = ctx.r30.u64;
+        goto case_0x836B2BAC;
+    }
+
+case_0x836B2BAC:
+    ctx.r4.s64 = -1317011456;
+    sub_8255DD48(ctx, base);
+    goto loc_836B2D34;
+
+case_0x836B2BB8:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        ctx.r5.s64 = 9;
+        sub_8250D988(ctx, base);
+    }
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 24) & 0xFFFFFFFC;
+    goto case_0x836B2BAC;
+
+case_0x836B2BE8:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r5.s64 = 11;
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        sub_8250D988(ctx, base);
+    }
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 24);
+    goto case_0x836B2BAC;
+
+case_0x836B2C14:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        ctx.r5.s64 = 7;
+        sub_8250D988(ctx, base);
+    }
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 32);
+    goto case_0x836B2BAC;
+
+case_0x836B2C44:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r5.s64 = 8;
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        sub_8250D988(ctx, base);
+    }
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 24);
+    goto case_0x836B2BAC;
+
+case_0x836B2C74:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r5.s64 = 17;
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        sub_8250D988(ctx, base);
+    }
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 24);
+    goto case_0x836B2BAC;
+
+case_0x836B2CA4:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        ctx.r5.s64 = 15;
+        sub_8250D988(ctx, base);
+    }
+    ctx.r3.u64 = ctx.r31.u64;
+    sub_836B81B8(ctx, base);
+    goto loc_836B2D34;
+
+case_0x836B2CD4:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        ctx.r5.s64 = 21;
+        sub_8250D988(ctx, base);
+    }
+    ctx.r3.u64 = ctx.r31.u64;
+    sub_836B7DE8(ctx, base);
+    goto loc_836B2D34;
+
+case_0x836B2D04:
+    ctx.r4.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+    if (ctx.r4.u32 != 0 && ctx.r3.u32 != 0)
+    {
+        ctx.r7.s64 = 0;
+        ctx.r6.u64 = ctx.r31.u64;
+        ctx.r5.s64 = 23;
+        sub_8250D988(ctx, base);
+    }
+    ctx.r3.u64 = ctx.r31.u64;
+    sub_836B61C8(ctx, base);
+    goto loc_836B2D34;
+
+loc_836B2D34:
+    ctx.r4.s64 = 612368384;
+    ctx.r3.u64 = ctx.r31.u64;
+    sub_8255DD48(ctx, base);
+}
+
+// =============================================================================
+// GTA V Format / Semantic string and Texture Pitch helpers
+// =============================================================================
+PPC_FUNC(sub_82332868)
+{
+    PPC_FUNC_PROLOGUE();
+    uint32_t id = ctx.r3.u32;
+    static const uint32_t kPtrs[] = {
+        0x820CBCCC, 0x82000C48, 0x82000CA8, 0x82000B4C, 0x82000C6C, 
+        0x820CBCC8, 0x820CBCC4, 0x820CBCC0, 0x820CBCBC, 0x820CBCB8, 
+        0x820CBCB4, 0x82000BEC, 0x82000CA4, 0x82020B2C, 0x820013C8, 
+        0x820CBCAC, 0x820C66E8, 0x820CBCA8, 0x820CBCA4, 0x8202F438, 
+        0x820AE27C, 0x82018990, 0x82045A2C, 0x820CBCA0, 0x820CBC9C, 
+        0x820CBC98, 0x820CBC94, 0x820CBC90, 0x820010C4
+    };
+    if (id < sizeof(kPtrs) / sizeof(kPtrs[0]))
+    {
+        ctx.r3.u64 = kPtrs[id];
+    }
+    else
+    {
+        ctx.r3.u64 = 0;
+    }
+}
+
+PPC_FUNC(sub_83217D38)
+{
+    PPC_FUNC_PROLOGUE();
+    uint32_t obj = ctx.r3.u32;
+    if (!obj) return;
+
+    static const uint32_t kFormatBpp[41] = {
+        0, 4, 8, 8, 4, 4, 4, 4, 8, 12, 12, 8, 8, 16, 16, 16, 16, 8, 16, 8, 12,
+        12, 20, 12, 16, 20, 12, 16, 24, 20, 12, 16, 12, 12, 4, 8, 16, 24, 12, 8, 12
+    };
+
+    uint32_t r10 = PPC_LOAD_U32(obj + 4) & 0x1FFFFFFF;
+    uint32_t bpp = (r10 < 41) ? kFormatBpp[r10] : 0;
+    bool isBlock = (r10 >= 1 && r10 <= 8);
+    uint32_t minWidth = isBlock ? 4 : 1;
+    uint16_t width = PPC_LOAD_U16(obj + 0);
+    uint32_t effWidth = (width > minWidth) ? width : minWidth;
+    int32_t r11_val = (int32_t)(effWidth * bpp);
+    int32_t r10_val = r11_val >> 3;
+    if (r11_val < 0 && (r11_val & 7)) r10_val++;
+    PPC_STORE_U16(obj + 12, (uint16_t)r10_val);
+}
+
 
 
 

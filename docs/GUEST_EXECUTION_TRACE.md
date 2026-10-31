@@ -225,5 +225,42 @@ With these resolutions in place, the runtime achieves:
 - Over **14,500+ allocations and deallocations** cleanly tracked through RAGE's internal bucket allocator.
 - Multiple worker threads actively running synchronized wait-events and streaming resources.
 
+---
+
+## Phase 6 Advance: Unmapped Switch-Table Elimination, SBA Bucket Recovery, Storage Probing & Virtual Memory Stability
+
+### 1. GTA V Language Selector Switch-Table Hook (`sub_8257A2A8`)
+- **Issue**: RAGE's language query routine (`sub_8257A2A8`) used a 12-entry switch table (`0x8257A2F0`). XenonRecomp lifted this table as raw instructions followed by an indirect call to `0x8257A2F0`. Because the jump target was a basic-block label rather than an exported function, `PPC_LOOKUP_FUNC` failed, causing `UnmappedIndirectHandler` to execute and leave language configurations unset.
+- **Fix**: Hooked `sub_8257A2A8` in `imports.cpp` to return `0` (English) in `ctx.r3`, cleanly skipping the unmapped jump table.
+
+### 2. Thread Task Switch-Table & Stack Preservation (`sub_825C9768`)
+- **Issue**: Worker thread loop (`sub_825D17B8` under thread entry `0x8364A940`) called `sub_825C9768` for task IDs `0..48`. `sub_825C9768` contained a 28-case switch statement (`0x825C9798`) lifted as an unmapped indirect jump. Invoking `UnmappedIndirectHandler` skipped the function epilogue (`loc_825C9B24`), causing `r1` stack register corruption (-112 bytes per iteration) until the stack underflowed.
+- **Fix**: Implemented complete C++ function hook `PPC_FUNC(sub_825C9768)` in `imports.cpp` with exact register arithmetic, branch dispatch for all cases, and guaranteed epilogue execution, completely halting stack degradation.
+
+### 3. D3D / GPU Notification Packet Dispatch (`sub_836B2AB0`)
+- **Issue**: The Xbox 360 D3D/GPU notification packet processor (`sub_836B2AB0`) contained a 12-case computed jump (`0x836B2B28 + r0*4`), resulting in unmapped calls to `0x836B2B6C` and `0x836B2B28`.
+- **Fix**: Implemented `PPC_FUNC(sub_836B2AB0)` with native C++ switch labels, routing opcodes (7, 8, 9, 11, 13, 15, 17, 21, 23, 25) directly to `sub_8250D988` and recycling packets via `sub_8255DD48`.
+
+### 4. Texture Format Pitch Calculator (`sub_83217D38`) & Semantic Name Resolver (`sub_82332868`)
+- **Issue**: Format pitch computation (`sub_83217D38`) and vertex semantic name resolution (`sub_82332868`) contained computed jump tables lifted as dummy function targets `0x83217D60` and `0x8233288C`.
+- **Fix**: Implemented `PPC_FUNC(sub_83217D38)` with the 41-format bpp table and pitch math (`(effWidth * bpp + 7) >> 3`), and `PPC_FUNC(sub_82332868)` returning string pointers for semantic IDs 0..28.
+
+### 5. Harddisk Partition Probing Bypass (`\Device\Harddisk0\partition0`)
+- **Issue**: `NtCreateFile` failed when GTA V probed `\Device\Harddisk0\partition0` to verify disk install partitions, returning `STATUS_OBJECT_NAME_NOT_FOUND`.
+- **Fix**: Added explicit bypass in `NtCreateFile` intercepting `device\harddisk` queries, returning a valid dummy file handle referencing `/dev/null` with `STATUS_SUCCESS` (`FILE_DEVICE_DISK` / `FATX`).
+
+### 6. Giant Virtual Reservation OOM (`NtAllocateVirtualMemory`)
+- **Issue**: RAGE requested a 2.4 GB virtual address space reservation (`size = 0x8FC00000`, `AllocationType = MEM_RESERVE`) with `BaseAddress = 0`. Because `BaseAddress == 0`, `NtAllocateVirtualMemory` forwarded the 2.4 GB request to `g_userHeap.AllocPhysical`, immediately exhausting the 1.5 GB physical heap.
+- **Fix**: Detected virtual reservations (`size > 256MB` or `MEM_RESERVE`), returning `*BaseAddress = 0x40000000` and `STATUS_SUCCESS` without allocating physical heap memory, aligning with the already mapped 4 GB address space.
+
+### 7. Dispatcher Handle Validation in Synchronization Primitives
+- **Issue**: In `NtReleaseSemaphore` and `NtWaitForSingleObjectEx`, handle validation checked `Handle < PPC_MEMORY_SIZE`. When guest code passed `-1` (`0xFFFFFFFF`), the check evaluated to true, attempting to dereference `base + 0xFFFFFFFF` and triggering SIGSEGV at `0x200000007`.
+- **Fix**: Constrained guest dispatcher handle range to `[0x10000, 0xF0000000]`. Handles outside this range return `STATUS_INVALID_HANDLE`.
+
+### 8. SBA (Small Block Allocator) Bucket Auto-Initialization (`sub_82380A50`)
+- **Issue**: In `sub_82380A50`, if an SBA bucket header had `chunkSize == 0` or `chunkCount == 0`, the bucket header stored `-1` (`0xFFFFFFFF`) in `[page + 8]`. Consequently, every subsequent allocation deemed the page full and invoked `sub_82374FC0` to allocate a fresh 4096-byte page. Over 18,000 allocations exhausted the small block arena (~73 MB allocated) and corrupted the arena free list.
+- **Fix**: Added auto-initialization in `sub_82380A50` detecting `cSize == 0 || cCount == 0`, calculating the exact chunk size from the bucket slot index (`slot << 2`, 16–2048 bytes), and setting `chunkCount = (4096 - 32) / cSize`. Each 4KB page now yields 31–254 allocations, reducing page requests by 99% and stabilizing the small block allocator.
+
+
 
 
