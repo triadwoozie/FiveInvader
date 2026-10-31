@@ -87,6 +87,10 @@ set(FIVEINVADER_KERNEL_CXX_SOURCES
     "kernel/io/net_socket.cpp"
     "kernel/io/net_session.cpp"
     "kernel/io/p2p_manager.cpp"
+    "kernel/io/session_tracker.cpp"
+    "kernel/io/session_tracker_community.cpp"
+    "kernel/io/session_tracker_firebase.cpp"
+    "kernel/io/session_tracker_lan.cpp"
     "kernel/io/signaling_client.cpp"
     "kernel/game_init.cpp"
     # "kernel/sync_table.cpp"  # REMOVED - using Sonic approach
@@ -450,7 +454,20 @@ target_link_libraries(FiveInvader PRIVATE
 target_link_libraries(FiveInvader PRIVATE ffmpeg)
 
 # Link abseil libraries for GameNetworkingSockets (protobuf dependency)
-if (APPLE)
+find_package(absl CONFIG QUIET)
+if (TARGET absl::log_internal_message)
+    target_link_libraries(FiveInvader PRIVATE
+        absl::log_internal_message
+        absl::log_internal_check_op
+        absl::log_internal_nullguard
+        absl::examine_stack
+        absl::strerror
+        absl::log_internal_globals
+        absl::raw_hash_set
+        absl::hashtablez_sampler
+        absl::log_sink
+    )
+elseif (APPLE)
     find_library(ABSL_LOG_INTERNAL_CHECK_OP absl_log_internal_check_op HINTS /opt/homebrew/lib)
     find_library(ABSL_LOG_INTERNAL_MESSAGE absl_log_internal_message HINTS /opt/homebrew/lib)
     find_library(ABSL_LOG_INTERNAL_NULLGUARD absl_log_internal_nullguard HINTS /opt/homebrew/lib)

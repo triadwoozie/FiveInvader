@@ -8,57 +8,6 @@
 #include <os/logger.h>
 #include <kernel/xdm.h>
 
-// GTA V Button Mappings (Xbox 360 layout)
-// Based on official GTA V Xbox 360 control scheme
-namespace GTA5Input
-{
-    // Face buttons (XINPUT standard bit positions)
-    constexpr uint16_t BUTTON_A = 0x1000;      // On foot: Sprint | In car: Handbrake
-    constexpr uint16_t BUTTON_B = 0x2000;      // On foot: Melee/Grab | In car: Camera view
-    constexpr uint16_t BUTTON_X = 0x4000;      // On foot: Jump/Climb | In car: Drive-by aim
-    constexpr uint16_t BUTTON_Y = 0x8000;      // On foot: Enter vehicle/Attack | In car: Exit vehicle
-    
-    // D-Pad
-    constexpr uint16_t DPAD_UP = 0x0001;       // Phone
-    constexpr uint16_t DPAD_DOWN = 0x0002;     // Phone down/Skip call
-    constexpr uint16_t DPAD_LEFT = 0x0004;     // Previous weapon/radio station
-    constexpr uint16_t DPAD_RIGHT = 0x0008;    // Next weapon/radio station
-    
-    // Shoulders and sticks
-    constexpr uint16_t LB = 0x0100;            // On foot: Hail taxi | In car: Shoot
-    constexpr uint16_t RB = 0x0200;            // On foot: Take cover | In car: Handbrake
-    constexpr uint16_t LSTICK = 0x0040;        // Crouch/Duck (press left stick)
-    constexpr uint16_t RSTICK = 0x0080;        // Look behind (press right stick)
-    
-    // Start/Back
-    constexpr uint16_t START = 0x0010;         // Pause Menu
-    constexpr uint16_t BACK = 0x0020;          // Camera select
-    
-    // Triggers (analog) - LT/RT
-    constexpr uint8_t LT_THRESHOLD = 30;       // On foot: Aim/Lock-on | In car: Brake/Reverse
-    constexpr uint8_t RT_THRESHOLD = 30;       // On foot: Shoot | In car: Accelerate
-    
-    // Stick deadzones (GTA V uses fairly standard deadzones)
-    constexpr int16_t LEFT_STICK_DEADZONE = 7849;   // ~24% of max
-    constexpr int16_t RIGHT_STICK_DEADZONE = 8689;  // ~26.5% of max
-}
-
-// Current input state for GTA V
-struct GTA5InputState
-{
-    uint16_t buttons = 0;
-    int16_t leftStickX = 0;
-    int16_t leftStickY = 0;
-    int16_t rightStickX = 0;
-    int16_t rightStickY = 0;
-    uint8_t leftTrigger = 0;
-    uint8_t rightTrigger = 0;
-    
-    bool isAiming = false;
-    bool isShooting = false;
-    bool isSprinting = false;
-};
-
 static GTA5InputState g_gta5InputState;
 
 // Dead zone handling - uses GTA V standard deadzones

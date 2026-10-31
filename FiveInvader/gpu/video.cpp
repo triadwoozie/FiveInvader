@@ -135,14 +135,14 @@ namespace plume
 #ifdef FIVEINVADER_METAL
 extern std::unique_ptr<RenderInterface> CreateMetalInterface();
 #endif
-#ifdef SDL_VULKAN_ENABLED
+#if defined(PLUME_SDL_VULKAN_ENABLED) || defined(SDL_VULKAN_ENABLED)
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow sdlWindow);
 #else
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
 #endif
 
     static std::unique_ptr<RenderInterface> CreateVulkanInterfaceWrapper() {
-#ifdef SDL_VULKAN_ENABLED
+#if defined(PLUME_SDL_VULKAN_ENABLED) || defined(SDL_VULKAN_ENABLED)
         return CreateVulkanInterface(GameWindow::s_renderWindow);
 #else
         return CreateVulkanInterface();
@@ -2188,7 +2188,14 @@ bool Video::CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry)
         break;
     }
 
-    g_swapChain = g_queue->createSwapChain(GameWindow::s_renderWindow, bufferCount, BACKBUFFER_FORMAT, Config::MaxFrameLatency);
+    RenderSwapChainDesc swapChainDesc;
+    swapChainDesc.renderWindow = GameWindow::s_renderWindow;
+    swapChainDesc.textureCount = bufferCount;
+    swapChainDesc.format = BACKBUFFER_FORMAT;
+    swapChainDesc.maxFrameLatency = Config::MaxFrameLatency;
+    swapChainDesc.enablePresentWait = g_capabilities.presentWait;
+
+    g_swapChain = g_queue->createSwapChain(swapChainDesc);
     g_swapChain->setVsyncEnabled(Config::VSync);
     g_swapChainValid = !g_swapChain->needsResize();
 
@@ -2742,7 +2749,7 @@ static void HandleAchievementDebugKey()
     {
         // Unlock test achievement (cycles through IDs 1-10)
         AchievementOverlay::Open(g_debugAchievementId);
-        LOG_WARNING("[DEBUG] Achievement test: unlocked ID {}", g_debugAchievementId);
+        LOGF_WARNING("[DEBUG] Achievement test: unlocked ID {}", g_debugAchievementId);
         g_debugAchievementId = (g_debugAchievementId % 10) + 1;
     }
 
@@ -8560,6 +8567,9 @@ GUEST_FUNCTION_HOOK(sub_8285E048, EffectManagerWithCachedShaders);
 
 // =============================================================================
 // GTA V Shader Creation Hook (sub_829D1758)
+// =============================================================================
+// TODO: GTA V address mapping
+#if 0
 // This is the ACTUAL shader creation function called from FXC parsing.
 // Parameters: r3 = pointer to Xbox 360 shader container
 //   r3+0: flags (magic 0x102A11XX)
@@ -8671,6 +8681,7 @@ PPC_FUNC(sub_829D8860)
             s_gtaDrawPrimitiveCount, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32);
     }
 }
+#endif
 
 // =============================================================================
 // GTA V GPU Memory Allocation Stubs

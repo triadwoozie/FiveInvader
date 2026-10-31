@@ -11,6 +11,9 @@
 namespace liberty {
 namespace install {
 
+constexpr uint32_t StfsParser::kBlockSize;
+constexpr uint32_t StfsParser::kHashesPerBlock;
+
 StfsParser::StfsParser()
     : m_isOpen(false)
     , m_packageType(StfsPackageType::kCon)

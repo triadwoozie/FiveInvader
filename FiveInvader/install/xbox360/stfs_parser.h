@@ -108,8 +108,8 @@ public:
     bool ExtractFileToDisk(const std::string& fileName, const std::filesystem::path& outPath);
 
 private:
-    static const uint32_t kBlockSize = 0x1000;
-    static const uint32_t kHashesPerBlock = 170;
+    static constexpr uint32_t kBlockSize = 0x1000;
+    static constexpr uint32_t kHashesPerBlock = 170;
     
     // Read helpers
     uint32_t ReadUInt32BE(uint64_t offset);

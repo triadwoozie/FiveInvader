@@ -21,24 +21,26 @@ set(FIVEINVADER_PPC_RECOMPILED_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/ppc/ppc_recomp_shared.h"
 )
 
-foreach(i RANGE 0 545)
+foreach(i RANGE 0 373)
     list(APPEND FIVEINVADER_PPC_RECOMPILED_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ppc/ppc_recomp.${i}.cpp")
 endforeach()
 
-# XenonRecomp custom command disabled - PPC files already generated
-# To regenerate, run manually:
-#   cd FiveInvaderLib/config && /path/to/XenonRecomp ./GTA5.toml ../../FiveInvader/cpu/ppc_context.h
-#
-# add_custom_command(
-#     OUTPUT 
-#         ${FIVEINVADER_PPC_RECOMPILED_SOURCES}
-#     COMMAND 
-#         $<TARGET_FILE:XenonRecomp>
-#     DEPENDS 
-#         "${CMAKE_CURRENT_SOURCE_DIR}/private/default.xex"
-#         "${CMAKE_CURRENT_SOURCE_DIR}/config/GTA5.toml"
-#     USES_TERMINAL
-# )
+add_custom_command(
+    OUTPUT
+        ${FIVEINVADER_PPC_RECOMPILED_SOURCES}
+    COMMAND
+        $<TARGET_FILE:XenonRecomp> "${CMAKE_CURRENT_SOURCE_DIR}/config/GTA5.toml" "${FIVEINVADER_TOOLS_ROOT}/XenonRecomp/XenonUtils/ppc_context.h"
+    COMMAND
+        python3 "${CMAKE_CURRENT_SOURCE_DIR}/../tools/patch_ppc_case_blocks.py" "${CMAKE_CURRENT_SOURCE_DIR}/ppc"
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/patch_ppc_case_blocks.py"
+        XenonRecomp
+        "${CMAKE_CURRENT_SOURCE_DIR}/private/default.xex"
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/GTA5.toml"
+        "${CMAKE_CURRENT_SOURCE_DIR}/config/GTA5_switch_tables.toml"
+        "${FIVEINVADER_TOOLS_ROOT}/XenonRecomp/XenonUtils/ppc_context.h"
+    USES_TERMINAL
+)
 
 # NOTE: GTA V shader handling is different from Sonic '06
 # The shader.arc/shader_lt.arc extraction is disabled for GTA V
@@ -86,6 +88,11 @@ file(GLOB XENOS_RECOMP_SOURCES
 #         ${XENOS_RECOMP_INCLUDE}
 #     USES_TERMINAL
 # )
+
+set_source_files_properties(
+    "${CMAKE_CURRENT_SOURCE_DIR}/ppc/ppc_indirect.cpp"
+    PROPERTIES GENERATED TRUE
+)
 
 add_library(FiveInvaderLib
     ${FIVEINVADER_PPC_RECOMPILED_SOURCES}

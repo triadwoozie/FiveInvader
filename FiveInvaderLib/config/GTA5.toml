@@ -46,18 +46,16 @@ max_functions_in_memory = 500        # Memory cap during analysis passes
 # =============================================================================
 # Register Save/Restore Helper Addresses (GTA V Xbox 360)
 # =============================================================================
-# NOTE: These addresses MUST be updated for GTA V using signature/pattern matching
-# on default.xex on the primary build host (e.g., using FindPatterns or Ghidra).
-# The addresses below are placeholders awaiting binary scan results.
-#
-# restgprlr_14_address = 0x82XXXXXX
-# savegprlr_14_address = 0x82XXXXXX
-# restfpr_14_address   = 0x82XXXXXX
-# savefpr_14_address   = 0x82XXXXXX
-# restvmx_14_address   = 0x82XXXXXX
-# savevmx_14_address   = 0x82XXXXXX
-# restvmx_64_address   = 0x82XXXXXX
-# savevmx_64_address   = 0x82XXXXXX
+# Found by scanning the GTA V default.xex (title 545408A7) for XenonRecomp's
+# documented byte patterns
+restgprlr_14_address = 0x83622940
+savegprlr_14_address = 0x836228F0
+restfpr_14_address   = 0x83622D6C
+savefpr_14_address   = 0x83622D20
+restvmx_14_address   = 0x83623128
+savevmx_14_address   = 0x83622E90
+restvmx_64_address   = 0x836231BC
+savevmx_64_address   = 0x83622F24
 
 # longjmp / setjmp handlers (if utilized by the guest runtime)
 # longjmp_address = 0x00000000
@@ -70,8 +68,8 @@ max_functions_in_memory = 500        # Memory cap during analysis passes
 # loop bodies where XenonAnalyse cannot determine function boundaries automatically.
 # Format: { address = <virtual_address>, size = <byte_size> }
 functions = [
-    # Template:
-    # { address = 0x82000000, size = 0x100 }, # Example CRT / string routine
+    # Jump-table case blocks misdetected as separate functions
+    { address = 0x825857A0, size = 0x98 }, # Covers 0x825857A0 to 0x82585838
 ]
 
 # =============================================================================

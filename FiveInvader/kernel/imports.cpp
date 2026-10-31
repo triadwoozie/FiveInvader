@@ -5,6 +5,13 @@
 #include <atomic>
 #include <stdafx.h>
 #include <cpu/ppc_context.h>
+#ifdef PPC_CONFIG_SKIP_LR
+#define GET_CALLER_LR() 0u
+#define GET_CTX_LR(c) 0u
+#else
+#define GET_CALLER_LR() (g_ppcContext ? static_cast<uint32_t>(g_ppcContext->lr) : 0u)
+#define GET_CTX_LR(c) ((c).lr)
+#endif
 #include <cpu/guest_thread.h>
 #include <apu/audio.h>
 #include <gpu/video.h>
@@ -2744,7 +2751,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
             static int s_fileWaitCount = 0;
             if (++s_fileWaitCount <= 10 || s_fileWaitCount % 100 == 0)
             {
-                uint32_t callerLR = g_ppcContext ? g_ppcContext->lr : 0;
+                uint32_t callerLR = GET_CALLER_LR();
                 LOGF_WARNING("[NtWaitEx] FILE HANDLE wait #{} handle=0x{:08X} caller=0x{:08X} - sync I/O complete, returning SUCCESS",
                             s_fileWaitCount, Handle, callerLR);
             }
@@ -2757,7 +2764,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
     // Trace all wait calls to understand blocking
     static int s_waitCount = 0;
     ++s_waitCount;
-    uint32_t callerLR = g_ppcContext ? g_ppcContext->lr : 0;
+    uint32_t callerLR = GET_CALLER_LR();
     
     if (s_waitCount <= 20 || s_waitCount % 500 == 0)
     {
@@ -2878,7 +2885,7 @@ uint32_t NtWriteFile(
 {
     static int s_writeCount = 0;
     ++s_writeCount;
-    uint32_t callerLR = g_ppcContext ? g_ppcContext->lr : 0;
+    uint32_t callerLR = GET_CALLER_LR();
     
     // Trace all NtWriteFile calls to debug blocking
     if (s_writeCount <= 20 || s_writeCount % 100 == 0) {
@@ -3032,7 +3039,7 @@ uint32_t NtCreateEvent(be<uint32_t>* handle, void* objAttributes, uint32_t event
 {
     static int s_count = 0;
     ++s_count;
-    uint32_t callerLR = g_ppcContext ? static_cast<uint32_t>(g_ppcContext->lr) : 0;
+    uint32_t callerLR = GET_CALLER_LR();
     
     // Log BEFORE creation to detect if CreateKernelObject crashes
     if (s_count <= 30)
@@ -4216,7 +4223,7 @@ void VdSwap()
 void VdGetSystemCommandBuffer()
 {
     static std::unordered_set<uint32_t> s_seenCallers;
-    const uint32_t lr = g_ppcContext ? static_cast<uint32_t>(g_ppcContext->lr) : 0;
+    const uint32_t lr = GET_CALLER_LR();
     if (lr != 0 && s_seenCallers.insert(lr).second)
         LOGF_UTILITY("!!! STUB !!! caller_lr=0x{:08X}", lr);
     else
@@ -4671,7 +4678,7 @@ uint32_t MmAllocatePhysicalMemoryEx
 )
 {
     static std::unordered_set<uint32_t> s_seenCallers;
-    const uint32_t lr = g_ppcContext ? static_cast<uint32_t>(g_ppcContext->lr) : 0;
+    const uint32_t lr = GET_CALLER_LR();
     if (lr != 0 && s_seenCallers.insert(lr).second)
     {
         LOGF_UTILITY(
@@ -5127,7 +5134,7 @@ uint32_t NtSetEvent(Event* handle, uint32_t* previousState)
 uint32_t NtCreateSemaphore(be<uint32_t>* Handle, XOBJECT_ATTRIBUTES* ObjectAttributes, uint32_t InitialCount, uint32_t MaximumCount)
 {
     static int s_count = 0; ++s_count;
-    uint32_t callerLR = g_ppcContext ? static_cast<uint32_t>(g_ppcContext->lr) : 0;
+    uint32_t callerLR = GET_CALLER_LR();
     
     Semaphore* sem = CreateKernelObject<Semaphore>(InitialCount, MaximumCount);
     *Handle = GetKernelHandle(sem);
@@ -5163,7 +5170,7 @@ uint32_t NtReleaseSemaphore(uint32_t Handle, uint32_t ReleaseCount, int32_t* Pre
         }
         return STATUS_INVALID_HANDLE;
     }
-    uint32_t callerLR = g_ppcContext ? static_cast<uint32_t>(g_ppcContext->lr) : 0;
+    uint32_t callerLR = GET_CALLER_LR();
     
     KernelObject* obj = GetKernelObject(Handle);
     if (!obj)
@@ -5529,7 +5536,7 @@ uint32_t KeWaitForMultipleObjects(uint32_t Count, xpointer<XDISPATCHER_HEADER>* 
     // WaitType: 0 = WaitAll, 1 = WaitAny
     // Returns: STATUS_WAIT_0 + index for WaitAny, STATUS_SUCCESS for WaitAll
     
-    uint32_t callerLR = g_ppcContext ? g_ppcContext->lr : 0;
+    uint32_t callerLR = GET_CALLER_LR();
     uint64_t timeoutMs = GuestTimeoutToMilliseconds(Timeout);
     
     // Convert timeout to uint32_t (clamp if needed)
@@ -5559,7 +5566,7 @@ void KfLowerIrql() { }
 uint32_t KeReleaseSemaphore(XKSEMAPHORE* semaphore, uint32_t increment, uint32_t adjustment, uint32_t wait)
 {
     static int s_count = 0; ++s_count;
-    uint32_t callerLR = g_ppcContext ? static_cast<uint32_t>(g_ppcContext->lr) : 0;
+    uint32_t callerLR = GET_CALLER_LR();
     
     // Log all releases to see if blocking semaphores are ever signaled
     uint32_t semAddr = (uint32_t)((uint8_t*)semaphore - g_memory.base);
@@ -5602,7 +5609,7 @@ uint32_t KeResumeThread(GuestThreadHandle* object)
 void KeInitializeSemaphore(XKSEMAPHORE* semaphore, uint32_t count, uint32_t limit)
 {
     static int s_count = 0; ++s_count;
-    uint32_t callerLR = g_ppcContext ? static_cast<uint32_t>(g_ppcContext->lr) : 0;
+    uint32_t callerLR = GET_CALLER_LR();
     
     semaphore->Header.Type = 5;
     semaphore->Header.SignalState = count;
@@ -6814,7 +6821,7 @@ static void StorageDevice_ReadFile(PPCContext& ctx, uint8_t* base) {
     
     // COMPREHENSIVE LOGGING: Log ALL vtable[27] calls
     printf("[VTABLE27] #%d path='%s' device=0x%08X output=0x%08X LR=0x%08X\n",
-           s_count, pathBuf, devicePtr, outputAddr, ctx.lr);
+           s_count, pathBuf, devicePtr, outputAddr, GET_CTX_LR(ctx));
     fflush(stdout);
     
     // Resolve path via VFS
@@ -6966,7 +6973,75 @@ GTA5_IMPORT_STUB(__imp__NetDll_XHttpSendRequest)
 GTA5_IMPORT_STUB(__imp__NetDll_XHttpReceiveResponse)
 GTA5_IMPORT_STUB(__imp__NetDll_XHttpQueryHeaders)
 GTA5_IMPORT_STUB(__imp__NetDll_XHttpReadData)
+GTA5_IMPORT_STUB(__imp__NetDll_XHttpWriteData)
+GTA5_IMPORT_STUB(__imp__NetDll_XHttpDoWork)
+GTA5_IMPORT_STUB(__imp__NetDll_XNetRegisterKey)
+GTA5_IMPORT_STUB(__imp__NetDll_XNetUnregisterKey)
+GTA5_IMPORT_STUB(__imp__NetDll_XNetInAddrToXnAddr)
+GTA5_IMPORT_STUB(__imp__NetDll_XNetInAddrToServer)
+GTA5_IMPORT_STUB(__imp__NetDll_XNetConnect)
+GTA5_IMPORT_STUB(__imp__NetDll_XNetDnsLookup)
+GTA5_IMPORT_STUB(__imp__NetDll_XNetDnsRelease)
+GTA5_IMPORT_STUB(__imp__NetDll_XNetGetOpt)
+GTA5_IMPORT_STUB(__imp__NetDll_XnpLogonGetStatus)
+GTA5_IMPORT_STUB(__imp__XampXAuthStartup)
+GTA5_IMPORT_STUB(__imp__XampXAuthShutdown)
+GTA5_IMPORT_STUB(__imp__XampXAuthGetTitleBuffer)
+GTA5_IMPORT_STUB(__imp__XamGetToken)
+GTA5_IMPORT_STUB(__imp__XamFreeToken)
+GTA5_IMPORT_STUB(__imp__XamUserGetDeviceContext)
+GTA5_IMPORT_STUB(__imp__XamShowKeyboardUI)
+GTA5_IMPORT_STUB(__imp__XamShowMarketplaceUI)
+GTA5_IMPORT_STUB(__imp__XamShowMessageComposeUI)
+GTA5_IMPORT_STUB(__imp__XamShowFriendRequestUI)
+GTA5_IMPORT_STUB(__imp__XamShowMarketplaceDownloadItemsUI)
+GTA5_IMPORT_STUB(__imp__XamMarketplaceAcquireFreeContent)
+GTA5_IMPORT_STUB(__imp__XAudioGetDuckerThreshold)
+GTA5_IMPORT_STUB(__imp__XAudioGetDuckerHoldTime)
+GTA5_IMPORT_STUB(__imp__XAudioGetDuckerAttackTime)
+GTA5_IMPORT_STUB(__imp__XAudioGetDuckerReleaseTime)
+GTA5_IMPORT_STUB(__imp__XAudioEnableDucker)
+GTA5_IMPORT_STUB(__imp__KeSetCurrentProcessType)
+GTA5_IMPORT_STUB(__imp__VdSetDisplayModeOverride)
+GTA5_IMPORT_STUB(__imp__NtWriteFileGather)
+GTA5_IMPORT_STUB(__imp__XamBackgroundDownloadSetMode)
+GTA5_IMPORT_STUB(__imp__XamBackgroundDownloadGetMode)
+GTA5_IMPORT_STUB(__imp__XamBackgroundDownloadItemGetStatus)
+GTA5_IMPORT_STUB(__imp__XamBackgroundDownloadItemGetHistoryStatus)
+GTA5_IMPORT_STUB(__imp__XamContentResolve)
+GTA5_IMPORT_STUB(__imp__XamSwapDisc)
+GTA5_IMPORT_STUB(__imp__XamSwapCancel)
+GTA5_IMPORT_STUB(__imp__ExAllocatePool)
+GTA5_IMPORT_STUB(__imp__XexLoadImage)
+GTA5_IMPORT_STUB(__imp__XexUnloadImage)
 #undef GTA5_IMPORT_STUB
+
+PPC_FUNC(__imp__NtYieldExecution)
+{
+    std::this_thread::yield();
+    ctx.r3.u64 = 0;
+}
+
+PPC_FUNC(__imp__MmMapIoSpace)
+{
+    ctx.r3.u64 = ctx.r3.u32;
+}
+
+PPC_FUNC(__imp__XamUserGetAge)
+{
+    if (ctx.r4.u32 != 0) {
+        *reinterpret_cast<be<uint32_t>*>(base + ctx.r4.u32) = 25;
+    }
+    ctx.r3.u64 = 0;
+}
+
+PPC_FUNC(__imp__XamUserGetAgeGroup)
+{
+    if (ctx.r4.u32 != 0) {
+        *reinterpret_cast<be<uint32_t>*>(base + ctx.r4.u32) = 3;
+    }
+    ctx.r3.u64 = 0;
+}
 
 // =============================================================================
 // StorageDevice_CloseFile - vtable[10] implementation
@@ -7025,7 +7100,7 @@ static void StorageDevice_GetFileInfo(PPCContext& ctx, uint8_t* base) {
     }
     
     LOGF_WARNING("[vtable[19]] GetFileInfo #{} device=0x{:08X} path='{}' LR=0x{:08X}",
-                 s_count, deviceAddr, path, ctx.lr);
+                 s_count, deviceAddr, path, GET_CTX_LR(ctx));
     
     // Phase 1B: Allocate and return a FileStream structure
     //   +0:  Storage device pointer
@@ -7114,7 +7189,7 @@ void StorageDevice_Vtable21(PPCContext& ctx, uint8_t* base) {
     
     if (s_count <= 20 || s_count % 100 == 0) {
         LOGF_WARNING("[vtable[21]] #{} device=0x{:08X} path=0x{:08X} param2=0x{:08X} LR=0x{:08X}",
-                     s_count, deviceAddr, pathAddr, param2, ctx.lr);
+                     s_count, deviceAddr, pathAddr, param2, GET_CTX_LR(ctx));
     }
     
     // Return success (0) - this appears to be a path/file validation function
@@ -7138,7 +7213,7 @@ void StorageDevice_Vtable23(PPCContext& ctx, uint8_t* base) {
     
     if (s_count <= 20 || s_count % 100 == 0) {
         LOGF_WARNING("[vtable[23]] #{} device=0x{:08X} param=0x{:08X} LR=0x{:08X}",
-                     s_count, deviceAddr, param, ctx.lr);
+                     s_count, deviceAddr, param, GET_CTX_LR(ctx));
     }
     
     // Return success (0) - this appears to be a validation/setup function
