@@ -1850,6 +1850,9 @@ static void CreateImGuiBackend()
 
 static void CheckSwapChain()
 {
+    if (!g_swapChain || !g_backBuffer || !g_device)
+        return;
+
     g_swapChain->setVsyncEnabled(Config::VSync);
     g_swapChainValid &= !g_swapChain->needsResize();
 
@@ -3273,13 +3276,18 @@ void Video::WaitOnSwapChain()
 
 static bool g_shouldPrecompilePipelines;
 static std::atomic<bool> g_executedCommandList;
+std::atomic<uint64_t> g_frameCounter{0};
+static std::mutex s_presentMutex;
 
 void Video::Present() 
 {
-    // MarathonRecomp-style: First Present = transition to Runtime phase
-    // This enables proper synchronization (fail-open during init, proper waits after)
-    KernelPhase_EnterRuntime();
-    
+    std::unique_lock<std::mutex> lock(s_presentMutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return;
+
+    if (!g_swapChain || !g_backBuffer || !g_device)
+        return;
+
     static uint32_t s_presentCount = 0;
     static uint32_t s_droppedFrames = 0;
     ++s_presentCount;
@@ -3433,6 +3441,10 @@ void Video::Present()
 
         RenderCommandSemaphore* signalSemaphores[] = { g_renderSemaphores[g_frame].get() };
         g_swapChainValid = g_swapChain->present(g_backBufferIndex, signalSemaphores, std::size(signalSemaphores));
+        if (g_swapChainValid)
+        {
+            g_frameCounter.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     g_pendingWaitOnSwapChain = true;

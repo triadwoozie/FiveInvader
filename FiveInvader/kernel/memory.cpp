@@ -41,8 +41,13 @@ static void UnmappedIndirectHandler(PPCContext& ctx, uint8_t* base)
             free(strs);
         }
     }
-    // Set return value to 0 to minimize cascading null crashes
-    ctx.r3.u64 = 0;
+    // If a NULL function pointer was called, return -1 (error/invalid)
+    // rather than 0 (which looks like success to functions checking != -1)
+    if (ctx.r12.u32 == 0) {
+        ctx.r3.s64 = -1;
+    } else {
+        ctx.r3.u64 = 0;
+    }
 }
 
 Memory::Memory()

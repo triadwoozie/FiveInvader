@@ -252,10 +252,17 @@ static constexpr auto SDL_PUMP_INTERVAL = std::chrono::milliseconds(16); // ~60f
 static std::thread::id g_kernelMainThreadId;
 static std::atomic<bool> g_kernelMainThreadIdSet{false};
 
+void StartVBlankTimer();
+
+std::atomic<uint64_t> g_vdSwapCounter{0};
+std::atomic<uint64_t> g_pm4PacketCounter{0};
+static std::chrono::steady_clock::time_point g_lastVdSwapTime = std::chrono::steady_clock::now();
+
 void InitKernelMainThread()
 {
     g_kernelMainThreadId = std::this_thread::get_id();
     g_kernelMainThreadIdSet = true;
+    StartVBlankTimer();
 }
 
 bool IsMainThread()
@@ -266,8 +273,7 @@ bool IsMainThread()
 
 void PumpSdlEventsIfNeeded()
 {
-    // On macOS, SDL event pumping MUST happen on the main thread
-    // Skip if we're on a worker thread to avoid Cocoa crashes
+    // On macOS / Linux, SDL event pumping MUST happen on the main thread
     if (!IsMainThread()) return;
     
     auto now = std::chrono::steady_clock::now();
@@ -283,6 +289,21 @@ void PumpSdlEventsIfNeeded()
             if (event.type == SDL_QUIT)
             {
                 std::_Exit(0);
+            }
+        }
+
+        static auto s_lastTitleUpdate = std::chrono::steady_clock::now();
+        if (now - s_lastTitleUpdate >= std::chrono::milliseconds(250))
+        {
+            s_lastTitleUpdate = now;
+            if (GameWindow::s_pWindow)
+            {
+                char title[256];
+                snprintf(title, sizeof(title), "FiveInvader | Presents: %llu | VdSwap: %llu | PM4: %llu",
+                    (unsigned long long)g_frameCounter.load(std::memory_order_relaxed),
+                    (unsigned long long)g_vdSwapCounter.load(std::memory_order_relaxed),
+                    (unsigned long long)g_pm4PacketCounter.load(std::memory_order_relaxed));
+                SDL_SetWindowTitle(GameWindow::s_pWindow, title);
             }
         }
     }
@@ -1559,19 +1580,41 @@ struct Event final : KernelObject, HostObject<XKEVENT>
         }
         else if (timeout == INFINITE)
         {
-            if (manualReset)
-            {
-                signaled.wait(false);
-            }
-            else
+            if (IsMainThread())
             {
                 while (true)
                 {
-                    bool expected = true;
-                    if (signaled.compare_exchange_weak(expected, false))
-                        break;
+                    PumpSdlEventsIfNeeded();
+                    if (manualReset)
+                    {
+                        if (signaled.load())
+                            break;
+                    }
+                    else
+                    {
+                        bool expected = true;
+                        if (signaled.compare_exchange_weak(expected, false))
+                            break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+            }
+            else
+            {
+                if (manualReset)
+                {
+                    signaled.wait(false);
+                }
+                else
+                {
+                    while (true)
+                    {
+                        bool expected = true;
+                        if (signaled.compare_exchange_weak(expected, false))
+                            break;
 
-                    signaled.wait(expected);
+                        signaled.wait(expected);
+                    }
                 }
             }
         }
@@ -1585,24 +1628,26 @@ struct Event final : KernelObject, HostObject<XKEVENT>
             {
                 while (!signaled.load())
                 {
+                    if (IsMainThread())
+                        PumpSdlEventsIfNeeded();
                     if (std::chrono::steady_clock::now() >= deadline)
                         return STATUS_TIMEOUT;
-                    // Brief sleep to avoid busy-wait
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(IsMainThread() ? 10 : 1));
                 }
             }
             else
             {
                 while (true)
                 {
+                    if (IsMainThread())
+                        PumpSdlEventsIfNeeded();
                     bool expected = true;
                     if (signaled.compare_exchange_weak(expected, false))
                         break;
                     
                     if (std::chrono::steady_clock::now() >= deadline)
                         return STATUS_TIMEOUT;
-                    // Brief sleep to avoid busy-wait
-                    std::this_thread::sleep_for(std::chrono::microseconds(100));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(IsMainThread() ? 10 : 1));
                 }
             }
         }
@@ -1664,26 +1709,43 @@ struct Semaphore final : KernelObject, HostObject<XKSEMAPHORE>
         }
         else if (timeout == INFINITE)
         {
-            uint32_t currentCount;
-            int loopCount = 0;
-            while (true)
+            if (IsMainThread())
             {
-                currentCount = count.load();
-                if (currentCount != 0)
+                while (true)
                 {
-                    if (count.compare_exchange_weak(currentCount, currentCount - 1))
+                    PumpSdlEventsIfNeeded();
+                    uint32_t currentCount = count.load();
+                    if (currentCount != 0)
                     {
-                        if (s_waitCount <= 30)
-                            LOGF_WARNING("[SemWait] #{} acquired count={} after {} loops", s_waitCount, currentCount, loopCount);
-                        return STATUS_SUCCESS;
+                        if (count.compare_exchange_weak(currentCount, currentCount - 1))
+                            return STATUS_SUCCESS;
                     }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
-                else
+            }
+            else
+            {
+                uint32_t currentCount;
+                int loopCount = 0;
+                while (true)
                 {
-                    if (loopCount == 0 && s_waitCount <= 30)
-                        LOGF_WARNING("[SemWait] #{} blocking on count=0 (max={})...", s_waitCount, maximumCount);
-                    ++loopCount;
-                    count.wait(0);
+                    currentCount = count.load();
+                    if (currentCount != 0)
+                    {
+                        if (count.compare_exchange_weak(currentCount, currentCount - 1))
+                        {
+                            if (s_waitCount <= 30)
+                                LOGF_WARNING("[SemWait] #{} acquired count={} after {} loops", s_waitCount, currentCount, loopCount);
+                            return STATUS_SUCCESS;
+                        }
+                    }
+                    else
+                    {
+                        if (loopCount == 0 && s_waitCount <= 30)
+                            LOGF_WARNING("[SemWait] #{} blocking on count=0 (max={})...", s_waitCount, maximumCount);
+                        ++loopCount;
+                        count.wait(0);
+                    }
                 }
             }
 
@@ -1696,6 +1758,8 @@ struct Semaphore final : KernelObject, HostObject<XKSEMAPHORE>
             uint32_t currentCount;
             while (true)
             {
+                if (IsMainThread())
+                    PumpSdlEventsIfNeeded();
                 currentCount = count.load();
                 if (currentCount != 0)
                 {
@@ -1706,7 +1770,7 @@ struct Semaphore final : KernelObject, HostObject<XKSEMAPHORE>
                 {
                     if (std::chrono::steady_clock::now() >= deadline)
                         return STATUS_TIMEOUT;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(IsMainThread() ? 10 : 1));
                 }
             }
         }
@@ -3309,14 +3373,29 @@ uint32_t KeDelayExecutionThread(uint32_t WaitMode, bool Alertable, be<int64_t>* 
         LOGF_INFO("[TRACE] KeDelayExecutionThread(timeout={}ms)", timeout);
     }
 
-#ifdef _WIN32
-    Sleep(timeout);
-#else
     if (timeout == 0)
+    {
         std::this_thread::yield();
+    }
+    else if (IsMainThread())
+    {
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            PumpSdlEventsIfNeeded();
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min<int64_t>(remaining, 10)));
+        }
+    }
     else
+    {
+#ifdef _WIN32
+        Sleep(timeout);
+#else
         std::this_thread::sleep_for(std::chrono::milliseconds(timeout));
 #endif
+    }
 
     return STATUS_SUCCESS;
 }
@@ -4392,6 +4471,10 @@ void VdCallGraphicsNotificationRoutines(uint32_t type = 0, uint32_t data = 0);
 
 void VdSwap()
 {
+    KernelPhase_EnterRuntime();
+    g_vdSwapCounter.fetch_add(1, std::memory_order_relaxed);
+    g_lastVdSwapTime = std::chrono::steady_clock::now();
+
     static uint32_t s_swapCount = 0;
     ++s_swapCount;
     if (s_swapCount <= 10 || (s_swapCount % 60) == 0)
@@ -4720,6 +4803,9 @@ void ScanRingBufferForPM4Packets()
     if (packetsFound > 0) {
         s_scannedOnce = true;
     }
+    g_pm4PacketCounter.store(g_gpuRingBuffer.pm4DrawCount + g_gpuRingBuffer.pm4ShaderLoadCount +
+                             g_gpuRingBuffer.pm4SetConstantCount + g_gpuRingBuffer.pm4SwapCount +
+                             g_gpuRingBuffer.pm4OtherCount, std::memory_order_relaxed);
     s_scanCount++;
 }
 
@@ -4809,6 +4895,11 @@ void VBlankTimerThread() {
     while (g_vblankTimerRunning.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60Hz
         FireVBlankCallback();
+
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastVdSwapTime).count() >= 32) {
+            Video::Present();
+        }
     }
 }
 

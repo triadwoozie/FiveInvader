@@ -36,6 +36,8 @@ struct Video
     static void ComputeViewportDimensions();
 };
 
+extern std::atomic<uint64_t> g_frameCounter;
+
 enum class Backend {
     VULKAN,
     D3D12,

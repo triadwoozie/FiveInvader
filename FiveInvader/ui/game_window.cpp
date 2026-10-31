@@ -209,6 +209,8 @@ void GameWindow::Init(const char* sdlVideoDriver)
         GameWindow::ResetDimensions();
 
     s_pWindow = SDL_CreateWindow("FiveInvader", s_x, s_y, s_width, s_height, GetWindowFlags());
+    SDL_ShowWindow(s_pWindow);
+    SDL_RaiseWindow(s_pWindow);
 
     if (IsFullscreen())
         SDL_ShowCursor(SDL_DISABLE);
@@ -244,7 +246,8 @@ void GameWindow::Init(const char* sdlVideoDriver)
 
     SetTitleBarColour();
 
-    SDL_MinimizeWindow(s_pWindow);
+    SDL_ShowWindow(s_pWindow);
+    SDL_RaiseWindow(s_pWindow);
 }
 
 void GameWindow::Update()
@@ -450,7 +453,7 @@ void GameWindow::ResetDimensions()
 
 uint32_t GameWindow::GetWindowFlags()
 {
-    uint32_t flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_MINIMIZED;
+    uint32_t flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 
     if (Config::WindowState == EWindowState::Maximised)
         flags |= SDL_WINDOW_MAXIMIZED;
