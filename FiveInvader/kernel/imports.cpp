@@ -1,5 +1,7 @@
 #include <cstdint>
 #include <cstdio>
+#include <cctype>
+#include <algorithm>
 #include <unordered_set>
 #include <thread>
 #include <atomic>
@@ -1221,11 +1223,12 @@ namespace
             //   4b - INT32 - Unknown
             //   4b - INT32 - Encrypted (0 = unencrypted, non-zero = encrypted)
             
-            // Check magic - accept both RPF2 and RPF3
+            // Check magic - accept RPF2, RPF3, and RPF7 (GTA V)
             bool isRpf2 = (hdr[0] == 'R' && hdr[1] == 'P' && hdr[2] == 'F' && hdr[3] == '2');
             bool isRpf3 = (hdr[0] == 'R' && hdr[1] == 'P' && hdr[2] == 'F' && hdr[3] == '3');
+            bool isRpf7 = (hdr[0] == 'R' && hdr[1] == 'P' && hdr[2] == 'F' && hdr[3] == '7');
             
-            if (!isRpf2 && !isRpf3)
+            if (!isRpf2 && !isRpf3 && !isRpf7)
             {
                 LOGF_IMPL(Utility, "ParseRpfHeader", "Unknown RPF magic in '{}': {:02X} {:02X} {:02X} {:02X}", 
                           h->path.string(), (uint8_t)hdr[0], (uint8_t)hdr[1], (uint8_t)hdr[2], (uint8_t)hdr[3]);
@@ -1235,18 +1238,22 @@ namespace
             auto le32 = [](const uint8_t* p) -> uint32_t {
                 return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
             };
+            auto be32 = [](const uint8_t* p) -> uint32_t {
+                return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+            };
 
-            uint32_t tocSize = le32(reinterpret_cast<uint8_t*>(hdr + 4));
-            uint32_t numEntries = le32(reinterpret_cast<uint8_t*>(hdr + 8));
-            uint32_t encrypted = le32(reinterpret_cast<uint8_t*>(hdr + 16));
+            uint32_t tocSize = isRpf7 ? be32(reinterpret_cast<uint8_t*>(hdr + 8)) : le32(reinterpret_cast<uint8_t*>(hdr + 4));
+            uint32_t numEntries = isRpf7 ? be32(reinterpret_cast<uint8_t*>(hdr + 4)) : le32(reinterpret_cast<uint8_t*>(hdr + 8));
+            uint32_t encrypted = isRpf7 ? 0 : le32(reinterpret_cast<uint8_t*>(hdr + 16));
 
-            // TOC starts at offset 0x800 (2048 bytes from file origin)
-            h->tocOffset = 0x800;
+            // TOC starts at 0x10 for RPF7 or 0x800 for RPF2/3
+            h->tocOffset = isRpf7 ? 0x10 : 0x800;
             h->tocSize = tocSize;
             h->tocEncrypted = (encrypted != 0);
 
+            const char* verStr = isRpf7 ? "RPF7" : (isRpf2 ? "RPF2" : "RPF3");
             LOGF_IMPL(Utility, "ParseRpfHeader", "Parsed {} header '{}': tocOffset=0x{:X} tocSize={} entries={} encrypted={}", 
-                      isRpf2 ? "RPF2" : "RPF3", h->path.filename().string(), h->tocOffset, tocSize, numEntries, h->tocEncrypted);
+                      verStr, h->path.filename().string(), h->tocOffset, tocSize, numEntries, h->tocEncrypted);
         }
         catch (...) {
             LOGF_IMPL(Utility, "ParseRpfHeader", "Exception parsing header for '{}'", h->path.string());
@@ -2907,8 +2914,10 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         return ShouldFailOpenWait() ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
     }
 
-    // KERNEL POLICY: Fail-open during Boot/Init
-    if (timeout == INFINITE && ShouldFailOpenWait()) {
+    // KERNEL POLICY: Fail-open during Boot/Init only for the main thread (workers must sleep on queues)
+    bool isMainThread = (g_kernelMainThreadIdSet && std::this_thread::get_id() == g_kernelMainThreadId);
+    bool isSemaphore = (dynamic_cast<Semaphore*>(obj) != nullptr);
+    if (timeout == INFINITE && ShouldFailOpenWait() && isMainThread && !isSemaphore) {
         uint32_t result = obj->Wait(10);  // Short wait instead of infinite
         if (result == STATUS_TIMEOUT) {
             static int s_failOpenObj = 0;
@@ -4853,30 +4862,30 @@ uint32_t KeWaitForSingleObject(XDISPATCHER_HEADER* Object, uint32_t WaitReason, 
     // SONIC APPROACH: Simple direct kernel object wait - no SyncTable
     const uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
     static std::atomic<int> s_keWaitCount{0};
+    uint32_t callerLR = GET_CALLER_LR();
     if (s_keWaitCount++ < 50 || s_keWaitCount % 200 == 0) {
-        LOGF_INFO("[TRACE] KeWaitForSingleObject: #{} obj=0x{:08X} type={} timeout={}ms",
+        LOGF_INFO("[TRACE] KeWaitForSingleObject: #{} obj=0x{:08X} type={} timeout={}ms caller=0x{:08X}",
                   s_keWaitCount.load(),
                   Object ? (uint32_t)((uint8_t*)Object - g_memory.base) : 0,
-                  Object ? Object->Type : -1, timeout);
+                  Object ? Object->Type : -1, timeout, callerLR);
     }
+
+    if (!Object)
+        return STATUS_INVALID_PARAMETER;
 
     switch (Object->Type)
     {
         case 0:
         case 1:
-            QueryKernelObject<Event>(*Object)->Wait(timeout);
-            break;
+            return QueryKernelObject<Event>(*Object)->Wait(timeout);
 
         case 5:
-            QueryKernelObject<Semaphore>(*Object)->Wait(timeout);
-            break;
+            return QueryKernelObject<Semaphore>(*Object)->Wait(timeout);
 
         default:
             LOGF_IMPL(Utility, "KeWaitForSingleObject", "Unrecognized kernel object type: {}", Object->Type);
             return STATUS_TIMEOUT;
     }
-
-    return STATUS_SUCCESS;
 }
 
 // =============================================================================
@@ -8773,6 +8782,346 @@ PPC_FUNC(sub_831E3240)
     PPC_STORE_U32(stream + 4, 0xFFFFFFFF);
     PPC_STORE_U32(stream + 0, 0);
     ctx.r3.s64 = 0;
+}
+
+// =============================================================================
+// CRT STRING FORMATTING HOOKS (vsnprintf / _output_l)
+// =============================================================================
+// Prevents indirect unmapped bctr switch jump corruption in sub_823F4118.
+// Handles Xbox 360 big-endian PowerPC 8-byte aligned va_list argument fetching.
+
+struct GuestVaList {
+    uint8_t* base;
+    uint32_t current;
+
+    explicit GuestVaList(uint8_t* b, uint32_t start) : base(b), current(start) {}
+
+    uint32_t GetU32() {
+        uint32_t aligned = (current + 7) & ~7;
+        current = aligned + 8;
+        if (aligned + 8 > PPC_MEMORY_SIZE) return 0;
+        return ByteSwap(*(uint32_t*)(base + aligned + 4));
+    }
+
+    int32_t GetS32() {
+        return static_cast<int32_t>(GetU32());
+    }
+
+    uint64_t GetU64() {
+        uint32_t aligned = (current + 7) & ~7;
+        current = aligned + 8;
+        if (aligned + 8 > PPC_MEMORY_SIZE) return 0;
+        return ByteSwap(*(uint64_t*)(base + aligned));
+    }
+
+    int64_t GetS64() {
+        return static_cast<int64_t>(GetU64());
+    }
+
+    double GetDouble() {
+        uint64_t u = GetU64();
+        double d;
+        std::memcpy(&d, &u, sizeof(d));
+        return d;
+    }
+
+    const char* GetString() {
+        uint32_t gPtr = GetU32();
+        if (gPtr == 0 || gPtr >= PPC_MEMORY_SIZE) return "(null)";
+        return reinterpret_cast<const char*>(base + gPtr);
+    }
+};
+
+static int FormatGuestVsnprintf(uint8_t* base, char* dst, size_t maxLen, const char* fmt, uint32_t argptrGuest)
+{
+    if (!dst || maxLen == 0) return 0;
+    if (!fmt) {
+        dst[0] = '\0';
+        return 0;
+    }
+
+    GuestVaList va(base, argptrGuest);
+    std::string result;
+    result.reserve(256);
+
+    const char* p = fmt;
+    while (*p) {
+        if (*p != '%') {
+            result.push_back(*p++);
+            continue;
+        }
+
+        if (*(p + 1) == '%') {
+            result.push_back('%');
+            p += 2;
+            continue;
+        }
+
+        const char* specStart = p;
+        p++; // skip '%'
+
+        // Flags
+        while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0') {
+            p++;
+        }
+
+        // Width
+        bool widthFromArg = false;
+        int widthVal = 0;
+        if (*p == '*') {
+            widthFromArg = true;
+            widthVal = va.GetS32();
+            p++;
+        } else {
+            while (isdigit(static_cast<unsigned char>(*p))) {
+                p++;
+            }
+        }
+
+        // Precision
+        bool precFromArg = false;
+        int precVal = 0;
+        if (*p == '.') {
+            p++;
+            if (*p == '*') {
+                precFromArg = true;
+                precVal = va.GetS32();
+                p++;
+            } else {
+                while (isdigit(static_cast<unsigned char>(*p))) {
+                    p++;
+                }
+            }
+        }
+
+        // Length modifiers
+        enum LengthMod { LenDefault, LenShort, LenLong, LenLongLong };
+        LengthMod lenMod = LenDefault;
+        if (*p == 'h') {
+            lenMod = LenShort;
+            p++;
+            if (*p == 'h') p++;
+        } else if (*p == 'l') {
+            lenMod = LenLong;
+            p++;
+            if (*p == 'l') {
+                lenMod = LenLongLong;
+                p++;
+            }
+        } else if (*p == 'I') {
+            if (*(p + 1) == '6' && *(p + 2) == '4') {
+                lenMod = LenLongLong;
+                p += 3;
+            } else if (*(p + 1) == '3' && *(p + 2) == '2') {
+                lenMod = LenLong;
+                p += 3;
+            } else {
+                p++;
+            }
+        } else if (*p == 'z' || *p == 'j' || *p == 't') {
+            p++;
+        }
+
+        char spec = *p;
+        if (!spec) break;
+        p++;
+
+        std::string token;
+        token.push_back('%');
+        const char* flagPtr = specStart + 1;
+        while (*flagPtr == '-' || *flagPtr == '+' || *flagPtr == ' ' || *flagPtr == '#' || *flagPtr == '0') {
+            token.push_back(*flagPtr++);
+        }
+        if (widthFromArg) {
+            token += std::to_string(widthVal);
+        } else {
+            while (flagPtr < p - 1 && isdigit(static_cast<unsigned char>(*flagPtr))) {
+                token.push_back(*flagPtr++);
+            }
+        }
+        if (precFromArg) {
+            token += "." + std::to_string(precVal);
+        } else if (flagPtr < p - 1 && *flagPtr == '.') {
+            token.push_back(*flagPtr++);
+            while (flagPtr < p - 1 && isdigit(static_cast<unsigned char>(*flagPtr))) {
+                token.push_back(*flagPtr++);
+            }
+        }
+
+        char buf[1024];
+        int written = 0;
+
+        switch (spec) {
+            case 's': {
+                token.push_back('s');
+                const char* s = va.GetString();
+                written = snprintf(buf, sizeof(buf), token.c_str(), s);
+                break;
+            }
+            case 'c': {
+                token.push_back('c');
+                int c = va.GetS32();
+                written = snprintf(buf, sizeof(buf), token.c_str(), c);
+                break;
+            }
+            case 'd':
+            case 'i': {
+                if (lenMod == LenLongLong) {
+                    token += "lld";
+                    int64_t v = va.GetS64();
+                    written = snprintf(buf, sizeof(buf), token.c_str(), (long long)v);
+                } else {
+                    token.push_back(spec);
+                    int32_t v = va.GetS32();
+                    written = snprintf(buf, sizeof(buf), token.c_str(), v);
+                }
+                break;
+            }
+            case 'u':
+            case 'x':
+            case 'X':
+            case 'o': {
+                if (lenMod == LenLongLong) {
+                    token += (spec == 'u' ? "llu" : (spec == 'x' ? "llx" : (spec == 'X' ? "llX" : "llo")));
+                    uint64_t v = va.GetU64();
+                    written = snprintf(buf, sizeof(buf), token.c_str(), (unsigned long long)v);
+                } else {
+                    token.push_back(spec);
+                    uint32_t v = va.GetU32();
+                    written = snprintf(buf, sizeof(buf), token.c_str(), v);
+                }
+                break;
+            }
+            case 'p': {
+                uint32_t ptr = va.GetU32();
+                written = snprintf(buf, sizeof(buf), "0x%08X", ptr);
+                break;
+            }
+            case 'f':
+            case 'F':
+            case 'g':
+            case 'G':
+            case 'e':
+            case 'E': {
+                token.push_back(spec);
+                double d = va.GetDouble();
+                written = snprintf(buf, sizeof(buf), token.c_str(), d);
+                break;
+            }
+            default: {
+                token.push_back(spec);
+                written = snprintf(buf, sizeof(buf), "%s", token.c_str());
+                break;
+            }
+        }
+
+        if (written > 0) {
+            result.append(buf, written);
+        }
+    }
+
+    size_t copyLen = std::min(result.size(), maxLen - 1);
+    std::memcpy(dst, result.data(), copyLen);
+    dst[copyLen] = '\0';
+    return static_cast<int>(result.size());
+}
+
+PPC_FUNC(sub_82409368)
+{
+    uint32_t dstGuest = ctx.r3.u32;
+    uint32_t maxLen = ctx.r4.u32 + 1; // sub_82409368 passed maxLen-1 in r4
+    uint32_t fmtGuest = ctx.r5.u32;
+    uint32_t argptrGuest = ctx.r6.u32;
+
+    char* dst = reinterpret_cast<char*>(base + dstGuest);
+    const char* fmt = reinterpret_cast<const char*>(base + fmtGuest);
+
+    int count = FormatGuestVsnprintf(base, dst, maxLen, fmt, argptrGuest);
+
+    static int s_logCount = 0;
+    if (++s_logCount <= 30) {
+        LOGF_INFO("[CRT_VSNPRINTF] #{} fmt='{}' out='{}'", s_logCount, fmt ? fmt : "null", dst ? dst : "null");
+    }
+
+    ctx.r3.s64 = count;
+}
+
+PPC_FUNC(sub_83626570)
+{
+    uint32_t dstGuest = ctx.r3.u32;
+    uint32_t maxLen = ctx.r4.u32;
+    uint32_t fmtGuest = ctx.r5.u32;
+    uint32_t argptrGuest = ctx.r6.u32;
+
+    char* dst = reinterpret_cast<char*>(base + dstGuest);
+    const char* fmt = reinterpret_cast<const char*>(base + fmtGuest);
+
+    int count = FormatGuestVsnprintf(base, dst, maxLen, fmt, argptrGuest);
+
+    static int s_logCount = 0;
+    if (++s_logCount <= 30) {
+        LOGF_INFO("[CRT_VSNPRINTF_2] #{} fmt='{}' out='{}'", s_logCount, fmt ? fmt : "null", dst ? dst : "null");
+    }
+
+    ctx.r3.s64 = count;
+}
+
+PPC_FUNC(sub_823F4000)
+{
+    uint32_t dstGuest = ctx.r3.u32;
+    uint32_t maxLen = ctx.r4.u32;
+    uint32_t fmtGuest = ctx.r5.u32;
+    // ctx.r6 is locale
+    uint32_t argptrGuest = ctx.r7.u32;
+
+    char* dst = reinterpret_cast<char*>(base + dstGuest);
+    const char* fmt = reinterpret_cast<const char*>(base + fmtGuest);
+
+    int count = FormatGuestVsnprintf(base, dst, maxLen, fmt, argptrGuest);
+
+    static int s_logCount = 0;
+    if (++s_logCount <= 30) {
+        LOGF_INFO("[CRT_VSNPRINTF_L] #{} fmt='{}' out='{}'", s_logCount, fmt ? fmt : "null", dst ? dst : "null");
+    }
+
+    ctx.r3.s64 = count;
+}
+
+PPC_FUNC(sub_823F4118)
+{
+    // MSVC CRT _output_l(FILE* str, const char* format, _locale_t locale, va_list argptr)
+    uint32_t fileGuest = ctx.r3.u32;
+    uint32_t fmtGuest = ctx.r4.u32;
+    // ctx.r5 is locale
+    uint32_t argptrGuest = ctx.r6.u32;
+
+    if (fileGuest == 0 || fileGuest >= PPC_MEMORY_SIZE) {
+        ctx.r3.s64 = -1;
+        return;
+    }
+
+    uint32_t ptrGuest = ByteSwap(*(uint32_t*)(base + fileGuest + 0));
+    int32_t cnt = static_cast<int32_t>(ByteSwap(*(uint32_t*)(base + fileGuest + 4)));
+    const char* fmt = reinterpret_cast<const char*>(base + fmtGuest);
+
+    size_t maxLen = (cnt > 0) ? static_cast<size_t>(cnt) : 65536;
+    if (maxLen > 65536) maxLen = 65536;
+
+    char* dst = reinterpret_cast<char*>(base + ptrGuest);
+    int count = FormatGuestVsnprintf(base, dst, maxLen, fmt, argptrGuest);
+
+    static int s_logCount = 0;
+    if (++s_logCount <= 30) {
+        LOGF_INFO("[CRT_OUTPUT_L] #{} fmt='{}' out='{}'", s_logCount, fmt ? fmt : "null", dst ? dst : "null");
+    }
+
+    size_t written = std::min(static_cast<size_t>(count), maxLen - 1);
+    *(uint32_t*)(base + fileGuest + 0) = ByteSwap(static_cast<uint32_t>(ptrGuest + written));
+    if (cnt > 0) {
+        *(uint32_t*)(base + fileGuest + 4) = ByteSwap(static_cast<uint32_t>(cnt - written));
+    }
+
+    ctx.r3.s64 = count;
 }
 
 

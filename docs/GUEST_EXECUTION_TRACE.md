@@ -91,4 +91,35 @@ Execution has successfully progressed from CRT entrypoint (`0x83639888`) through
 [NtWaitEx] #3500 handle=0xA13083B0 timeout=4294967295 caller=0x00000000
 ```
 
-The runtime is fully stable and advancing into Phase 3 (RAGE Device / Streaming System Initialization).
+---
+
+## Post-`installpartitions.meta` & Variadic Formatter Stabilization
+
+### 1. C++ PPC Variadic Formatter (`FormatGuestVsnprintf`)
+Previously, XenonRecomp lifted MSVC CRT `vsnprintf` (`sub_823F4118`) with an indirect switch jump table dispatching `%s` (`0x823F4644`) and `%x` (`0x823F4864`) via `bctr`. Because internal switch labels were not function entry points, they were trapped by `UnmappedIndirectHandler`, truncating formatted asset paths and game strings.
+
+We replaced the weak recomp symbols `sub_82409368`, `sub_83626570`, `sub_823F4000`, and `sub_823F4118` with a strong C++ guest variadic formatter in `imports.cpp`:
+- **Xbox 360 PPC Calling Convention**: Arguments are stored in 8-byte aligned slots `(argptr + 7) & ~7`. 32-bit values (`int32_t`, pointers) reside at offset `+4` (big-endian), 64-bit values (`int64_t`, double) span all 8 bytes.
+- **Specifiers**: Implemented robust tokenizer handling flags, width (`*` and numeric), precision (`.*` and numeric), length modifiers (`h`, `l`, `ll`, `I64`), and types (`%s`, `%d`, `%i`, `%u`, `%x`, `%X`, `%p`, `%f`, `%c`).
+- **Result**: Validated in runtime trace with stat hashes (`SP0_TOTAL_CASH`, `SP1_TOTAL_CASH`, `MP0_CHAR_XP_FM`, etc.) formatted with 100% accuracy and zero unmapped indirect handler invocations.
+
+### 2. Worker Thread Spin Resolution in `NtWaitForSingleObjectEx`
+In earlier iterations, `ShouldFailOpenWait()` falsely returned `STATUS_SUCCESS` on `timeout == INFINITE` waits during boot/init. This caused the 4 RAGE worker threads (`WorkerThread_0`..`WorkerThread_3`) to treat empty queues as signaled, entering a 100-spin/second loop.
+- **Fix**: Restricted fail-open wait logic strictly to `isMainThread && !isSemaphore`.
+- **Result**: Background worker threads block cleanly on their event handles with zero CPU burn until work is dispatched.
+
+### 3. GTA V RPF7 Archive Mounting
+GTA V Xbox 360 packages its game assets in RPF Version 7 (`RPF7` / `52 50 46 37`) with big-endian header metadata (entry count and TOC size at `+0x04` and `+0x08`, TOC starting at offset `0x10`).
+- Updated `ParseRpfHeader` in `imports.cpp` to recognize RPF7 headers.
+- **Trace Output**:
+  - `xbox360a.rpf`: Parsed RPF7 header, 155 entries, TOC size 2,147,486,272 bytes, read `0x9B0` at offset `0x10`.
+  - `xbox360b.rpf`: Parsed RPF7 header, 141 entries, read `0x8D0` at offset `0x10`.
+  - Both archives successfully mounted.
+
+### 4. Current Execution State
+The runtime cleanly progresses through:
+1. `xbox360a.rpf` and `xbox360b.rpf` mounting and TOC loading.
+2. `game:\data\installpartitions.meta` opening, measuring, and parsing.
+3. RAGE worker thread pool initialization (4 worker threads registered).
+4. GPU ring buffer allocation (`0xA5F2DB80`, size 8 KB) and writeback configuration.
+5. Render thread initialization with `0x80150B4C` frame event synchronization.

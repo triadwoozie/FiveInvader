@@ -91,8 +91,14 @@ void KiSystemStartup()
     // Initialize save system early - creates directories and registers save content
     SaveSystem::Initialize();
 
+    std::filesystem::path gameRoot = GetGamePath() / "game";
+    if (!std::filesystem::exists(gameRoot) && std::filesystem::exists(GetGamePath() / "default.xex"))
+    {
+        gameRoot = GetGamePath();
+    }
+
     const auto gameContent = XamMakeContent(XCONTENTTYPE_RESERVED, "Game");
-    const std::string gamePath = (const char*)(GetGamePath() / "game").u8string().c_str();
+    const std::string gamePath = (const char*)gameRoot.u8string().c_str();
 
     BuildPathCache(gamePath);
 
@@ -166,11 +172,6 @@ void KiSystemStartup()
     // GTA V uses "common:" and "platform:" root paths
     // All game files are in: GetGamePath() / "game" / (common/, xbox360/, audio/)
     // Structure: ~/Library/Application Support/FiveInvader/game/common/, etc.
-    std::filesystem::path gameRoot = GetGamePath() / "game";
-    if (!std::filesystem::exists(gameRoot) && std::filesystem::exists(GetGamePath() / "default.xex"))
-    {
-        gameRoot = GetGamePath();
-    }
     const std::string commonPath = (const char*)(gameRoot / "common").u8string().c_str();
     const std::string platformPath = (const char*)(gameRoot / "xbox360").u8string().c_str();
     const std::string audioPath = (const char*)(gameRoot / "audio").u8string().c_str();
