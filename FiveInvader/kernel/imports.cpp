@@ -5,6 +5,8 @@
 #include <unordered_set>
 #include <thread>
 #include <atomic>
+#include <deque>
+#include <sstream>
 #include <stdafx.h>
 #include <cpu/ppc_context.h>
 #ifdef PPC_CONFIG_SKIP_LR
@@ -116,6 +118,8 @@ void sub_825C9768(PPCContext& ctx, uint8_t* base);
 void sub_836B2AB0(PPCContext& ctx, uint8_t* base);
 void sub_82332868(PPCContext& ctx, uint8_t* base);
 void sub_83217D38(PPCContext& ctx, uint8_t* base);
+void sub_8226B3B8(PPCContext& ctx, uint8_t* base);
+void sub_83480F88(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -152,6 +156,8 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x836B2AB0, &::sub_836B2AB0);
     PatchFuncMapping(0x82332868, &::sub_82332868);
     PatchFuncMapping(0x83217D38, &::sub_83217D38);
+    PatchFuncMapping(0x8226B3B8, &::sub_8226B3B8);
+    PatchFuncMapping(0x83480F88, &::sub_83480F88);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -252,16 +258,87 @@ static constexpr auto SDL_PUMP_INTERVAL = std::chrono::milliseconds(16); // ~60f
 static std::thread::id g_kernelMainThreadId;
 static std::atomic<bool> g_kernelMainThreadIdSet{false};
 
+// =============================================================================
+// DIAGNOSTIC WAIT & FILE TRACKING (Phase 7 Task 1)
+// =============================================================================
+struct ThreadWaitInfo {
+    std::thread::id tid;
+    uint32_t callerLR = 0;
+    std::string waitType;
+    uint32_t handleOrObj = 0;
+    uint32_t timeoutMs = 0;
+    std::chrono::steady_clock::time_point startTime;
+};
+
+static std::mutex g_waitTrackerMutex;
+static std::unordered_map<std::thread::id, ThreadWaitInfo> g_activeThreadWaits;
+
+struct ScopedWaitTracker {
+    std::thread::id tid;
+    ScopedWaitTracker(const char* type, uint32_t handleOrObj, uint32_t timeoutMs, uint32_t callerLR) {
+        tid = std::this_thread::get_id();
+        std::lock_guard<std::mutex> lock(g_waitTrackerMutex);
+        g_activeThreadWaits[tid] = ThreadWaitInfo{
+            .tid = tid,
+            .callerLR = callerLR,
+            .waitType = type,
+            .handleOrObj = handleOrObj,
+            .timeoutMs = timeoutMs,
+            .startTime = std::chrono::steady_clock::now()
+        };
+    }
+    ~ScopedWaitTracker() {
+        std::lock_guard<std::mutex> lock(g_waitTrackerMutex);
+        g_activeThreadWaits.erase(tid);
+    }
+};
+
+static std::mutex g_recentFilesMutex;
+static std::deque<std::string> g_recentFiles;
+
+static void RecordRecentFile(const std::string& path) {
+    if (path.empty()) return;
+    std::lock_guard<std::mutex> lock(g_recentFilesMutex);
+    if (g_recentFiles.empty() || g_recentFiles.back() != path) {
+        g_recentFiles.push_back(path);
+        if (g_recentFiles.size() > 5) {
+            g_recentFiles.pop_front();
+        }
+    }
+}
+
 void StartVBlankTimer();
 
+std::atomic<uint64_t> g_mainFrameCounter{0};
 std::atomic<uint64_t> g_vdSwapCounter{0};
 std::atomic<uint64_t> g_pm4PacketCounter{0};
 static std::chrono::steady_clock::time_point g_lastVdSwapTime = std::chrono::steady_clock::now();
+
+#ifndef _WIN32
+#include <pthread.h>
+#include <csignal>
+#include <execinfo.h>
+static pthread_t g_kernelMainPthread;
+static void MainThreadSampleHandler(int sig)
+{
+    void* frames[32];
+    int count = backtrace(frames, 32);
+    fprintf(stderr, "\n--- [MAIN THREAD SAMPLE (posix)] ---\n");
+    backtrace_symbols_fd(frames, count, STDERR_FILENO);
+    fprintf(stderr, "------------------------------------\n");
+}
+#endif
 
 void InitKernelMainThread()
 {
     g_kernelMainThreadId = std::this_thread::get_id();
     g_kernelMainThreadIdSet = true;
+#ifndef _WIN32
+    g_kernelMainPthread = pthread_self();
+    struct sigaction sa{};
+    sa.sa_handler = MainThreadSampleHandler;
+    sigaction(SIGUSR1, &sa, nullptr);
+#endif
     StartVBlankTimer();
 }
 
@@ -299,7 +376,8 @@ void PumpSdlEventsIfNeeded()
             if (GameWindow::s_pWindow)
             {
                 char title[256];
-                snprintf(title, sizeof(title), "FiveInvader | Presents: %llu | VdSwap: %llu | PM4: %llu",
+                snprintf(title, sizeof(title), "FiveInvader | Frames: %llu | Presents: %llu | VdSwap: %llu | PM4: %llu",
+                    (unsigned long long)g_mainFrameCounter.load(std::memory_order_relaxed),
                     (unsigned long long)g_frameCounter.load(std::memory_order_relaxed),
                     (unsigned long long)g_vdSwapCounter.load(std::memory_order_relaxed),
                     (unsigned long long)g_pm4PacketCounter.load(std::memory_order_relaxed));
@@ -2200,6 +2278,7 @@ uint32_t NtOpenFile(
     std::string guestPath;
     if (!TryGetAnsiPath(Attributes, guestPath))
         return STATUS_INVALID_PARAMETER;
+    RecordRecentFile(guestPath);
 
     // DesiredAccess on Xbox uses Win32-like GENERIC_READ/WRITE bits.
     std::ios::openmode mode = std::ios::binary;
@@ -2318,6 +2397,7 @@ uint32_t NtCreateFile
     std::string guestPath;
     if (!TryGetAnsiPath(Attributes, guestPath))
         return STATUS_INVALID_PARAMETER;
+    RecordRecentFile(guestPath);
 
     // === PHASE 2: Storage Init File Tracing ===
     static int s_storageInitFileCount = 0;
@@ -2951,6 +3031,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
     static int s_waitCount = 0;
     ++s_waitCount;
     uint32_t callerLR = GET_CALLER_LR();
+    ScopedWaitTracker waitTracker("NtWaitForSingleObjectEx", Handle, timeout, callerLR);
     bool isMainThread = (g_kernelMainThreadIdSet && std::this_thread::get_id() == g_kernelMainThreadId);
     
     if (s_waitCount <= 30 || s_waitCount % 500 == 0)
@@ -3368,6 +3449,8 @@ uint32_t KeDelayExecutionThread(uint32_t WaitMode, bool Alertable, be<int64_t>* 
         return STATUS_USER_APC;
 
     uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
+    uint32_t callerLR = GET_CALLER_LR();
+    ScopedWaitTracker waitTracker("KeDelayExecutionThread", 0, timeout, callerLR);
     static std::atomic<int> s_delayCount{0};
     if (s_delayCount++ < 50 || s_delayCount % 100 == 0) {
         LOGF_INFO("[TRACE] KeDelayExecutionThread(timeout={}ms)", timeout);
@@ -4317,6 +4400,10 @@ void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
     if (!cs)
         return;
 
+    uint32_t guestAddr = g_memory.MapVirtual(cs);
+    if (guestAddr < 0x10000)
+        return;
+
     // printf("RtlLeaveCriticalSection");
     cs->RecursionCount = cs->RecursionCount.get() - 1;
 
@@ -4332,6 +4419,18 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 {
     if (!cs)
         return;
+
+    uint32_t guestAddr = g_memory.MapVirtual(cs);
+    if (guestAddr < 0x10000)
+    {
+        static uint32_t s_lowCount = 0;
+        if (++s_lowCount <= 10)
+        {
+            LOGF_WARNING("[LOCK] RtlEnterCriticalSection ignored low/null address 0x{:08X} (caller=0x{:08X})",
+                         guestAddr, GET_CALLER_LR());
+        }
+        return;
+    }
 
     static int s_count = 0;
     static int s_waitCount = 0;
@@ -4411,6 +4510,10 @@ void RtlCompareMemoryUlong()
 uint32_t RtlInitializeCriticalSection(XRTL_CRITICAL_SECTION* cs)
 {
     if (!cs)
+        return 0xC0000008;
+
+    uint32_t guestAddr = g_memory.MapVirtual(cs);
+    if (guestAddr < 0x10000)
         return 0xC0000008;
 
     // printf("RtlInitializeCriticalSection %x\n", cs);
@@ -4900,6 +5003,48 @@ void VBlankTimerThread() {
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastVdSwapTime).count() >= 32) {
             Video::Present();
         }
+
+        static auto s_lastDiagDumpTime = std::chrono::steady_clock::now();
+        if (now - s_lastDiagDumpTime >= std::chrono::seconds(5)) {
+            s_lastDiagDumpTime = now;
+
+            std::stringstream ss;
+            ss << "\n================ [DIAGNOSTIC STATUS DUMP] ================\n";
+            ss << "Counters: Frames=" << g_mainFrameCounter.load(std::memory_order_relaxed)
+               << ", Presents=" << g_frameCounter.load(std::memory_order_relaxed)
+               << ", VdSwap=" << g_vdSwapCounter.load(std::memory_order_relaxed)
+               << ", PM4=" << g_pm4PacketCounter.load(std::memory_order_relaxed) << "\n";
+
+            // Recent files
+            {
+                std::lock_guard<std::mutex> lock(g_recentFilesMutex);
+                ss << "Last Opened Files (" << g_recentFiles.size() << "):\n";
+                for (const auto& file : g_recentFiles) {
+                    ss << "  - " << file << "\n";
+                }
+            }
+
+            // Active thread waits
+            {
+                std::lock_guard<std::mutex> lock(g_waitTrackerMutex);
+                ss << "Active Thread Waits (" << g_activeThreadWaits.size() << "):\n";
+                for (const auto& [tid, waitInfo] : g_activeThreadWaits) {
+                    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - waitInfo.startTime).count();
+                    bool isMain = (g_kernelMainThreadIdSet && tid == g_kernelMainThreadId);
+                    ss << "  Thread [tid=" << tid << (isMain ? " (MAIN)" : "") << "] "
+                       << waitInfo.waitType << "(0x" << std::hex << waitInfo.handleOrObj << std::dec << ") "
+                       << "callerLR=0x" << std::hex << waitInfo.callerLR << std::dec
+                       << " timeout=" << waitInfo.timeoutMs << "ms, elapsed=" << elapsedMs << "ms\n";
+                }
+            }
+            ss << "========================================================\n";
+            LOGF_WARNING("{}", ss.str());
+#ifndef _WIN32
+            if (g_kernelMainThreadIdSet.load()) {
+                pthread_kill(g_kernelMainPthread, SIGUSR1);
+            }
+#endif
+        }
     }
 }
 
@@ -5110,6 +5255,7 @@ uint32_t KeWaitForSingleObject(XDISPATCHER_HEADER* Object, uint32_t WaitReason, 
     const uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
     static std::atomic<int> s_keWaitCount{0};
     uint32_t callerLR = GET_CALLER_LR();
+    ScopedWaitTracker waitTracker("KeWaitForSingleObject", Object ? (uint32_t)((uint8_t*)Object - g_memory.base) : 0, timeout, callerLR);
     if (s_keWaitCount++ < 50 || s_keWaitCount % 200 == 0) {
         LOGF_INFO("[TRACE] KeWaitForSingleObject: #{} obj=0x{:08X} type={} timeout={}ms caller=0x{:08X}",
                   s_keWaitCount.load(),
@@ -8676,6 +8822,322 @@ PPC_FUNC(sub_82D925B8) {
 }
 
 
+PPC_EXTERN_FUNC(__savegprlr_24);
+PPC_EXTERN_FUNC(__restgprlr_24);
+
+PPC_FUNC(sub_82374FC0)
+{
+	PPC_FUNC_PROLOGUE();
+	PPCCRRegister cr6{};
+	PPCRegister temp{};
+	int loopSteps = 0;
+	__savegprlr_24(ctx, base);
+	cr6.compare<uint32_t>(ctx.r5.u32, 16, ctx.xer);
+	if (!cr6.lt) goto loc_82374FD4;
+	ctx.r5.s64 = 16;
+loc_82374FD4:
+	cr6.compare<uint32_t>(ctx.r4.u32, 16, ctx.xer);
+	if (!cr6.lt) goto loc_82374FE0;
+	ctx.r4.s64 = 16;
+loc_82374FE0:
+	ctx.r11.s64 = ctx.r4.s64 + 15;
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 216);
+	ctx.r26.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 0) & 0xFFFFFFF0;
+	cr6.compare<uint32_t>(ctx.r26.u32, ctx.r10.u32, ctx.xer);
+	if (cr6.gt) goto loc_823750DC;
+	ctx.r11.u64 = __builtin_rotateleft64(ctx.r26.u32 | (ctx.r26.u64 << 32), 28) & 0xFFFFFFF;
+	cr6.compare<uint32_t>(ctx.r11.u32, 15, ctx.xer);
+	if (cr6.lt) goto loc_82375008;
+	ctx.r27.s64 = 15;
+	goto loc_82375014;
+loc_82375008:
+	ctx.r27.u64 = ctx.r11.u64;
+	cr6.compare<int32_t>(ctx.r11.s32, 16, ctx.xer);
+	if (!cr6.lt) goto loc_823750DC;
+loc_82375014:
+	ctx.r11.s64 = ctx.r27.s64 + 3;
+	ctx.r25.s64 = 0;
+	ctx.r11.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 2) & 0xFFFFFFFC;
+	ctx.r28.s64 = -1;
+	ctx.r30.u64 = ctx.r11.u64 + ctx.r3.u64;
+loc_82375028:
+	if (ctx.r30.u32 < 0x10000 || ctx.r30.u32 >= 0xA0000000) goto loc_823750DC;
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r30.u32 + 0);
+	ctx.r11.u64 = ctx.r25.u64;
+	ctx.r31.u64 = ctx.r28.u64;
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (cr6.eq || ctx.r10.u32 < 0x10000 || ctx.r10.u32 >= 0xA0000000) goto loc_823750CC;
+	ctx.r29.s64 = ctx.r5.s64 + -1;
+	ctx.r6.u64 = PPC_LOAD_U32(ctx.r10.u32 + 20);
+	ctx.r7.s64 = ctx.r5.s64 + 15;
+	ctx.r4.u64 = ~ctx.r29.u64;
+	loopSteps = 0;
+loc_8237504C:
+	if (ctx.r10.u32 < 0x10000 || ctx.r10.u32 >= 0xA0000000) {
+		ctx.r10.u64 = 0;
+		goto loc_823750C4;
+	}
+	if (++loopSteps > 1000 || (ctx.r10.u32 == ctx.r6.u32)) {
+		static int s_cycleWarn = 0;
+		if (s_cycleWarn++ < 10) {
+			LOGF_WARNING("[sub_82374FC0] Cycle/limit hit in allocator free list (r10=0x{:08X}, steps={})! Breaking loop.", ctx.r10.u32, loopSteps);
+		}
+		ctx.r10.u64 = 0;
+		goto loc_823750C4;
+	}
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 0);
+	cr6.compare<uint32_t>(ctx.r9.u32, ctx.r10.u32, ctx.xer);
+	if (cr6.eq) goto loc_8237505C;
+loc_8237505C:
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 4);
+	ctx.r24.u64 = ctx.r7.u64 + ctx.r10.u64;
+	ctx.r8.u64 = ctx.r9.u64 + ctx.r10.u64;
+	ctx.r9.u64 = ctx.r24.u64 & ctx.r4.u64;
+	ctx.r8.s64 = ctx.r8.s64 + 16;
+	cr6.compare<uint32_t>(ctx.r8.u32, ctx.r9.u32, ctx.xer);
+	if (!cr6.gt) goto loc_82375098;
+	ctx.r9.s64 = ctx.r8.s64 - ctx.r9.s64;
+	cr6.compare<uint32_t>(ctx.r9.u32, ctx.r26.u32, ctx.xer);
+	if (cr6.eq) goto loc_823750C0;
+	if (!cr6.gt) goto loc_82375098;
+	cr6.compare<uint32_t>(ctx.r9.u32, ctx.r31.u32, ctx.xer);
+	if (!cr6.lt) goto loc_82375098;
+	ctx.r11.u64 = ctx.r10.u64;
+	ctx.r31.u64 = ctx.r9.u64;
+loc_82375098:
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r10.u32 + 20);
+	cr6.compare<uint32_t>(ctx.r6.u32, 0, ctx.xer);
+	if (cr6.eq || ctx.r6.u32 < 0x10000 || ctx.r6.u32 >= 0xA0000000) goto loc_823750B4;
+	ctx.r6.u64 = PPC_LOAD_U32(ctx.r6.u32 + 20);
+	cr6.compare<uint32_t>(ctx.r6.u32, 0, ctx.xer);
+	if (cr6.eq || ctx.r6.u32 < 0x10000 || ctx.r6.u32 >= 0xA0000000) goto loc_823750B4;
+	ctx.r6.u64 = PPC_LOAD_U32(ctx.r6.u32 + 20);
+loc_823750B4:
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (!cr6.eq && ctx.r10.u32 >= 0x10000 && ctx.r10.u32 < 0xA0000000) goto loc_8237504C;
+	goto loc_823750C4;
+	goto loc_823750C4;
+loc_823750C0:
+	ctx.r11.u64 = ctx.r10.u64;
+loc_823750C4:
+	cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+	if (!cr6.eq) goto loc_823750E4;
+loc_823750CC:
+	ctx.r27.s64 = ctx.r27.s64 + 1;
+	ctx.r30.s64 = ctx.r30.s64 + 4;
+	cr6.compare<int32_t>(ctx.r27.s32, 16, ctx.xer);
+	if (cr6.lt) goto loc_82375028;
+loc_823750DC:
+	ctx.r3.s64 = 0;
+	__restgprlr_24(ctx, base);
+	return;
+loc_823750E4:
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+	ctx.r8.u64 = ctx.r10.u64 | 16;
+	ctx.r10.u64 = __builtin_rotateleft64(ctx.r9.u32 | (ctx.r9.u64 << 32), 28) & 0xFFFFFFF;
+	ctx.r7.u64 = ctx.r8.u64;
+	PPC_STORE_U32(ctx.r11.u32 + 12, ctx.r8.u32);
+	ctx.r6.u64 = PPC_LOAD_U32(ctx.r3.u32 + 268);
+	cr6.compare<uint32_t>(ctx.r10.u32, 15, ctx.xer);
+	ctx.r7.u64 = (__builtin_rotateleft32(ctx.r6.u32, 6) & 0xFFFFFFC0) | (ctx.r7.u64 & 0xFFFFFFFF0000003F);
+	PPC_STORE_U32(ctx.r11.u32 + 12, ctx.r7.u32);
+	ctx.r9.s64 = 15;
+	if (!cr6.lt) goto loc_82375118;
+	ctx.r9.u64 = ctx.r10.u64;
+loc_82375118:
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);
+	ctx.r7.s64 = ctx.r11.s64 + 16;
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_82375134;
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 20);
+	PPC_STORE_U32(ctx.r10.u32 + 20, ctx.r9.u32);
+	goto loc_82375144;
+loc_82375134:
+	ctx.r10.s64 = ctx.r9.s64 + 3;
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 20);
+	ctx.r8.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 2) & 0xFFFFFFFC;
+	PPC_STORE_U32(ctx.r8.u32 + ctx.r3.u32, ctx.r9.u32);
+loc_82375144:
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 20);
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_82375158;
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r7.u32 + 0);
+	PPC_STORE_U32(ctx.r10.u32 + 16, ctx.r9.u32);
+loc_82375158:
+	ctx.r10.u64 = ctx.r7.u64 & ctx.r29.u64;
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_82375290;
+	ctx.r9.u64 = ctx.r7.u64 + ctx.r5.u64;
+	ctx.r8.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);
+	ctx.r6.s64 = ctx.r9.s64 + -1;
+	ctx.r9.u64 = ctx.r8.u64 + ctx.r11.u64;
+	ctx.r8.u64 = ctx.r6.u64 & ctx.r4.u64;
+	ctx.r5.s64 = ctx.r9.s64 + 16;
+	ctx.r9.s64 = ctx.r8.s64 - ctx.r7.s64;
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_823751C0;
+	cr6.compare<uint32_t>(ctx.r9.u32, 16, ctx.xer);
+	if (!cr6.eq) goto loc_823751C0;
+	ctx.r11.u64 = PPC_LOAD_U32(ctx.r10.u32 + 4);
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 12);
+	ctx.r7.s64 = ctx.r11.s64 + 16;
+	ctx.r11.u64 = ctx.r9.u32 & 0xF;
+	PPC_STORE_U32(ctx.r10.u32 + 4, ctx.r7.u32);
+	ctx.r6.s64 = ctx.r11.s64 + 22;
+	ctx.r11.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 2) & 0xFFFFFFFC;
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r3.u32);
+	ctx.r4.s64 = ctx.r9.s64 + 16;
+	PPC_STORE_U32(ctx.r11.u32 + ctx.r3.u32, ctx.r4.u32);
+	goto loc_82375218;
+loc_823751C0:
+	ctx.r9.s64 = ctx.r9.s64 + -16;
+	ctx.r10.u64 = ctx.r11.u64;
+	PPC_STORE_U32(ctx.r11.u32 + 4, ctx.r9.u32);
+	ctx.r6.u64 = __builtin_rotateleft32(ctx.r9.u32, 0);
+	ctx.r4.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);
+	ctx.r4.u64 = ctx.r4.u32 & 0x3F;
+	ctx.r4.u64 = __builtin_rotateleft64(ctx.r4.u32 | (ctx.r4.u64 << 32), 0) & 0xFFFFFFFFFFFFFFEF;
+	ctx.r9.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 28) & 0xFFFFFFF;
+	PPC_STORE_U32(ctx.r11.u32 + 12, ctx.r4.u32);
+	cr6.compare<uint32_t>(ctx.r9.u32, 15, ctx.xer);
+	if (cr6.lt) goto loc_823751F0;
+	ctx.r9.s64 = 15;
+loc_823751F0:
+	ctx.r9.s64 = ctx.r9.s64 + 3;
+	ctx.r9.u64 = __builtin_rotateleft64(ctx.r9.u32 | (ctx.r9.u64 << 32), 2) & 0xFFFFFFFC;
+	ctx.r6.u64 = PPC_LOAD_U32(ctx.r9.u32 + ctx.r3.u32);
+	PPC_STORE_U32(ctx.r11.u32 + 20, ctx.r6.u32);
+	ctx.r6.u64 = PPC_LOAD_U32(ctx.r9.u32 + ctx.r3.u32);
+	cr6.compare<uint32_t>(ctx.r6.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_82375210;
+	PPC_STORE_U32(ctx.r6.u32 + 16, ctx.r11.u32);
+loc_82375210:
+	PPC_STORE_U32(ctx.r7.u32 + 0, ctx.r25.u32);
+	PPC_STORE_U32(ctx.r9.u32 + ctx.r3.u32, ctx.r11.u32);
+loc_82375218:
+	ctx.r11.s64 = ctx.r8.s64 + -16;
+	ctx.r9.s64 = ctx.r5.s64 - ctx.r8.s64;
+	PPC_STORE_U32(ctx.r8.u32 + -16, ctx.r11.u32);
+	PPC_STORE_U32(ctx.r8.u32 + -12, ctx.r9.u32);
+	PPC_STORE_U32(ctx.r8.u32 + -8, ctx.r10.u32);
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r8.u32 + -12);
+	ctx.r5.u64 = PPC_LOAD_U32(ctx.r8.u32 + -4);
+	ctx.r4.u64 = ctx.r5.u32 & 0xF;
+	ctx.r7.u64 = PPC_LOAD_U32(ctx.r3.u32 + 268);
+	ctx.r6.u64 = __builtin_rotateleft64(ctx.r7.u32 | (ctx.r7.u64 << 32), 6) & 0xFFFFFFC0;
+	ctx.r9.u64 = ctx.r4.u64 | ctx.r6.u64;
+	ctx.r10.u64 = ctx.r10.u64 + ctx.r11.u64;
+	ctx.r7.u64 = ctx.r9.u64 | 16;
+	ctx.r10.s64 = ctx.r10.s64 + 16;
+	PPC_STORE_U32(ctx.r8.u32 + -4, ctx.r7.u32);
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r3.u32 + 76);
+	ctx.r8.u64 = PPC_LOAD_U32(ctx.r3.u32 + 4);
+	ctx.r6.u64 = ctx.r9.u64 + ctx.r8.u64;
+	ctx.xer.ca = ctx.r10.u32 >= ctx.r6.u32;
+	ctx.r5.s64 = ctx.r10.s64 - ctx.r6.s64;
+	temp.u8 = (~ctx.r4.u32 + ctx.r4.u32 < ~ctx.r4.u32) | (~ctx.r4.u32 + ctx.r4.u32 + ctx.xer.ca < ctx.xer.ca);
+	ctx.r9.u64 = ~ctx.r4.u64 + ctx.r4.u64 + ctx.xer.ca;
+	ctx.xer.ca = temp.u8;
+	ctx.r10.u64 = ctx.r9.u64 & ctx.r10.u64;
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_82375278;
+	PPC_STORE_U32(ctx.r10.u32 + 8, ctx.r11.u32);
+loc_82375278:
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 216);
+	ctx.r9.s64 = ctx.r10.s64 + -16;
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 84);
+	ctx.r8.s64 = ctx.r10.s64 + 16;
+	PPC_STORE_U32(ctx.r3.u32 + 216, ctx.r9.u32);
+	PPC_STORE_U32(ctx.r3.u32 + 84, ctx.r8.u32);
+loc_82375290:
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+	ctx.r9.s64 = ctx.r26.s64 + 16;
+	cr6.compare<uint32_t>(ctx.r10.u32, ctx.r9.u32, ctx.xer);
+	if (!cr6.gt) goto loc_8237534C;
+	ctx.r10.u64 = ctx.r11.u64 + ctx.r26.u64;
+	ctx.r10.s64 = ctx.r10.s64 + 16;
+	PPC_STORE_U32(ctx.r10.u32 + 0, ctx.r10.u32);
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+	ctx.r9.s64 = ctx.r9.s64 - ctx.r26.s64;
+	ctx.r8.s64 = ctx.r9.s64 + -16;
+	PPC_STORE_U32(ctx.r10.u32 + 4, ctx.r8.u32);
+	PPC_STORE_U32(ctx.r10.u32 + 8, ctx.r11.u32);
+	PPC_STORE_U32(ctx.r10.u32 + 12, ctx.r25.u32);
+	ctx.r7.u64 = PPC_LOAD_U32(ctx.r3.u32 + 4);
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 4);
+	ctx.r9.u64 = ctx.r10.u64 + ctx.r9.u64;
+	ctx.r8.u64 = PPC_LOAD_U32(ctx.r3.u32 + 76);
+	ctx.r9.s64 = ctx.r9.s64 + 16;
+	ctx.r7.u64 = ctx.r8.u64 + ctx.r7.u64;
+	ctx.xer.ca = ctx.r9.u32 >= ctx.r7.u32;
+	ctx.r6.s64 = ctx.r9.s64 - ctx.r7.s64;
+	temp.u8 = (~ctx.r5.u32 + ctx.r5.u32 < ~ctx.r5.u32) | (~ctx.r5.u32 + ctx.r5.u32 + ctx.xer.ca < ctx.xer.ca);
+	ctx.r4.u64 = ~ctx.r5.u64 + ctx.r5.u64 + ctx.xer.ca;
+	ctx.xer.ca = temp.u8;
+	ctx.r9.u64 = ctx.r4.u64 & ctx.r9.u64;
+	cr6.compare<uint32_t>(ctx.r9.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_823752F4;
+	PPC_STORE_U32(ctx.r9.u32 + 8, ctx.r10.u32);
+loc_823752F4:
+	PPC_STORE_U32(ctx.r11.u32 + 4, ctx.r26.u32);
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 4);
+	ctx.r9.u64 = __builtin_rotateleft64(ctx.r9.u32 | (ctx.r9.u64 << 32), 28) & 0xFFFFFFF;
+	cr6.compare<uint32_t>(ctx.r9.u32, 15, ctx.xer);
+	if (cr6.lt) goto loc_8237530C;
+	ctx.r9.s64 = 15;
+loc_8237530C:
+	ctx.r9.s64 = ctx.r9.s64 + 3;
+	ctx.r9.u64 = __builtin_rotateleft64(ctx.r9.u32 | (ctx.r9.u64 << 32), 2) & 0xFFFFFFFC;
+	ctx.r8.u64 = PPC_LOAD_U32(ctx.r9.u32 + ctx.r3.u32);
+	PPC_STORE_U32(ctx.r10.u32 + 20, ctx.r8.u32);
+	ctx.r8.u64 = PPC_LOAD_U32(ctx.r9.u32 + ctx.r3.u32);
+	cr6.compare<uint32_t>(ctx.r8.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_8237532C;
+	PPC_STORE_U32(ctx.r8.u32 + 16, ctx.r10.u32);
+loc_8237532C:
+	PPC_STORE_U32(ctx.r10.u32 + 16, ctx.r25.u32);
+	PPC_STORE_U32(ctx.r9.u32 + ctx.r3.u32, ctx.r10.u32);
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 216);
+	ctx.r10.s64 = ctx.r10.s64 + -16;
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r3.u32 + 84);
+	PPC_STORE_U32(ctx.r3.u32 + 216, ctx.r10.u32);
+	ctx.r9.s64 = ctx.r9.s64 + 16;
+	PPC_STORE_U32(ctx.r3.u32 + 84, ctx.r9.u32);
+loc_8237534C:
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+	ctx.r8.s64 = 176;
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 84);
+	ctx.r7.u64 = PPC_LOAD_U32(ctx.r3.u32 + 216);
+	ctx.r6.u64 = ctx.r10.u64 + ctx.r9.u64;
+	ctx.r5.u64 = PPC_LOAD_U32(ctx.r13.u32 + 0);
+	PPC_STORE_U32(ctx.r3.u32 + 84, ctx.r6.u32);
+	ctx.r4.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+	ctx.r10.s64 = ctx.r7.s64 - ctx.r4.s64;
+	PPC_STORE_U32(ctx.r3.u32 + 216, ctx.r10.u32);
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+	ctx.r8.u64 = PPC_LOAD_U32(ctx.r8.u32 + ctx.r5.u32);
+	ctx.r7.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);
+	ctx.r8.u64 = (__builtin_rotateleft32(ctx.r7.u32, 0) & 0xFFFFFFF0) | (ctx.r8.u64 & 0xFFFFFFFF0000000F);
+	ctx.r10.u64 = ctx.r8.u32 & 0xF;
+	PPC_STORE_U32(ctx.r11.u32 + 12, ctx.r8.u32);
+	ctx.r6.s64 = ctx.r10.s64 + 22;
+	ctx.r10.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 2) & 0xFFFFFFFC;
+	ctx.r8.u64 = PPC_LOAD_U32(ctx.r10.u32 + ctx.r3.u32);
+	ctx.r5.u64 = ctx.r9.u64 + ctx.r8.u64;
+	PPC_STORE_U32(ctx.r10.u32 + ctx.r3.u32, ctx.r5.u32);
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 216);
+	ctx.r4.u64 = PPC_LOAD_U32(ctx.r3.u32 + 220);
+	cr6.compare<uint32_t>(ctx.r10.u32, ctx.r4.u32, ctx.xer);
+	if (!cr6.lt) goto loc_823753B4;
+	PPC_STORE_U32(ctx.r3.u32 + 220, ctx.r10.u32);
+loc_823753B4:
+	ctx.r3.s64 = ctx.r11.s64 + 16;
+	__restgprlr_24(ctx, base);
+	return;
+}
+
 PPC_FUNC(sub_82380A50)
 {
     PPC_FUNC_PROLOGUE();
@@ -8883,6 +9345,9 @@ PPC_FUNC(sub_831977F8)
 extern "C" void __imp__sub_8255DC20(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__sub_8255DC88(PPCContext& ctx, uint8_t* base);
 
+static std::mutex s_fallbackAllocMutex;
+static std::unordered_set<uint32_t> s_fallbackAllocAddrs;
+
 PPC_FUNC(sub_8255DC20)
 {
     static uint32_t s_allocCount = 0;
@@ -8915,31 +9380,26 @@ PPC_FUNC(sub_8255DC20)
         ctx.r5.u64 = alignment;
         ctx.r6.u64 = 0;
         PPC_CALL_INDIRECT_FUNC(allocFn);
-        return;
+        if (ctx.r3.u32 != 0)
+        {
+            return;
+        }
     }
 
-    // Direct guest heap allocation
-    void* hostPtr = nullptr;
-    if (alignment > 16)
-    {
-        hostPtr = g_userHeap.AllocPhysical(size, alignment);
-    }
-    if (!hostPtr)
-    {
-        hostPtr = g_userHeap.Alloc(size);
-    }
-    if (!hostPtr && alignment <= 16)
-    {
-        hostPtr = g_userHeap.AllocPhysical(size, alignment);
-    }
+    // Direct guest heap allocation fallback (when SBA is exhausted or allocator returns NULL)
+    void* hostPtr = g_userHeap.AllocPhysical(size, alignment ? alignment : 16);
 
     if (hostPtr)
     {
         uint32_t guestAddr = g_memory.MapVirtual(reinterpret_cast<uint8_t*>(hostPtr));
+        {
+            std::lock_guard<std::mutex> lock(s_fallbackAllocMutex);
+            s_fallbackAllocAddrs.insert(guestAddr);
+        }
         ctx.r3.u32 = guestAddr;
         if (s_allocCount <= 30 || (s_allocCount % 500 == 0) || size > 500000)
         {
-            LOGF_INFO("[ALLOC] sub_8255DC20 #{} size={} align={} -> 0x{:08X}", 
+            LOGF_INFO("[ALLOC] sub_8255DC20 #{} size={} align={} -> 0x{:08X} (fallback)", 
                       s_allocCount, size, alignment, guestAddr);
         }
     }
@@ -8965,8 +9425,29 @@ PPC_FUNC(sub_8255DC88)
         return;
     }
 
-    // Don't attempt to free static image memory
-    if (guestAddr >= 0x82000000 && guestAddr < 0x83DB8000)
+    // Check if this pointer was allocated by our fallback allocator
+    bool isFallback = false;
+    {
+        std::lock_guard<std::mutex> lock(s_fallbackAllocMutex);
+        auto it = s_fallbackAllocAddrs.find(guestAddr);
+        if (it != s_fallbackAllocAddrs.end())
+        {
+            s_fallbackAllocAddrs.erase(it);
+            isFallback = true;
+        }
+    }
+    if (isFallback)
+    {
+        void* hostPtr = g_memory.Translate(guestAddr);
+        if (hostPtr)
+        {
+            g_userHeap.Free(hostPtr);
+        }
+        return;
+    }
+
+    // Don't attempt to free static image memory or unmapped space
+    if (guestAddr >= 0x80000000 && guestAddr < 0xA0000000)
     {
         return;
     }
@@ -8997,14 +9478,13 @@ PPC_FUNC(sub_8255DC88)
         return;
     }
 
-    // Direct guest virtual heap free (only for allocations in g_userHeap virtual address space)
-    if (guestAddr >= 0x10000000 && guestAddr < 0x7FEA0000 && (guestAddr % 16) == 0)
+    // Direct guest physical heap free (for allocations in physicalHeap >= 0xA0000000)
+    if (guestAddr >= 0xA0000000 && (guestAddr % 16) == 0)
     {
         void* hostPtr = g_memory.Translate(guestAddr);
         if (hostPtr)
         {
-            std::lock_guard lock(g_userHeap.mutex);
-            o1heapFree(g_userHeap.heap, hostPtr);
+            g_userHeap.Free(hostPtr);
         }
     }
     else
@@ -9046,7 +9526,7 @@ PPC_FUNC(sub_831938B8)
             if (fn >= 0x82000000 && fn < 0x84000000)
             {
                 ctx.r3.u64 = currentAlloc;
-                ctx.r4.u64 = 0;
+                ctx.r4.u64 = r4_in;
                 ctx.r5.u64 = 16;
                 ctx.r6.u64 = 0;
                 PPC_CALL_INDIRECT_FUNC(fn);
@@ -10794,6 +11274,491 @@ PPC_FUNC(sub_82985058)
     return;
 }
 
+PPC_FUNC(sub_822381C0)
+{
+    // Storage is not optical disc (returns 0 = false)
+    // On PC/Linux recompiled runtime, we run from filesystem/NVMe, not optical DVD.
+    // Returning 0 prevents RAGE from taking the dirty disc error branch (loc_8299E8E8).
+    static int s_discCheckCount = 0;
+    ++s_discCheckCount;
+    LOGF_INFO("[sub_822381C0] IsOpticalDisc check -> returning 0 (call #{}, callerLR=0x{:08X})", s_discCheckCount, GET_CALLER_LR());
+    ctx.r3.u64 = 0;
+}
+
+PPC_FUNC(sub_8363AAA0)
+{
+    // Fatal disc error UI / XamLoaderLaunchTitle(0, 0) bypass
+    static int s_fatalDiscErrCount = 0;
+    if (s_fatalDiscErrCount++ < 5) {
+        LOGF_WARNING("[sub_8363AAA0] Bypassing fatal disc error / XamLoaderLaunchTitle(0, 0) (call #{})", s_fatalDiscErrCount);
+    }
+    return;
+}
+
+PPC_EXTERN_FUNC(sub_8255DCC0);
+
+PPC_FUNC(sub_83216C58)
+{
+	PPC_FUNC_PROLOGUE();
+	PPCRegister ctr{};
+	PPCCRRegister cr6{};
+	uint32_t ea{};
+	PPC_STORE_U32(ctx.r1.u32 + -8, ctx.r12.u32);
+	PPC_STORE_U64(ctx.r1.u32 + -24, ctx.r30.u64);
+	PPC_STORE_U64(ctx.r1.u32 + -16, ctx.r31.u64);
+	ea = -112 + ctx.r1.u32;
+	PPC_STORE_U32(ea, ctx.r1.u32);
+	ctx.r1.u32 = ea;
+	ctx.r11.u64 = PPC_LOAD_U16(ctx.r3.u32 + 4);
+	ctx.r31.u64 = ctx.r3.u64;
+	cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_83216CC8;
+	ctx.r11.s64 = 0;
+	ctx.r30.u64 = ctx.r11.u64 | 65535;
+loc_83216C84:
+	ctx.r10.u64 = PPC_LOAD_U16(ctx.r31.u32 + 4);
+	ctx.r4.s64 = 0;
+	ctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+	ctx.r9.u64 = ctx.r10.u64 + ctx.r30.u64;
+	ctx.r8.u64 = ctx.r9.u32 & 0xFFFF;
+	ctx.r7.u64 = __builtin_rotateleft64(ctx.r8.u32 | (ctx.r8.u64 << 32), 5) & 0x1FFFE0;
+	PPC_STORE_U16(ctx.r31.u32 + 4, ctx.r8.u16);
+	ctx.r6.u64 = ctx.r8.u32 & 0xFFFF;
+	ctx.r10.u64 = __builtin_rotateleft32(ctx.r6.u32, 5);
+	ctx.r5.u64 = PPC_LOAD_U32(ctx.r7.u32 + ctx.r11.u32);
+	ctx.r3.u64 = ctx.r10.u64 + ctx.r11.u64;
+	{
+		uint32_t fn = 0;
+		if (ctx.r5.u32 != 0 && ctx.r5.u32 < PPC_MEMORY_SIZE - 4) {
+			fn = PPC_LOAD_U32(ctx.r5.u32 + 0);
+		}
+		ctx.r11.u64 = fn;
+		ctr.u64 = fn;
+		if (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < (PPC_CODE_BASE + PPC_CODE_SIZE)) {
+			PPCFunc* targetFunc = PPC_LOOKUP_FUNC(base, ctr.u32);
+			if (targetFunc) {
+				targetFunc(ctx, base);
+			}
+		} else {
+			static int s_skipDestruct = 0;
+			if (s_skipDestruct++ < 10) {
+				LOGF_WARNING("[sub_83216C58] Skipping invalid/NULL destructor target 0x{:08X} (r5=0x{:08X}, elem=0x{:08X})",
+				             ctr.u32, ctx.r5.u32, ctx.r3.u32);
+			}
+		}
+	}
+	ctx.r10.u64 = PPC_LOAD_U16(ctx.r31.u32 + 4);
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (!cr6.eq) goto loc_83216C84;
+loc_83216CC8:
+	ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+	sub_8255DCC0(ctx, base);
+	ctx.r11.s64 = 0;
+	PPC_STORE_U32(ctx.r31.u32 + 0, ctx.r11.u32);
+	PPC_STORE_U16(ctx.r31.u32 + 6, ctx.r11.u16);
+	ctx.r1.s64 = ctx.r1.s64 + 112;
+	ctx.r12.u64 = PPC_LOAD_U32(ctx.r1.u32 + -8);
+	ctx.r30.u64 = PPC_LOAD_U64(ctx.r1.u32 + -24);
+	ctx.r31.u64 = PPC_LOAD_U64(ctx.r1.u32 + -16);
+	return;
+}
+
+PPC_FUNC(sub_83216CF8)
+{
+	PPC_FUNC_PROLOGUE();
+	PPCRegister ctr{};
+	PPCCRRegister cr6{};
+	uint32_t ea{};
+	PPC_STORE_U32(ctx.r1.u32 + -8, ctx.r12.u32);
+	PPC_STORE_U64(ctx.r1.u32 + -24, ctx.r30.u64);
+	PPC_STORE_U64(ctx.r1.u32 + -16, ctx.r31.u64);
+	ea = -112 + ctx.r1.u32;
+	PPC_STORE_U32(ea, ctx.r1.u32);
+	ctx.r1.u32 = ea;
+	ctx.r11.u64 = PPC_LOAD_U16(ctx.r3.u32 + 4);
+	ctx.r31.u64 = ctx.r3.u64;
+	cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+	if (cr6.eq) goto loc_83216D78;
+	ctx.r11.s64 = 0;
+	ctx.r30.u64 = ctx.r11.u64 | 65535;
+loc_83216D24:
+	ctx.r11.u64 = PPC_LOAD_U16(ctx.r31.u32 + 4);
+	ctx.r4.s64 = 0;
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+	ctx.r9.u64 = ctx.r11.u64 + ctx.r30.u64;
+	ctx.r11.u64 = ctx.r9.u32 & 0xFFFF;
+	ctx.r8.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 1) & 0x1FFFE;
+	PPC_STORE_U16(ctx.r31.u32 + 4, ctx.r11.u16);
+	ctx.r9.u64 = ctx.r11.u32 & 0xFFFF;
+	ctx.r8.u64 = ctx.r11.u64 + ctx.r8.u64;
+	ctx.r11.u64 = __builtin_rotateleft32(ctx.r9.u32, 1);
+	ctx.r7.u64 = __builtin_rotateleft64(ctx.r8.u32 | (ctx.r8.u64 << 32), 3) & 0xFFFFFFF8;
+	ctx.r6.u64 = ctx.r9.u64 + ctx.r11.u64;
+	ctx.r11.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 3) & 0xFFFFFFF8;
+	ctx.r5.u64 = PPC_LOAD_U32(ctx.r7.u32 + ctx.r10.u32);
+	ctx.r3.u64 = ctx.r11.u64 + ctx.r10.u64;
+	{
+		uint32_t fn = 0;
+		if (ctx.r5.u32 != 0 && ctx.r5.u32 < PPC_MEMORY_SIZE - 4) {
+			fn = PPC_LOAD_U32(ctx.r5.u32 + 0);
+		}
+		ctx.r11.u64 = fn;
+		ctr.u64 = fn;
+		if (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < (PPC_CODE_BASE + PPC_CODE_SIZE)) {
+			PPCFunc* targetFunc = PPC_LOOKUP_FUNC(base, ctr.u32);
+			if (targetFunc) {
+				targetFunc(ctx, base);
+			}
+		} else {
+			static int s_skipDestruct2 = 0;
+			if (s_skipDestruct2++ < 10) {
+				LOGF_WARNING("[sub_83216CF8] Skipping invalid/NULL destructor target 0x{:08X} (r5=0x{:08X}, elem=0x{:08X})",
+				             ctr.u32, ctx.r5.u32, ctx.r3.u32);
+			}
+		}
+	}
+	ctx.r10.u64 = PPC_LOAD_U16(ctx.r31.u32 + 4);
+	cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+	if (!cr6.eq) goto loc_83216D24;
+loc_83216D78:
+	ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+	sub_8255DCC0(ctx, base);
+	ctx.r11.s64 = 0;
+	PPC_STORE_U32(ctx.r31.u32 + 0, ctx.r11.u32);
+	PPC_STORE_U16(ctx.r31.u32 + 6, ctx.r11.u16);
+	ctx.r1.s64 = ctx.r1.s64 + 112;
+	ctx.r12.u64 = PPC_LOAD_U32(ctx.r1.u32 + -8);
+	ctx.r30.u64 = PPC_LOAD_U64(ctx.r1.u32 + -24);
+	ctx.r31.u64 = PPC_LOAD_U64(ctx.r1.u32 + -16);
+	return;
+}
+
+PPC_FUNC(sub_8321F758)
+{
+	PPC_FUNC_PROLOGUE();
+	uint32_t r3 = ctx.r3.u32;
+	if (r3 == 0 || r3 >= PPC_MEMORY_SIZE - 32) {
+		return;
+	}
+
+	uint32_t saved_r28 = ctx.r28.u32;
+	uint32_t saved_r29 = ctx.r29.u32;
+	uint32_t saved_r30 = ctx.r30.u32;
+	uint32_t saved_r31 = ctx.r31.u32;
+
+	uint32_t r10 = PPC_LOAD_U32(r3 + 20);
+	uint32_t r28 = r3;
+
+	if (r10 != 0) {
+		if (r10 >= 4 && r10 < PPC_MEMORY_SIZE) {
+			uint32_t r11 = PPC_LOAD_U32(r10 - 4);
+			uint32_t r29 = r10 - 4;
+			if (r11 > 0 && r11 <= 65536) {
+				uint64_t endOffset = (uint64_t)r10 + (uint64_t)r11 * 12;
+				if (endOffset < PPC_MEMORY_SIZE) {
+					uint32_t r30 = (uint32_t)endOffset + 8;
+					for (int32_t r31 = (int32_t)r11 - 1; r31 >= 0; --r31) {
+						r30 -= 12;
+						if (r30 >= 4 && r30 < PPC_MEMORY_SIZE) {
+							uint32_t tag = PPC_LOAD_U32(r30 - 4);
+							if (tag == 2) {
+								ctx.r3.u64 = PPC_LOAD_U32(r30);
+								sub_8255DCC0(ctx, base);
+							}
+						}
+					}
+				} else {
+					LOGF_WARNING("[sub_8321F758] Array buffer 0x{:08X} count {} overflows memory! Skipping element cleanup.", r10, r11);
+				}
+			} else if (r11 > 65536) {
+				LOGF_WARNING("[sub_8321F758] Corrupted element count {} at 0x{:08X}! Skipping element cleanup.", r11, r10 - 4);
+			}
+			ctx.r3.u64 = r29;
+			sub_8255DCC0(ctx, base);
+		} else {
+			LOGF_WARNING("[sub_8321F758] Invalid r10 pointer 0x{:08X} at r3+20!", r10);
+		}
+		PPC_STORE_U32(r28 + 20, 0);
+	}
+
+	uint32_t p24 = PPC_LOAD_U32(r28 + 24);
+	if (p24 != 0) {
+		ctx.r3.u64 = p24;
+		sub_8255DCC0(ctx, base);
+		PPC_STORE_U32(r28 + 24, 0);
+	}
+
+	ctx.r28.u64 = saved_r28;
+	ctx.r29.u64 = saved_r29;
+	ctx.r30.u64 = saved_r30;
+	ctx.r31.u64 = saved_r31;
+}
+
+extern "C" void __imp__sub_831ED658(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_831ED658)
+{
+    const char* pathStr = "null";
+    if (ctx.r4.u32 >= 0x10000 && ctx.r4.u32 < 0xF0000000) {
+        pathStr = reinterpret_cast<const char*>(base + ctx.r4.u32);
+    }
+    LOGF_INFO("[sub_831ED658] Mounting packfile: r3=0x{:08X}, path='{}', r5={}, r6=0x{:X}", ctx.r3.u32, pathStr, ctx.r5.u32, ctx.r6.u32);
+    __imp__sub_831ED658(ctx, base);
+    LOGF_INFO("[sub_831ED658] Mount result: r3=0x{:08X} (success={})", ctx.r3.u32, (ctx.r3.u32 & 0xFF) != 0);
+}
+
+PPC_EXTERN_FUNC(sub_831EADA8);
+PPC_EXTERN_FUNC(sub_831E2AD8);
+
+PPC_FUNC(sub_831ECC48)
+{
+	PPC_FUNC_PROLOGUE();
+
+	uint32_t saved_r28 = ctx.r28.u32;
+	uint32_t saved_r29 = ctx.r29.u32;
+	uint32_t saved_r30 = ctx.r30.u32;
+	uint32_t saved_r31 = ctx.r31.u32;
+
+	ctx.r30.u64 = ctx.r3.u64;
+	ctx.r28.u64 = ctx.r4.u64;
+
+	const char* pathStr = (ctx.r30.u32 >= 0x10000 && ctx.r30.u32 < PPC_MEMORY_SIZE)
+	                      ? reinterpret_cast<const char*>(base + ctx.r30.u32) : "(null)";
+
+	sub_831EADA8(ctx, base);
+	ctx.r29.u64 = ctx.r3.u64;
+
+	if (ctx.r29.u32 == 0 || ctx.r29.u32 >= PPC_MEMORY_SIZE - 4) {
+		LOGF_WARNING("[sub_831ECC48] fiDevice not found for path '{}' (0x{:08X})", pathStr, ctx.r30.u32);
+		goto loc_831ECCDC;
+	}
+
+	{
+		uint32_t vtable = PPC_LOAD_U32(ctx.r29.u32 + 0);
+		if (vtable < 0x10000 || vtable >= PPC_MEMORY_SIZE - 64) {
+			LOGF_WARNING("[sub_831ECC48] fiDevice 0x{:08X} has invalid vtable 0x{:08X}", ctx.r29.u32, vtable);
+			goto loc_831ECCDC;
+		}
+
+		uint32_t openFn = PPC_LOAD_U32(vtable + 4);
+		if (openFn < PPC_CODE_BASE || openFn >= (PPC_CODE_BASE + PPC_CODE_SIZE)) {
+			LOGF_WARNING("[sub_831ECC48] fiDevice 0x{:08X} (vtbl 0x{:08X}) openFn 0x{:08X} is not in code range! (path='{}')",
+			             ctx.r29.u32, vtable, openFn, pathStr);
+			goto loc_831ECCDC;
+		}
+
+		ctx.r5.u64 = ctx.r28.u64;
+		ctx.r4.u64 = ctx.r30.u64;
+		ctx.r3.u64 = ctx.r29.u64;
+		PPCFunc* fn = PPC_LOOKUP_FUNC(base, openFn);
+		if (!fn) {
+			LOGF_WARNING("[sub_831ECC48] openFn 0x{:08X} lookup returned null! (path='{}')", openFn, pathStr);
+			goto loc_831ECCDC;
+		}
+		fn(ctx, base);
+	}
+
+	ctx.r31.u64 = ctx.r3.u64;
+	if (ctx.r31.s32 == -1) {
+		goto loc_831ECCDC;
+	}
+
+	{
+		uint32_t r11_base = 0x83CE0000 + 14060;
+		uint32_t hookFn = (r11_base < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(r11_base) : 0;
+		if (hookFn != 0) {
+			if (hookFn >= PPC_CODE_BASE && hookFn < (PPC_CODE_BASE + PPC_CODE_SIZE)) {
+				ctx.r5.u64 = ctx.r3.u64;
+				ctx.r4.u64 = ctx.r28.u64;
+				ctx.r3.u64 = ctx.r30.u64;
+				PPCFunc* fn = PPC_LOOKUP_FUNC(base, hookFn);
+				if (fn) {
+					fn(ctx, base);
+				}
+				if ((ctx.r3.u32 & 0xFF) == 0) {
+					uint32_t vtable = PPC_LOAD_U32(ctx.r29.u32 + 0);
+					uint32_t closeFn = (vtable >= 0x10000 && vtable < PPC_MEMORY_SIZE - 64) ? PPC_LOAD_U32(vtable + 48) : 0;
+					if (closeFn >= PPC_CODE_BASE && closeFn < (PPC_CODE_BASE + PPC_CODE_SIZE)) {
+						ctx.r4.u64 = ctx.r31.u64;
+						ctx.r3.u64 = ctx.r29.u64;
+						PPCFunc* cfn = PPC_LOOKUP_FUNC(base, closeFn);
+						if (cfn) cfn(ctx, base);
+					}
+					goto loc_831ECCDC;
+				}
+			}
+		}
+	}
+
+	ctx.r5.u64 = ctx.r29.u64;
+	ctx.r4.u64 = ctx.r31.u64;
+	ctx.r3.u64 = ctx.r30.u64;
+	sub_831E2AD8(ctx, base);
+	goto loc_831ECD00;
+
+loc_831ECCDC:
+	ctx.r3.s64 = 0;
+
+loc_831ECD00:
+	ctx.r28.u64 = saved_r28;
+	ctx.r29.u64 = saved_r29;
+	ctx.r30.u64 = saved_r30;
+	ctx.r31.u64 = saved_r31;
+}
+
+extern "C" void __imp__sub_8314C3C8(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8314C3C8)
+{
+    uint32_t obj = ctx.r3.u32;
+    if (obj != 0 && obj < PPC_MEMORY_SIZE - 64) {
+        uint32_t vtbl = PPC_LOAD_U32(obj);
+        if (vtbl != 0 && vtbl < PPC_MEMORY_SIZE - 64) {
+            uint32_t fn1 = PPC_LOAD_U32(vtbl + 4);
+            if (fn1 == 0 || fn1 < PPC_CODE_BASE || fn1 >= (PPC_CODE_BASE + PPC_CODE_SIZE)) {
+                // Method 1 is unmapped/NULL: point to stub returning 0 (sub_8255DCE0)
+                PPC_STORE_U32(vtbl + 4, 0x8255DCE0);
+            }
+        }
+    }
+    __imp__sub_8314C3C8(ctx, base);
+}
+
+extern "C" void __imp__sub_831D0C30(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_831D0C30)
+{
+    uint32_t node = ctx.r3.u32;
+    if (node == 0 || node >= PPC_MEMORY_SIZE - 64) {
+        return;
+    }
+    uint32_t parent = PPC_LOAD_U32(node + 16);
+    if (parent != 0 && parent < PPC_MEMORY_SIZE - 64) {
+        uint32_t prev_link = parent + 24;
+        uint32_t curr = PPC_LOAD_U32(prev_link);
+        int steps = 0;
+        bool found = false;
+        while (curr != 0 && curr < PPC_MEMORY_SIZE - 64 && steps++ < 10000) {
+            if (curr == node) {
+                found = true;
+                break;
+            }
+            prev_link = curr + 20;
+            curr = PPC_LOAD_U32(prev_link);
+        }
+        if (!found) {
+            // Node is not in the parent linked list!
+            // Setting node+16 to 0 prevents the lifted code from entering the infinite spinloop at loc_831D0C60
+            PPC_STORE_U32(node + 16, 0);
+            PPC_STORE_U32(node + 20, 0);
+        }
+    }
+    __imp__sub_831D0C30(ctx, base);
+}
+
+extern "C" void __imp__sub_8255DD00(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8255DD00)
+{
+    uint64_t frame = ++g_mainFrameCounter;
+    if (frame <= 10 || frame % 100 == 0) {
+        LOGF_INFO("[MAIN_FRAME] sub_8255DD00 Frame #{} executing", frame);
+    }
+    __imp__sub_8255DD00(ctx, base);
+}
+
+PPC_FUNC(sub_82232F00)
+{
+    ctx.r1.u32 -= 96;
+
+    LOGF_INFO("[MAIN_LOOP] sub_82232F00 initializing via sub_831978C0...");
+    sub_831978C0(ctx, base);
+    uint32_t initRet = ctx.r3.u32 & 0xFF;
+    LOGF_INFO("[MAIN_LOOP] sub_831978C0 init result: r3={}", initRet);
+
+    if (initRet != 0) {
+        uint64_t iter = 0;
+        while (true) {
+            iter++;
+            uint32_t fn = PPC_LOAD_U32(0x8383434C);
+            if (iter <= 10 || iter % 100 == 0) {
+                LOGF_INFO("[MAIN_LOOP] Loop iter #{} starting: fn=0x{:08X}", iter, fn);
+            }
+            if (fn < PPC_CODE_BASE || fn >= (PPC_CODE_BASE + PPC_CODE_SIZE)) {
+                LOGF_WARNING("[MAIN_LOOP] Loop iter #{}: fn 0x{:08X} invalid/out-of-range! Defaulting to sub_8255DD00", iter, fn);
+                fn = 0x8255DD00;
+                PPC_STORE_U32(0x8383434C, fn);
+            }
+            
+            PPCFunc* targetFunc = PPC_LOOKUP_FUNC(base, fn);
+            if (!targetFunc) {
+                LOGF_ERROR("[MAIN_LOOP] Target func for 0x{:08X} is NULL! Calling sub_8255DD00 directly.", fn);
+                sub_8255DD00(ctx, base);
+            } else {
+                targetFunc(ctx, base);
+            }
+
+            uint32_t ret = ctx.r3.u32 & 0xFF;
+            if (iter <= 10 || iter % 100 == 0) {
+                LOGF_INFO("[MAIN_LOOP] Loop iter #{} done: ret(r3)={}, next fn=0x{:08X}",
+                          iter, ret, PPC_LOAD_U32(0x8383434C));
+            }
+            if (ret == 0) {
+                LOGF_INFO("[MAIN_LOOP] Game loop exit requested (ret=0) at iter #{}", iter);
+                break;
+            }
+        }
+    }
+
+    ctx.r1.u32 += 96;
+}
+
+extern "C" void __imp__sub_8344D068(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8344D068)
+{
+    uint32_t r3_in = ctx.r3.u32;
+    if (r3_in == 0) {
+        LOGF_WARNING("[sub_8344D068] NULL object pointer (r3=0)! Returning 0 safely.");
+        ctx.r3.u64 = 0;
+        return;
+    }
+    uint32_t r4_in = ctx.r4.u32;
+    const char* str4 = (r4_in >= 0x10000 && r4_in < PPC_MEMORY_SIZE) ? reinterpret_cast<const char*>(base + r4_in) : "(null)";
+    uint32_t vtbl = (r3_in != 0 && r3_in < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(r3_in) : 0;
+    uint32_t fn0 = (vtbl != 0 && vtbl < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(vtbl + 0) : 0;
+    uint32_t fn1 = (vtbl != 0 && vtbl < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(vtbl + 4) : 0;
+    LOGF_INFO("[sub_8344D068] ENTER: r3=0x{:08X} (vtbl=0x{:08X}, fn0=0x{:08X}, fn1=0x{:08X}), r4=0x{:08X} ('{}')",
+              r3_in, vtbl, fn0, fn1, r4_in, str4);
+    __imp__sub_8344D068(ctx, base);
+    LOGF_INFO("[sub_8344D068] EXIT: r3=0x{:08X}", ctx.r3.u32);
+}
+
+extern "C" void __imp__sub_82C10DC8(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82C10DC8)
+{
+    static thread_local int s_recurseDepth = 0;
+    s_recurseDepth++;
+    if (s_recurseDepth <= 5) {
+        uint32_t vtable = 0;
+        uint32_t slot14 = 0;
+        if (ctx.r3.u32 != 0 && ctx.r3.u32 < PPC_MEMORY_SIZE - 64) {
+            vtable = PPC_LOAD_U32(ctx.r3.u32);
+            if (vtable != 0 && vtable < PPC_MEMORY_SIZE - 64) {
+                slot14 = PPC_LOAD_U32(vtable + 56);
+            }
+        }
+        LOGF_INFO("[sub_82C10DC8] depth={} r3=0x{:08X} vtable=0x{:08X} slot14=0x{:08X} r12=0x{:08X}",
+                  s_recurseDepth, ctx.r3.u32, vtable, slot14, ctx.r12.u32);
+        void* bt[16];
+        int n = backtrace(bt, 16);
+        backtrace_symbols_fd(bt, n, 2);
+    }
+    if (s_recurseDepth > 8) {
+        LOGF_ERROR("[sub_82C10DC8] RECURSION GUARD TRIGGERED at depth={}! Aborting recursion safely.", s_recurseDepth);
+        s_recurseDepth--;
+        ctx.r3.u64 = 0;
+        return;
+    }
+    __imp__sub_82C10DC8(ctx, base);
+    s_recurseDepth--;
+}
+
 PPC_FUNC(sub_83767B20)
 {
     PPC_FUNC_PROLOGUE();
@@ -10835,6 +11800,85 @@ PPC_FUNC(sub_83767B20)
     sub_82283BD8(ctx, base);
 }
 
+PPC_EXTERN_FUNC(sub_83210CF0);
+PPC_EXTERN_FUNC(sub_828FC6D8);
+PPC_EXTERN_FUNC(sub_828FCA78);
+
+// =============================================================================
+// RAGE Global Pool Descriptor Resolver (sub_8323C238)
+// =============================================================================
+// In default.xex, sub_8323C238 indexes a 41-entry switch table at 0x8323C25C.
+// Because the table was disassembled as PPC code (due to starting with 0x82/0x83),
+// calling it directly resulted in switch table failure and missing pool configurations.
+PPC_FUNC(sub_8323C238)
+{
+    static const uint32_t s_poolFlags[41] = {
+        0xFFFFFFFF,  // [ 0]
+        0x1A200152,  // [ 1]
+        0x1A200153,  // [ 2]
+        0x1A200154,  // [ 3]
+        0x1A20017C,  // [ 4]
+        0x1A20017A,  // [ 5]
+        0x1A20017D,  // [ 6]
+        0x1A20017B,  // [ 7]
+        0x1A200171,  // [ 8]
+        0x18280186,  // [ 9]
+        0x1A200000,  // [10]
+        0x04900102,  // [11]
+        0x28000102,  // [12]
+        0x0800014A,  // [13]
+        0x1828014F,  // [14]
+        0x18280143,  // [15]
+        0x28280144,  // [16]
+        0xFFFFFFFF,  // [17]
+        0xFFFFFFFF,  // [18]
+        0xFFFFFFFF,  // [19]
+        0x182801B6,  // [20]
+        0x1A2001B6,  // [21]
+        0x1A20015A,  // [22]
+        0x2D200199,  // [23]
+        0x28000158,  // [24]
+        0x1A22AB60,  // [25]
+        0x2D22AB9F,  // [26]
+        0x2DA2AB5E,  // [27]
+        0x1A22ABA6,  // [28]
+        0x2D22ABA5,  // [29]
+        0x2DA2ABA4,  // [30]
+        0xFFFFFFFF,  // [31]
+        0x2D200196,  // [32]
+        0x1A220197,  // [33]
+        0xFFFFFFFF,  // [34]
+        0xFFFFFFFF,  // [35]
+        0xFFFFFFFF,  // [36]
+        0x1A22AAA6,  // [37]
+        0x18280086,  // [38]
+        0x28000002,  // [39]
+        0x18280186   // [40]
+    };
+
+    uint32_t index = ctx.r3.u32;
+    uint32_t flag = ctx.r4.u32 & 0xFF;
+
+    if (index > 40)
+    {
+        ctx.r3.s64 = -1;
+        return;
+    }
+
+    uint32_t val = s_poolFlags[index];
+    if (val != 0xFFFFFFFF && flag != 0)
+    {
+        val &= ~0x00000100;
+    }
+
+    if (index <= 10 || val == 0xFFFFFFFF)
+    {
+        LOGF_INFO("[sub_8323C238] pool[{}] flag={} -> 0x{:08X}", index, flag, val);
+    }
+
+    ctx.r3.s64 = (int32_t)val;
+}
+
 PPC_FUNC(sub_82918D28)
 {
     PPC_FUNC_PROLOGUE();
@@ -10851,6 +11895,8 @@ PPC_FUNC(sub_82918D28)
     sub_828FC6D8(ctx, base);
     sub_828FCA78(ctx, base);
 }
+
+
 
 // =============================================================================
 // GTA V Language selector & Audio/Channel state manager
@@ -11284,9 +12330,49 @@ PPC_FUNC(sub_83217D38)
     uint32_t obj = ctx.r3.u32;
     if (!obj) return;
 
+    // Exact bits per pixel / element from switch table at 0x83217D60
     static const uint32_t kFormatBpp[41] = {
-        0, 4, 8, 8, 4, 4, 4, 4, 8, 12, 12, 8, 8, 16, 16, 16, 16, 8, 16, 8, 12,
-        12, 20, 12, 16, 20, 12, 16, 24, 20, 12, 16, 12, 12, 4, 8, 16, 24, 12, 8, 12
+         0,  // [ 0] -> sub_83217E34 (0 bpp)
+         4,  // [ 1] -> 0x7E04 (4 bpp)
+         8,  // [ 2] -> 0x7E0C (8 bpp)
+         8,  // [ 3] -> 0x7E0C (8 bpp)
+         4,  // [ 4] -> 0x7E04 (4 bpp)
+         4,  // [ 5] -> 0x7E04 (4 bpp)
+         4,  // [ 6] -> 0x7E04 (4 bpp)
+         4,  // [ 7] -> 0x7E04 (4 bpp)
+         8,  // [ 8] -> 0x7E0C (8 bpp)
+        32,  // [ 9] -> 0x7E14 (32 bpp)
+        32,  // [10] -> 0x7E14 (32 bpp)
+         8,  // [11] -> 0x7E0C (8 bpp)
+         8,  // [12] -> 0x7E0C (8 bpp)
+        16,  // [13] -> 0x7E1C (16 bpp)
+        16,  // [14] -> 0x7E1C (16 bpp)
+        16,  // [15] -> 0x7E1C (16 bpp)
+        16,  // [16] -> 0x7E1C (16 bpp)
+         8,  // [17] -> 0x7E0C (8 bpp)
+        16,  // [18] -> 0x7E1C (16 bpp)
+         8,  // [19] -> 0x7E0C (8 bpp)
+        32,  // [20] -> 0x7E14 (32 bpp)
+        32,  // [21] -> 0x7E14 (32 bpp)
+        64,  // [22] -> 0x7E24 (64 bpp)
+        32,  // [23] -> 0x7E14 (32 bpp)
+        16,  // [24] -> 0x7E1C (16 bpp)
+        64,  // [25] -> 0x7E24 (64 bpp)
+        32,  // [26] -> 0x7E14 (32 bpp)
+        16,  // [27] -> 0x7E1C (16 bpp)
+       128,  // [28] -> 0x7E2C (128 bpp)
+        64,  // [29] -> 0x7E24 (64 bpp)
+        32,  // [30] -> 0x7E14 (32 bpp)
+        16,  // [31] -> 0x7E1C (16 bpp)
+        32,  // [32] -> 0x7E14 (32 bpp)
+        32,  // [33] -> 0x7E14 (32 bpp)
+         4,  // [34] -> 0x7E04 (4 bpp)
+         8,  // [35] -> 0x7E0C (8 bpp)
+        16,  // [36] -> 0x7E1C (16 bpp)
+       128,  // [37] -> 0x7E2C (128 bpp)
+        32,  // [38] -> 0x7E14 (32 bpp)
+         8,  // [39] -> 0x7E0C (8 bpp)
+        32   // [40] -> 0x7E14 (32 bpp)
     };
 
     uint32_t r10 = PPC_LOAD_U32(obj + 4) & 0x1FFFFFFF;
@@ -11299,6 +12385,230 @@ PPC_FUNC(sub_83217D38)
     int32_t r10_val = r11_val >> 3;
     if (r11_val < 0 && (r11_val & 7)) r10_val++;
     PPC_STORE_U16(obj + 12, (uint16_t)r10_val);
+    LOGF_INFO("[sub_83217D38] obj=0x{:08X} fmt={} width={} bpp={} -> pitch={}",
+              obj, r10, width, bpp, r10_val);
+}
+
+PPC_EXTERN_FUNC(sub_823871B8);
+PPC_EXTERN_FUNC(sub_822369E0);
+
+PPC_FUNC(sub_8226B3B8)
+{
+    PPC_FUNC_PROLOGUE();
+    uint32_t r31_in = ctx.r3.u32;
+    PPC_STORE_U32(ctx.r1.u32 + 80, 0);
+    ctx.r4.u32 = ctx.r1.u32 + 80;
+    if (r31_in >= 0x10000 && r31_in < PPC_MEMORY_SIZE) {
+        ctx.r3.u32 = r31_in + 96;
+        sub_823871B8(ctx, base);
+        PPC_STORE_U32(r31_in + 48, 3);
+    }
+
+    uint32_t r3_obj = PPC_LOAD_U32(0x83CB7660);
+    if (r3_obj >= 0x10000 && r3_obj < PPC_MEMORY_SIZE)
+    {
+        uint32_t vtbl = PPC_LOAD_U32(r3_obj);
+        if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE)
+        {
+            uint32_t fn = PPC_LOAD_U32(vtbl + 16);
+            if (fn >= PPC_CODE_BASE && fn < PPC_CODE_BASE + PPC_CODE_SIZE)
+            {
+                ctx.r3.u32 = r3_obj;
+                PPC_CALL_INDIRECT_FUNC(fn);
+            }
+        }
+    }
+
+    if (r31_in >= 0x10000 && r31_in < PPC_MEMORY_SIZE) {
+        uint32_t r11_val = PPC_LOAD_U32(r31_in + 60);
+        uint32_t r10_val = (r11_val << 2);
+        uint32_t r4_val = 0x83CB7684;
+        if (r10_val + r4_val < PPC_MEMORY_SIZE) {
+            PPC_STORE_U32(r10_val + r4_val, 0xFFFFFFFF);
+        }
+    }
+    ctx.r3.u32 = 0x8386CC20;
+    sub_822369E0(ctx, base);
+}
+
+PPC_EXTERN_FUNC(sub_82232580);
+PPC_EXTERN_FUNC(sub_82237648);
+PPC_EXTERN_FUNC(sub_82381A70);
+PPC_EXTERN_FUNC(sub_8239CB60);
+PPC_EXTERN_FUNC(sub_824AE6D8);
+PPC_EXTERN_FUNC(sub_82505F98);
+PPC_EXTERN_FUNC(sub_8253EEC0);
+PPC_EXTERN_FUNC(sub_82544478);
+PPC_EXTERN_FUNC(__savegprlr_24);
+PPC_EXTERN_FUNC(__restgprlr_24);
+
+PPC_FUNC(sub_83480F88)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCRegister ctr{};
+    PPCCRRegister cr6{};
+    uint32_t ea{};
+    __savegprlr_24(ctx, base);
+    ea = -160 + ctx.r1.u32;
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+    ctx.r31.s64 = -2083848192; // 0x83CB0000
+    ctx.r27.u64 = ctx.r3.u64;
+
+    uint32_t r3_obj = PPC_LOAD_U32(ctx.r31.u32 + 30324); // 0x83CB7674
+    ctx.r3.u64 = r3_obj;
+
+    uint32_t r11_val = 0;
+    if (r3_obj >= 0x10000 && r3_obj < PPC_MEMORY_SIZE) {
+        r11_val = PPC_LOAD_U32(r3_obj + 48);
+    }
+    ctx.r11.u64 = r11_val;
+    int32_t diff = (int32_t)r11_val - 3;
+    uint32_t clz = (diff == 0) ? 32 : __builtin_clz(diff);
+    ctx.r10.u64 = clz;
+    ctx.r11.u64 = __builtin_rotateleft64((uint64_t)clz | ((uint64_t)clz << 32), 27) & 0x1;
+    ctx.r24.u64 = ctx.r11.u64;
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) {
+        sub_82505F98(ctx, base);
+        ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+        sub_8226B3B8(ctx, base);
+        ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+    }
+
+    ctx.r26.s64 = 0;
+    ctx.r25.s64 = 1;
+    ctx.r28.s64 = -2084569088; // 0x83C00000
+
+    goto loc_83480FE0;
+
+loc_83480FDC:
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+
+loc_83480FE0:
+    sub_8253EEC0(ctx, base);
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+    sub_82237648(ctx, base);
+    ctx.r30.u64 = ctx.r3.u64;
+    sub_824AE6D8(ctx, base);
+
+    // Timer / profiler start: 0x83BFBE5C -> vtbl[16]
+    uint32_t prof_obj = PPC_LOAD_U32(ctx.r28.u32 + -16804);
+    ctx.r29.u64 = ctx.r3.u64;
+    ctx.r3.u64 = prof_obj;
+    if (prof_obj >= 0x10000 && prof_obj < PPC_MEMORY_SIZE) {
+        uint32_t vtbl = PPC_LOAD_U32(prof_obj);
+        if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE) {
+            uint32_t fn = PPC_LOAD_U32(vtbl + 16);
+            if (fn >= PPC_CODE_BASE && fn < PPC_CODE_BASE + PPC_CODE_SIZE) {
+                PPC_CALL_INDIRECT_FUNC(fn);
+            }
+        }
+    }
+
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+    sub_82232580(ctx, base);
+
+    cr6.compare<uint32_t>(ctx.r30.u32, 0, ctx.xer);
+    if (!cr6.eq) {
+        ctx.r3.u64 = ctx.r30.u64;
+        sub_82544478(ctx, base);
+    }
+
+    // Timer / profiler stop: 0x83BFBE5C -> vtbl[20]
+    prof_obj = PPC_LOAD_U32(ctx.r28.u32 + -16804);
+    ctx.r3.u64 = prof_obj;
+    if (prof_obj >= 0x10000 && prof_obj < PPC_MEMORY_SIZE) {
+        uint32_t vtbl = PPC_LOAD_U32(prof_obj);
+        if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE) {
+            uint32_t fn = PPC_LOAD_U32(vtbl + 20);
+            if (fn >= PPC_CODE_BASE && fn < PPC_CODE_BASE + PPC_CODE_SIZE) {
+                PPC_CALL_INDIRECT_FUNC(fn);
+            }
+        }
+    }
+
+    sub_824AE6D8(ctx, base);
+    ctx.r9.s64 = ctx.r3.s64 - ctx.r29.s64;
+    if (ctx.r27.u32 >= 0x10000 && ctx.r27.u32 < PPC_MEMORY_SIZE) {
+        PPC_STORE_U32(ctx.r27.u32 + 112, ctx.r9.u32);
+    }
+
+    // Virtual call on 0x83CB7674 -> vtbl[20]
+    uint32_t obj_30324 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+    ctx.r3.u64 = obj_30324;
+    if (obj_30324 >= 0x10000 && obj_30324 < PPC_MEMORY_SIZE) {
+        uint32_t vtbl = PPC_LOAD_U32(obj_30324);
+        if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE) {
+            uint32_t fn = PPC_LOAD_U32(vtbl + 20);
+            if (fn >= PPC_CODE_BASE && fn < PPC_CODE_BASE + PPC_CODE_SIZE) {
+                PPC_CALL_INDIRECT_FUNC(fn);
+            }
+        }
+    }
+
+    ctx.r4.s64 = 1;
+    if (ctx.r27.u32 >= 0x10000 && ctx.r27.u32 < PPC_MEMORY_SIZE) {
+        ctx.r3.u64 = PPC_LOAD_U32(ctx.r27.u32 + 28);
+        sub_8239CB60(ctx, base);
+        uint8_t flag = PPC_LOAD_U8(ctx.r27.u32 + 105);
+        if (flag != 0) {
+            ctx.r4.s64 = 1;
+            ctx.r3.u64 = PPC_LOAD_U32(ctx.r27.u32 + 32);
+            sub_82381A70(ctx, base);
+        }
+    }
+
+    uint32_t cur_obj = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+    ctx.r11.u64 = cur_obj;
+    cr6.compare<int32_t>(ctx.r26.s32, 3, ctx.xer);
+    if (cur_obj >= 0x10000 && cur_obj < PPC_MEMORY_SIZE) {
+        PPC_STORE_U32(cur_obj + 48, ctx.r25.u32);
+    }
+    if (cr6.lt) {
+        ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+        sub_82505F98(ctx, base);
+        ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+        sub_8226B3B8(ctx, base);
+    } else {
+        cr6.compare<uint32_t>(ctx.r24.u32, 0, ctx.xer);
+        if (!cr6.eq) {
+            ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+            sub_82505F98(ctx, base);
+            ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 30324);
+            sub_8226B3B8(ctx, base);
+        }
+    }
+
+    ctx.r26.s64 = ctx.r26.s64 + 1;
+    cr6.compare<int32_t>(ctx.r26.s32, 4, ctx.xer);
+    if (cr6.lt) goto loc_83480FDC;
+
+    // Queue completion callback: vtbl[32] on r27[4]
+    if (ctx.r27.u32 >= 0x10000 && ctx.r27.u32 < PPC_MEMORY_SIZE) {
+        uint32_t queue_obj = PPC_LOAD_U32(ctx.r27.u32 + 4);
+        ctx.r3.u64 = queue_obj;
+        if (queue_obj >= 0x10000 && queue_obj < PPC_MEMORY_SIZE) {
+            uint32_t vtbl = PPC_LOAD_U32(queue_obj);
+            if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE) {
+                uint32_t fn = PPC_LOAD_U32(vtbl + 32);
+                if (fn >= PPC_CODE_BASE && fn < PPC_CODE_BASE + PPC_CODE_SIZE) {
+                    PPC_CALL_INDIRECT_FUNC(fn);
+                }
+            }
+        }
+    }
+
+    ctx.r9.s64 = -2088501248; // lis r9, -31868: 0x83840000
+    uint32_t counter_addr = ctx.r9.u32 + -32752;
+    if (counter_addr < PPC_MEMORY_SIZE) {
+        uint32_t cnt = PPC_LOAD_U32(counter_addr);
+        cnt = (cnt + 2) & 0x7FFFFFFF;
+        PPC_STORE_U32(counter_addr, cnt);
+    }
+
+    ctx.r1.s64 = ctx.r1.s64 + 160;
+    __restgprlr_24(ctx, base);
 }
 
 

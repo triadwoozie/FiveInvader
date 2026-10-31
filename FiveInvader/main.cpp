@@ -39,18 +39,21 @@
 
 static void CrashSignalHandler(int sig, siginfo_t* info, void* ucontext)
 {
-    fprintf(stderr, "\n========== CRASH CAUGHT: signal %d (fault addr=%p) ==========\n", sig, info ? info->si_addr : nullptr);
+    ucontext_t* uc = reinterpret_cast<ucontext_t*>(ucontext);
+    uintptr_t rip = uc ? uc->uc_mcontext.gregs[REG_RIP] : 0;
+    uintptr_t rsp = uc ? uc->uc_mcontext.gregs[REG_RSP] : 0;
+    uintptr_t caller_rip = (rip == 0 && rsp != 0) ? *reinterpret_cast<uintptr_t*>(rsp) : 0;
+    fprintf(stderr, "\n========== CRASH CAUGHT: signal %d (fault addr=%p, host rip=0x%lx, caller_rip=0x%lx) ==========\n",
+            sig, info ? info->si_addr : nullptr, (unsigned long)rip, (unsigned long)caller_rip);
     if (g_ppcContext) {
-        fprintf(stderr, "[CRASH_CONTEXT] PPCContext=%p r1=0x%llX r3=0x%llX r4=0x%llX r5=0x%llX r7=0x%llX r8=0x%llX r9=0x%llX r10=0x%llX r13=0x%llX\n",
+        fprintf(stderr, "[CRASH_CONTEXT] PPCContext=%p r1=0x%llX r3=0x%llX r4=0x%llX r5=0x%llX r10=0x%llX r12=0x%llX r13=0x%llX\n",
             g_ppcContext,
             (unsigned long long)g_ppcContext->r1.u64,
             (unsigned long long)g_ppcContext->r3.u64,
             (unsigned long long)g_ppcContext->r4.u64,
             (unsigned long long)g_ppcContext->r5.u64,
-            (unsigned long long)g_ppcContext->r7.u64,
-            (unsigned long long)g_ppcContext->r8.u64,
-            (unsigned long long)g_ppcContext->r9.u64,
             (unsigned long long)g_ppcContext->r10.u64,
+            (unsigned long long)g_ppcContext->r12.u64,
             (unsigned long long)g_ppcContext->r13.u64);
     } else {
         fprintf(stderr, "[CRASH_CONTEXT] g_ppcContext is NULL\n");

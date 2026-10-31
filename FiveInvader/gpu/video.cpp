@@ -3338,6 +3338,11 @@ void Video::Present()
 
     // Purple screen clear - visual heartbeat to confirm engine is running
     // ProcClear has strict safety checks to prevent Metal crashes
+    // Only clear fallback purple heartbeat if the guest hasn't started swapping or submitting PM4 draw packets.
+    // Once guest begins rendering, do not overwrite the guest framebuffer!
+    extern std::atomic<uint64_t> g_vdSwapCounter;
+    extern std::atomic<uint64_t> g_pm4PacketCounter;
+    if (g_vdSwapCounter.load(std::memory_order_relaxed) == 0 && g_pm4PacketCounter.load(std::memory_order_relaxed) == 0)
     {
         RenderCommand clearCmd;
         clearCmd.type = RenderCommandType::Clear;
