@@ -2098,9 +2098,10 @@ uint32_t XamGetExecutionId(uint32_t pExecutionId)
     return 0; // STATUS_SUCCESS
 }
 
-void XamLoaderLaunchTitle()
+uint32_t XamLoaderLaunchTitle(uint32_t titlePath, uint32_t flags)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    LOGF_INFO("[XamLoaderLaunchTitle] titlePath=0x{:08X} flags=0x{:X}", titlePath, flags);
+    return 0; // STATUS_SUCCESS
 }
 
 // NtOpenFile is essentially a simplified NtCreateFile for opening existing files
@@ -8654,6 +8655,10 @@ PPC_FUNC(sub_8255DC20)
     // Check if the thread has a valid allocator vtable in TLS
     uint32_t threadCtx = (ctx.r13.u32 != 0) ? PPC_LOAD_U32(ctx.r13.u32 + 0) : 0;
     uint32_t allocator = (threadCtx != 0) ? PPC_LOAD_U32(threadCtx + 120) : 0;
+    if (allocator == 0)
+    {
+        allocator = 0x83887168; // Master RAGE allocator
+    }
     uint32_t vtable = (allocator != 0) ? PPC_LOAD_U32(allocator + 0) : 0;
     uint32_t allocFn = (vtable != 0) ? PPC_LOAD_U32(vtable + 8) : 0;
 
@@ -8663,9 +8668,13 @@ PPC_FUNC(sub_8255DC20)
                   s_allocCount, size, alignment, threadCtx, allocator, allocFn);
     }
 
-    if (allocFn != 0)
+    if (allocFn >= PPC_CODE_BASE && allocFn < (PPC_CODE_BASE + PPC_CODE_SIZE))
     {
-        __imp__sub_8255DC20(ctx, base);
+        ctx.r3.u64 = allocator;
+        ctx.r4.u64 = size;
+        ctx.r5.u64 = alignment;
+        ctx.r6.u64 = 0;
+        PPC_CALL_INDIRECT_FUNC(allocFn);
         return;
     }
 
@@ -8706,6 +8715,16 @@ PPC_FUNC(sub_8255DC88)
     uint32_t guestAddr = ctx.r3.u32;
     if (guestAddr == 0) return;
 
+    if ((guestAddr & 3) != 0 || guestAddr < 0x10000)
+    {
+        static int s_unalignedFreeCount = 0;
+        if (s_unalignedFreeCount++ < 10)
+        {
+            LOGF_WARNING("[FREE] sub_8255DC88 ignoring invalid/unaligned pointer 0x{:08X} (r12=0x{:08X})", guestAddr, ctx.r12.u32);
+        }
+        return;
+    }
+
     // Don't attempt to free static image memory
     if (guestAddr >= 0x82000000 && guestAddr < 0x83DB8000)
     {
@@ -8714,25 +8733,38 @@ PPC_FUNC(sub_8255DC88)
 
     uint32_t threadCtx = (ctx.r13.u32 != 0) ? PPC_LOAD_U32(ctx.r13.u32 + 0) : 0;
     uint32_t allocator = (threadCtx != 0) ? PPC_LOAD_U32(threadCtx + 120) : 0;
+    if (allocator == 0)
+    {
+        // Fall back to master RAGE allocator if thread allocator is unpopulated
+        allocator = 0x83887168;
+    }
+
     uint32_t vtable = (allocator != 0) ? PPC_LOAD_U32(allocator + 0) : 0;
     uint32_t freeFn = (vtable != 0) ? PPC_LOAD_U32(vtable + 16) : 0;
 
-    LOGF_INFO("[FREE] sub_8255DC88 ptr=0x{:08X} threadCtx=0x{:08X} alloc=0x{:08X} vtable=0x{:08X} freeFn=0x{:08X}",
-              guestAddr, threadCtx, allocator, vtable, freeFn);
-
-    if (freeFn != 0)
+    static uint32_t s_freeCount = 0;
+    if (++s_freeCount <= 20 || (s_freeCount % 500 == 0))
     {
-        __imp__sub_8255DC88(ctx, base);
+        LOGF_INFO("[FREE] sub_8255DC88 #{} ptr=0x{:08X} threadCtx=0x{:08X} alloc=0x{:08X} vtable=0x{:08X} freeFn=0x{:08X}",
+                  s_freeCount, guestAddr, threadCtx, allocator, vtable, freeFn);
+    }
+
+    if (freeFn >= PPC_CODE_BASE && freeFn < (PPC_CODE_BASE + PPC_CODE_SIZE))
+    {
+        ctx.r3.u64 = allocator;
+        ctx.r4.u64 = guestAddr;
+        PPC_CALL_INDIRECT_FUNC(freeFn);
         return;
     }
 
-    // Only free if pointer falls within our host heaps and is 16-byte aligned
-    if ((guestAddr % 16) == 0 && ((guestAddr >= 0x20000 && guestAddr < 0x7FEA0000) || guestAddr >= 0x83DB8000))
+    // Direct guest virtual heap free (only for allocations in g_userHeap virtual address space)
+    if (guestAddr >= 0x10000000 && guestAddr < 0x7FEA0000 && (guestAddr % 16) == 0)
     {
         void* hostPtr = g_memory.Translate(guestAddr);
         if (hostPtr)
         {
-            g_userHeap.Free(hostPtr);
+            std::lock_guard lock(g_userHeap.mutex);
+            o1heapFree(g_userHeap.heap, hostPtr);
         }
     }
     else
@@ -9881,6 +9913,474 @@ PPC_FUNC(sub_831E0BE8)
     }
 
     ctx.r3.u64 = 0;
+}
+
+PPC_FUNC(sub_831D7238)
+{
+    uint32_t r3_in = ctx.r3.u32;
+    uint32_t r4_in = ctx.r4.u32;
+
+    static int s_sub831D7238Count = 0;
+    ++s_sub831D7238Count;
+    if (s_sub831D7238Count <= 10) {
+        LOGF_INFO("[sub_831D7238] #{} r3=0x{:08X} r4=0x{:08X}", s_sub831D7238Count, r3_in, r4_in);
+    }
+
+    if (r3_in < 0x10000 || r3_in >= PPC_MEMORY_SIZE - 32 || r4_in < 0x10000 || r4_in >= PPC_MEMORY_SIZE - 32)
+    {
+        static int s_invalidArgCount = 0;
+        if (s_invalidArgCount++ < 5) {
+            LOGF_WARNING("[sub_831D7238] Invalid pointer arguments: r3=0x{:08X} r4=0x{:08X}", r3_in, r4_in);
+        }
+        return;
+    }
+
+    PPCCRRegister cr6{};
+    PPCRegister temp{};
+    uint32_t ea{};
+    __savegprlr_25(ctx, base);
+    ea = -144 + ctx.r1.u32;
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+
+    ctx.r11.s64 = -2084765696; // 0x83BD0000
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r4.u32 + 20);
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r4.u32 + 0);
+    ctx.r26.u64 = ctx.r3.u64;
+    ctx.xer.ca = ctx.r10.u32 > 0;
+    ctx.r8.s64 = ctx.r10.s64 + -1;
+    ctx.r27.u64 = ctx.r4.u64;
+    temp.u8 = (~ctx.r8.u32 + ctx.r10.u32 < ~ctx.r8.u32) | (~ctx.r8.u32 + ctx.r10.u32 + ctx.xer.ca < ctx.xer.ca);
+    ctx.r10.u64 = ~ctx.r8.u64 + ctx.r10.u64 + ctx.xer.ca;
+    ctx.xer.ca = temp.u8;
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 19732);
+    ctx.r25.u64 = ctx.r10.u32 & 0xFF;
+    cr6.compare<uint32_t>(ctx.r25.u32, 0, ctx.xer);
+    ctx.r30.u64 = (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 48) ? PPC_LOAD_U8(ctx.r11.u32 + 48) : 0;
+    PPC_STORE_U32(ctx.r3.u32 + 4, ctx.r9.u32);
+
+    if (cr6.eq) goto loc_831D7320;
+
+    ctx.r31.u64 = PPC_LOAD_U32(ctx.r4.u32 + 4);
+    cr6.compare<uint32_t>(ctx.r31.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D7294;
+    ctx.r4.s64 = 0;
+    ctx.r3.u64 = ctx.r31.u64;
+    sub_823C0FB8(ctx, base);
+    goto loc_831D7298;
+
+loc_831D7294:
+    ctx.r3.s64 = 0;
+
+loc_831D7298:
+    ctx.r4.u64 = ctx.r31.u64;
+    sub_831B10D8(ctx, base);
+    ctx.r28.u64 = ctx.r30.u32 & 0xFF;
+    cr6.compare<uint32_t>(ctx.r28.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D72B4;
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r27.u32 + 4);
+    sub_831D5FE0(ctx, base);
+
+loc_831D72B4:
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r27.u32 + 20);
+    ctx.r29.s64 = 0;
+    if (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 4) goto loc_831D7320;
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);
+    cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D7320;
+    ctx.r30.s64 = 0;
+
+loc_831D72CC:
+    if (ctx.r11.u32 + ctx.r30.u32 >= PPC_MEMORY_SIZE - 4) goto loc_831D7320;
+    ctx.r31.u64 = PPC_LOAD_U32(ctx.r30.u32 + ctx.r11.u32);
+    cr6.compare<uint32_t>(ctx.r31.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D72E8;
+    ctx.r4.s64 = 0;
+    ctx.r3.u64 = ctx.r31.u64;
+    sub_823C0FB8(ctx, base);
+    goto loc_831D72EC;
+
+loc_831D72E8:
+    ctx.r3.s64 = 0;
+
+loc_831D72EC:
+    ctx.r4.u64 = ctx.r31.u64;
+    sub_831B10D8(ctx, base);
+    cr6.compare<uint32_t>(ctx.r28.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D7308;
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r27.u32 + 20);
+    if (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 + ctx.r30.u32 < PPC_MEMORY_SIZE - 4) {
+        ctx.r3.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r30.u32);
+        sub_831D5FE0(ctx, base);
+    }
+
+loc_831D7308:
+    ctx.r29.s64 = ctx.r29.s64 + 1;
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r27.u32 + 20);
+    ctx.r30.u64 = __builtin_rotateleft64(ctx.r29.u32 | (ctx.r29.u64 << 32), 2) & 0xFFFFFFFC;
+    if (ctx.r11.u32 >= 0x10000 && ctx.r30.u32 + ctx.r11.u32 < PPC_MEMORY_SIZE - 4) {
+        ctx.r10.u64 = PPC_LOAD_U32(ctx.r30.u32 + ctx.r11.u32);
+        cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+        if (!cr6.eq) goto loc_831D72CC;
+    }
+
+loc_831D7320:
+    ctx.r11.u64 = PPC_LOAD_U8(ctx.r27.u32 + 24);
+    ctx.r10.s64 = -ctx.r25.s64;
+    ctx.r9.u64 = PPC_LOAD_U8(ctx.r27.u32 + 25);
+    ctx.r30.s64 = 0;
+    ctx.r8.s64 = -ctx.r11.s64;
+    ctx.r7.u64 = PPC_LOAD_U8(ctx.r26.u32 + 20);
+    ctx.r6.s64 = -ctx.r9.s64;
+    ctx.r5.u64 = ctx.r8.u32 & 0x1;
+    ctx.r4.u64 = __builtin_rotateleft64(ctx.r7.u32 | (ctx.r7.u64 << 32), 28) & 0x1;
+    ctx.r3.u64 = ctx.r10.u64 ^ ctx.r5.u64;
+    ctx.r11.s64 = -ctx.r4.s64;
+    ctx.r10.u64 = __builtin_rotateleft64(ctx.r3.u32 | (ctx.r3.u64 << 32), 0) & 0x2;
+    ctx.r9.u64 = ctx.r10.u64 ^ ctx.r5.u64;
+    ctx.r8.u64 = ctx.r9.u32 & 0xFF;
+    ctx.r7.u64 = ctx.r6.u64 ^ ctx.r8.u64;
+    ctx.r6.u64 = __builtin_rotateleft64(ctx.r7.u32 | (ctx.r7.u64 << 32), 0) & 0x4;
+    ctx.r5.u64 = ctx.r6.u64 ^ ctx.r8.u64;
+    ctx.r4.u64 = ctx.r5.u32 & 0xFF;
+    ctx.r3.u64 = ctx.r11.u64 ^ ctx.r4.u64;
+    ctx.r11.u64 = __builtin_rotateleft64(ctx.r3.u32 | (ctx.r3.u64 << 32), 0) & 0x10;
+    ctx.r10.u64 = ctx.r11.u64 ^ ctx.r4.u64;
+    PPC_STORE_U8(ctx.r26.u32 + 20, ctx.r10.u8);
+
+    ctx.r28.u64 = PPC_LOAD_U32(ctx.r27.u32 + 12);
+    if (ctx.r28.u32 < 0x10000 || ctx.r28.u32 >= PPC_MEMORY_SIZE - 4) goto loc_831D739C;
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r28.u32 + 0);
+    cr6.compare<uint32_t>(ctx.r9.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D739C;
+    ctx.r11.u64 = ctx.r28.u64;
+
+loc_831D738C:
+    ea = 4 + ctx.r11.u32;
+    if (ea >= PPC_MEMORY_SIZE - 4) goto loc_831D739C;
+    ctx.r10.u64 = PPC_LOAD_U32(ea);
+    ctx.r11.u32 = ea;
+    ctx.r30.s64 = ctx.r30.s64 + 1;
+    if (ctx.r30.u32 > 1000) {
+        LOGF_ERROR("[sub_831D7238] Loop overrun counting r28 entries! r28=0x{:08X}", ctx.r28.u32);
+        goto loc_831D739C;
+    }
+    cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+    if (!cr6.eq) goto loc_831D738C;
+
+loc_831D739C:
+    ctx.r31.s64 = ctx.r26.s64 + 24;
+    cr6.compare<uint32_t>(ctx.r30.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D73B8;
+    ctx.r4.s64 = 16;
+    ctx.r3.u64 = __builtin_rotateleft64(ctx.r30.u32 | (ctx.r30.u64 << 32), 2) & 0xFFFFFFFC;
+    sub_8255DC78(ctx, base);
+    goto loc_831D73BC;
+
+loc_831D73B8:
+    ctx.r3.s64 = 0;
+
+loc_831D73BC:
+    ctx.r11.u64 = ctx.r30.u64;
+    PPC_STORE_U32(ctx.r31.u32 + 0, ctx.r3.u32);
+    ctx.r30.s64 = 0;
+    PPC_STORE_U16(ctx.r31.u32 + 6, ctx.r11.u16);
+    if (ctx.r28.u32 < 0x10000 || ctx.r28.u32 >= PPC_MEMORY_SIZE - 4) goto loc_831D7438;
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r28.u32 + 0);
+    cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D7438;
+    ctx.r11.u64 = ctx.r28.u64;
+    ctx.r29.s64 = 0;
+
+loc_831D73E0:
+    if (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 4) goto loc_831D7438;
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);
+    sub_831D1618(ctx, base);
+
+    // CRITICAL FIX: Safe check of r11 (r27 + 16), r10 (r3 + 4), and r11 + r29
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r27.u32 + 16);
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D7400;
+
+    if (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 8 &&
+        ctx.r11.u32 >= 0x10000 && ctx.r11.u32 + ctx.r29.u32 < PPC_MEMORY_SIZE - 4)
+    {
+        ctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 4);
+        if (ctx.r10.u32 >= 0x10000 && ctx.r10.u32 < PPC_MEMORY_SIZE - 8) {
+            ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r29.u32);
+            PPC_STORE_U32(ctx.r10.u32 + 4, ctx.r9.u32);
+        } else {
+            LOGF_WARNING("[sub_831D7238] Invalid r10 pointer: 0x{:08X}", ctx.r10.u32);
+        }
+    } else {
+        LOGF_WARNING("[sub_831D7238] Invalid r11/r29 array pointer: r11=0x{:08X} r29=0x{:08X} r3=0x{:08X}",
+                     ctx.r11.u32, ctx.r29.u32, ctx.r3.u32);
+    }
+
+loc_831D7400:
+    ctx.r9.u64 = PPC_LOAD_U16(ctx.r31.u32 + 4);
+    ctx.r30.s64 = ctx.r30.s64 + 1;
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+    ctx.r11.u64 = ctx.r9.u64;
+    ctx.r9.u64 = __builtin_rotateleft32(ctx.r9.u32, 2);
+    ctx.r8.s64 = ctx.r11.s64 + 1;
+    ctx.r29.u64 = __builtin_rotateleft64(ctx.r30.u32 | (ctx.r30.u64 << 32), 2) & 0xFFFFFFFC;
+    ctx.r7.u64 = ctx.r8.u32 & 0xFFFF;
+    ctx.r11.u64 = ctx.r29.u64 + ctx.r28.u64;
+    PPC_STORE_U16(ctx.r31.u32 + 4, ctx.r7.u16);
+    if (ctx.r10.u32 >= 0x10000 && ctx.r9.u32 + ctx.r10.u32 < PPC_MEMORY_SIZE - 4) {
+        PPC_STORE_U32(ctx.r9.u32 + ctx.r10.u32, ctx.r3.u32);
+    }
+    if (ctx.r28.u32 >= 0x10000 && ctx.r29.u32 + ctx.r28.u32 < PPC_MEMORY_SIZE - 4) {
+        ctx.r6.u64 = PPC_LOAD_U32(ctx.r29.u32 + ctx.r28.u32);
+        cr6.compare<uint32_t>(ctx.r6.u32, 0, ctx.xer);
+        if (!cr6.eq) goto loc_831D73E0;
+    }
+
+loc_831D7438:
+    ctx.r1.s64 = ctx.r1.s64 + 144;
+    __restgprlr_25(ctx, base);
+}
+
+PPC_FUNC(sub_831D96E0)
+{
+    LOGF_INFO("[sub_831D96E0] Entering: r3=0x{:08X}", ctx.r3.u32);
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 64)
+    {
+        LOGF_WARNING("[sub_831D96E0] Invalid r3=0x{:08X}", ctx.r3.u32);
+        return;
+    }
+
+    PPCRegister ctr{};
+    PPCCRRegister cr6{};
+    uint32_t ea{};
+    __savegprlr_26(ctx, base);
+    ea = -144 + ctx.r1.u32;
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+
+    ctx.r11.s64 = -2084765696;
+    ctx.r10.s64 = 1;
+    ctx.r31.u64 = ctx.r3.u64;
+    PPC_STORE_U8(ctx.r3.u32 + 48, ctx.r10.u8);
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 19732);
+    ctx.r9.u64 = (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 44) ? PPC_LOAD_U32(ctx.r11.u32 + 40) : 0;
+    ctx.r11.u64 = __builtin_rotateleft64(ctx.r9.u32 | (ctx.r9.u64 << 32), 14) & 0x1;
+    ctx.r26.u64 = ctx.r11.u64;
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D9718;
+    sub_8247BF78(ctx, base);
+
+loc_831D9718:
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 40);
+    ctx.r11.s64 = ctx.r31.s64 + 40;
+    ctx.r29.s64 = -2084765696;
+    ctx.r28.u64 = PPC_LOAD_U32(ctx.r31.u32 + 36);
+    ctx.r8.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 0) & 0x2000;
+    ctx.r9.u64 = ctx.r10.u64;
+    ctx.r7.u64 = ctx.r8.u64 ^ ctx.r10.u64;
+    ctx.r27.u64 = ctx.r10.u64;
+    ctx.r5.u64 = __builtin_rotateleft32(ctx.r7.u32, 0);
+    PPC_STORE_U32(ctx.r31.u32 + 40, ctx.r7.u32);
+    ctx.r6.u64 = __builtin_rotateleft32(ctx.r7.u32, 0);
+    ctx.r4.u64 = __builtin_rotateleft64(ctx.r5.u32 | (ctx.r5.u64 << 32), 0) & 0x8000;
+    ctx.r3.u64 = ctx.r4.u64 ^ ctx.r6.u64;
+    ctx.r10.u64 = __builtin_rotateleft32(ctx.r3.u32, 0);
+    PPC_STORE_U32(ctx.r31.u32 + 40, ctx.r3.u32);
+    ctx.r11.u64 = __builtin_rotateleft32(ctx.r3.u32, 0);
+    ctx.r9.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 0) & 0x4000;
+    ctx.r8.u64 = ctx.r9.u64 ^ ctx.r11.u64;
+    PPC_STORE_U32(ctx.r31.u32 + 40, ctx.r8.u32);
+
+    // CRITICAL: Safe traversal of the init callback linked list at 0x83BD4D0C
+    {
+        uint32_t curNode = PPC_LOAD_U32(ctx.r29.u32 + 19724);
+        int cbCount = 0;
+        std::unordered_set<uint32_t> visited;
+        while (curNode >= 0x10000 && curNode < PPC_MEMORY_SIZE - 8 && cbCount < 2000) {
+            if (!visited.insert(curNode).second) {
+                LOGF_WARNING("[sub_831D96E0] Callback list cycle detected at node 0x{:08X}! Breaking traversal.", curNode);
+                break;
+            }
+            uint32_t fn = PPC_LOAD_U32(curNode + 0);
+            uint32_t nextNode = PPC_LOAD_U32(curNode + 4);
+            if (fn >= PPC_CODE_BASE && fn < PPC_CODE_BASE + PPC_CODE_SIZE) {
+                ctx.r30.u64 = curNode;
+                PPC_CALL_INDIRECT_FUNC(fn);
+            } else {
+                LOGF_WARNING("[sub_831D96E0] Skipping invalid callback target 0x{:08X} at node 0x{:08X}", fn, curNode);
+            }
+            curNode = nextNode;
+            ++cbCount;
+        }
+        if (cbCount >= 2000) {
+            LOGF_ERROR("[sub_831D96E0] Callback list cycle detected! count={}", cbCount);
+        }
+    }
+
+loc_831D9788:
+    ctx.r11.s64 = -2088566784;
+    ctx.r30.s64 = ctx.r11.s64 + 23592;
+    ctx.r11.u64 = PPC_LOAD_U8(ctx.r11.u32 + 23592);
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (!cr6.eq) goto loc_831D97C8;
+    ctx.r11.u64 = PPC_LOAD_U16(ctx.r30.u32 + 8);
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_831D97C0;
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + 4);
+    ctx.r11.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 3) & 0xFFFFFFF8;
+    ctx.r10.s64 = -2095382528;
+    ctx.r4.u64 = ctx.r11.u64 + ctx.r3.u64;
+    ctx.r5.s64 = ctx.r10.s64 + 16120;
+    sub_82F8BCA8(ctx, base);
+
+loc_831D97C0:
+    ctx.r11.s64 = 1;
+    PPC_STORE_U8(ctx.r30.u32 + 0, ctx.r11.u8);
+
+loc_831D97C8:
+    ctx.r11.s64 = 0;
+    cr6.compare<uint32_t>(ctx.r26.u32, 0, ctx.xer);
+    PPC_STORE_U32(ctx.r29.u32 + 19724, ctx.r11.u32);
+    PPC_STORE_U32(ctx.r31.u32 + 36, ctx.r28.u32);
+    PPC_STORE_U32(ctx.r31.u32 + 40, ctx.r27.u32);
+    PPC_STORE_U8(ctx.r31.u32 + 48, ctx.r11.u8);
+    if (cr6.eq) goto loc_831D97E8;
+    sub_8247BFD0(ctx, base);
+
+loc_831D97E8:
+    ctx.r1.s64 = ctx.r1.s64 + 144;
+    __restgprlr_26(ctx, base);
+}
+
+PPC_FUNC(sub_8227B8A0)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCRegister ctr{};
+    PPCCRRegister cr6{};
+    uint32_t ea{};
+
+    __savegprlr_29(ctx, base);
+    ea = -112 + ctx.r1.u32;
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+    PPC_STORE_U64(ctx.r1.u32 + 144, ctx.r4.u64);
+    ctx.r11.s64 = -2083848192; // 0x83CE0000
+    ctx.r31.u64 = ctx.r3.u64;
+    PPC_STORE_U64(ctx.r1.u32 + 152, ctx.r5.u64);
+    ctx.r29.s64 = ctx.r11.s64 + -20632;
+    ctx.r3.u64 = ctx.r29.u64;
+    sub_823C04D8(ctx, base);
+    ctx.r30.s64 = ctx.r31.s64 + 56;
+    ctx.r4.s64 = ctx.r1.s64 + 144;
+    ctx.r3.u64 = ctx.r30.u64;
+    sub_8250E020(ctx, base);
+    ctx.r11.u64 = ctx.r3.u32 & 0xFF;
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (!cr6.eq) goto loc_8227B92C;
+
+    {
+        uint32_t r31_addr = ctx.r31.u32;
+        uint32_t listener = (r31_addr >= 0x10000 && r31_addr < PPC_MEMORY_SIZE - 4) ? PPC_LOAD_U32(r31_addr + 4) : 0;
+        ctx.r3.u64 = listener;
+        ctx.r6.u64 = PPC_LOAD_U64(ctx.r1.u32 + 144);
+        ctx.r4.u64 = PPC_LOAD_U64(ctx.r30.u32 + 0);
+        ctx.r7.u64 = PPC_LOAD_U64(ctx.r1.u32 + 152);
+        ctx.r5.u64 = PPC_LOAD_U64(ctx.r30.u32 + 8);
+
+        uint32_t vtable = (listener >= 0x10000 && listener < PPC_MEMORY_SIZE - 4) ? PPC_LOAD_U32(listener + 0) : 0;
+        uint32_t targetFn = (vtable >= 0x10000 && vtable < PPC_MEMORY_SIZE - 32) ? PPC_LOAD_U32(vtable + 28) : 0;
+
+        ctr.u64 = targetFn;
+        if (targetFn >= PPC_CODE_BASE && targetFn < (PPC_CODE_BASE + PPC_CODE_SIZE)) {
+            PPC_CALL_INDIRECT_FUNC(ctr.u32);
+        } else {
+            static int s_sub8227B8A0NullCount = 0;
+            if (s_sub8227B8A0NullCount++ < 5) {
+                LOGF_WARNING("[sub_8227B8A0] No valid listener callback for obj 0x{:08X} (listener=0x{:08X}, vtable=0x{:08X}, fn=0x{:08X})",
+                             r31_addr, listener, vtable, targetFn);
+            }
+        }
+
+        ctx.r9.s64 = ctx.r1.s64 + 144;
+        ctx.r8.u64 = PPC_LOAD_U32(ctx.r9.u32 + 0);
+        ctx.r7.u64 = PPC_LOAD_U32(ctx.r9.u32 + 4);
+        ctx.r6.u64 = PPC_LOAD_U32(ctx.r9.u32 + 8);
+        ctx.r5.u64 = PPC_LOAD_U32(ctx.r9.u32 + 12);
+        PPC_STORE_U32(ctx.r30.u32 + 0, ctx.r8.u32);
+        PPC_STORE_U32(ctx.r30.u32 + 4, ctx.r7.u32);
+        PPC_STORE_U32(ctx.r30.u32 + 8, ctx.r6.u32);
+        PPC_STORE_U32(ctx.r30.u32 + 12, ctx.r5.u32);
+    }
+
+loc_8227B92C:
+    ctx.r11.s64 = ctx.r1.s64 + 144;
+    ctx.r3.u64 = ctx.r29.u64;
+    ctx.r10.s64 = ctx.r31.s64 + 72;
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);
+    ctx.r8.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+    ctx.r7.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);
+    ctx.r6.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);
+    PPC_STORE_U32(ctx.r31.u32 + 72, ctx.r9.u32);
+    PPC_STORE_U32(ctx.r31.u32 + 76, ctx.r8.u32);
+    PPC_STORE_U32(ctx.r31.u32 + 80, ctx.r7.u32);
+    PPC_STORE_U32(ctx.r31.u32 + 84, ctx.r6.u32);
+    sub_823C0578(ctx, base);
+    ctx.r1.s64 = ctx.r1.s64 + 112;
+    __restgprlr_29(ctx, base);
+    return;
+}
+
+PPC_FUNC(sub_82985058)
+{
+    // Fatal dirty disc check - bypass on PC/Linux recompiled runtime
+    static int s_dirtyDiscBypassCount = 0;
+    if (s_dirtyDiscBypassCount++ < 5) {
+        LOGF_INFO("[sub_82985058] Bypassing Xbox 360 dirty disc error check (call #{})", s_dirtyDiscBypassCount);
+    }
+    // Return cleanly without invoking sub_8363AAA0 / XamShowDirtyDiscErrorUI
+    return;
+}
+
+PPC_FUNC(sub_83767B20)
+{
+    PPC_FUNC_PROLOGUE();
+    uint32_t r3_in = ctx.r3.u32;
+    int32_t r4_in = ctx.r4.s32;
+
+    uint32_t r31_thread = r3_in;
+    if (r31_thread == 0)
+    {
+        uint32_t tlsSlot = PPC_LOAD_U32(0x83CE0000 + 30208);
+        if (tlsSlot != (uint32_t)-1)
+        {
+            ctx.r3.u64 = tlsSlot;
+            __imp__KeTlsGetValue(ctx, base);
+            r31_thread = ctx.r3.u32;
+        }
+    }
+
+    if (r31_thread == 0 || r31_thread >= PPC_MEMORY_SIZE - 256)
+    {
+        return;
+    }
+
+    uint32_t threadObj = PPC_LOAD_U32(r31_thread + 252);
+    if (threadObj == 0 || threadObj >= PPC_MEMORY_SIZE - 60)
+    {
+        return;
+    }
+
+    // Switch table at 0x83767B84: handles priority enum
+    int32_t priority = r4_in;
+    if (r4_in < -2 || r4_in > 2)
+    {
+        priority = 0;
+    }
+
+    ctx.r3.u64 = PPC_LOAD_U32(threadObj + 52);
+    ctx.r4.s64 = priority;
+    sub_82283BD8(ctx, base);
 }
 
 

@@ -5,15 +5,17 @@
 #include "xdm.h"
 
 // XMA I/O only needs 64KB but we keep some reserved space for safety
-// Shrink reserved region to give more physical memory to the game
-// Original: RESERVED_END = 0xA0000000 (1.5GB physical)
-// New: RESERVED_END = 0x80000000 (2GB physical - from 0x80000000 to 0x100000000)
+// In GTA V, default.xex is loaded at 0x82000000 - 0x83DB8000.
+// Physical heap MUST start at 0xA0000000 (1.5GB physical) so it does NOT overwrite the game image!
+// Virtual heap in user space starts at 0x10000000 (256MB) so low memory (0x0 - 0x0FFFFFFF)
+// used by GTA V sysMemAllocator/CRT is never collided with.
+constexpr size_t VIRTUAL_HEAP_BEGIN = 0x10000000;
 constexpr size_t RESERVED_BEGIN = 0x7FEA0000;
-constexpr size_t RESERVED_END = 0x80000000;  // Was 0xA0000000
+constexpr size_t RESERVED_END = 0xA0000000;
 
 void Heap::Init()
 {
-    heap = o1heapInit(g_memory.Translate(0x20000), RESERVED_BEGIN - 0x20000);
+    heap = o1heapInit(g_memory.Translate(VIRTUAL_HEAP_BEGIN), RESERVED_BEGIN - VIRTUAL_HEAP_BEGIN);
     physicalHeap = o1heapInit(g_memory.Translate(RESERVED_END), 0x100000000 - RESERVED_END);
 }
 
