@@ -155,10 +155,22 @@ void KiSystemStartup()
     // OS mounts game data to D:
     XamContentCreateEx(0, "D", &gameContent, OPEN_EXISTING, nullptr, nullptr, 0, 0, nullptr);
 
+    // Register game: and dvd: root paths
+    XamRootCreate("game", gamePath);
+    XamRootCreate("Game", gamePath);
+    XamRootCreate("dvd", gamePath);
+    XamRootCreate("Dvd", gamePath);
+    XamRootCreate("d", gamePath);
+    XamRootCreate("D", gamePath);
+
     // GTA V uses "common:" and "platform:" root paths
     // All game files are in: GetGamePath() / "game" / (common/, xbox360/, audio/)
     // Structure: ~/Library/Application Support/FiveInvader/game/common/, etc.
-    const auto gameRoot = GetGamePath() / "game";
+    std::filesystem::path gameRoot = GetGamePath() / "game";
+    if (!std::filesystem::exists(gameRoot) && std::filesystem::exists(GetGamePath() / "default.xex"))
+    {
+        gameRoot = GetGamePath();
+    }
     const std::string commonPath = (const char*)(gameRoot / "common").u8string().c_str();
     const std::string platformPath = (const char*)(gameRoot / "xbox360").u8string().c_str();
     const std::string audioPath = (const char*)(gameRoot / "audio").u8string().c_str();
@@ -175,6 +187,7 @@ void KiSystemStartup()
     LOGF_IMPL(Utility, "Main", "Registered common: -> {}", commonPath);
     LOGF_IMPL(Utility, "Main", "Registered platform: -> {}", platformPath);
     LOGF_IMPL(Utility, "Main", "Registered audio: -> {}", audioPath);
+    LOGF_IMPL(Utility, "Main", "Registered game/dvd: -> {}", gamePath);
 
     // Initialize Virtual File System for direct file serving
     // This bypasses complex RPF offset-based reading that causes stream issues
@@ -327,6 +340,18 @@ int main(int argc, char *argv[])
                 sdlVideoDriver = argv[++i];
             else
                 LOGN_WARNING("No argument was specified for --sdl-video-driver. Option will be ignored.");
+        }
+
+        if (strcmp(argv[i], "--game-dir") == 0 || strcmp(argv[i], "--game-path") == 0)
+        {
+            if ((i + 1) < argc)
+            {
+                SetUserPath(argv[++i]);
+            }
+            else
+            {
+                LOGN_WARNING("No argument was specified for --game-dir. Option will be ignored.");
+            }
         }
     }
 

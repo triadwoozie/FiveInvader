@@ -3174,9 +3174,13 @@ uint32_t KeDelayExecutionThread(uint32_t WaitMode, bool Alertable, be<int64_t>* 
     return STATUS_SUCCESS;
 }
 
-void ExFreePool()
+void ExFreePool(uint32_t guestAddress)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    const uint32_t lr = GET_CALLER_LR();
+    if (guestAddress != 0) {
+        LOGF_INFO("[ExFreePool] guest=0x{:08X} caller=0x{:08X}", guestAddress, lr);
+        g_userHeap.Free(g_memory.Translate(guestAddress));
+    }
 }
 
 uint32_t NtQueryInformationFile(
@@ -5448,9 +5452,34 @@ void IoDeleteDevice()
     LOG_UTILITY("!!! STUB !!!");
 }
 
-void ExAllocatePoolTypeWithTag()
+uint32_t ExAllocatePoolTypeWithTag(uint32_t poolType, uint32_t size, uint32_t tag)
 {
-    LOG_UTILITY("!!! STUB !!!");
+    const uint32_t lr = GET_CALLER_LR();
+    void* host = g_userHeap.Alloc(size);
+    if (!host) {
+        LOGF_WARNING("[ExAllocatePoolTypeWithTag] OOM: poolType={} size=0x{:X} tag=0x{:08X} caller=0x{:08X}",
+                     poolType, size, tag, lr);
+        return 0;
+    }
+    memset(host, 0, size);
+    uint32_t guest = g_memory.MapVirtual(host);
+    LOGF_INFO("[ExAllocatePoolTypeWithTag] poolType={} size=0x{:X} tag=0x{:08X} -> guest=0x{:08X} caller=0x{:08X}",
+              poolType, size, tag, guest, lr);
+    return guest;
+}
+
+uint32_t ExAllocatePool(uint32_t size)
+{
+    const uint32_t lr = GET_CALLER_LR();
+    void* host = g_userHeap.Alloc(size);
+    if (!host) {
+        LOGF_WARNING("[ExAllocatePool] OOM: size=0x{:X} caller=0x{:08X}", size, lr);
+        return 0;
+    }
+    memset(host, 0, size);
+    uint32_t guest = g_memory.MapVirtual(host);
+    LOGF_INFO("[ExAllocatePool] size=0x{:X} -> guest=0x{:08X} caller=0x{:08X}", size, guest, lr);
+    return guest;
 }
 
 void RtlTimeFieldsToTime()
@@ -7011,8 +7040,6 @@ GTA5_IMPORT_STUB(__imp__XamBackgroundDownloadItemGetHistoryStatus)
 GTA5_IMPORT_STUB(__imp__XamContentResolve)
 GTA5_IMPORT_STUB(__imp__XamSwapDisc)
 GTA5_IMPORT_STUB(__imp__XamSwapCancel)
-GTA5_IMPORT_STUB(__imp__ExAllocatePool)
-GTA5_IMPORT_STUB(__imp__XexLoadImage)
 GTA5_IMPORT_STUB(__imp__XexUnloadImage)
 #undef GTA5_IMPORT_STUB
 
@@ -7024,7 +7051,48 @@ PPC_FUNC(__imp__NtYieldExecution)
 
 PPC_FUNC(__imp__MmMapIoSpace)
 {
-    ctx.r3.u64 = ctx.r3.u32;
+    const uint32_t lr = GET_CALLER_LR();
+    uint32_t physAddr;
+    uint32_t size;
+    uint32_t protect;
+
+    if (ctx.r3.u32 == 0 && ctx.r4.u32 != 0) {
+        // 64-bit LARGE_INTEGER PhysicalAddress in r3:r4
+        physAddr = ctx.r4.u32;
+        size = ctx.r5.u32;
+        protect = ctx.r6.u32;
+    } else {
+        physAddr = ctx.r3.u32;
+        size = ctx.r4.u32;
+        protect = ctx.r5.u32;
+    }
+
+    LOGF_INFO("[MmMapIoSpace] caller=0x{:08X} physAddr=0x{:08X} size=0x{:X} prot=0x{:X}",
+              lr, physAddr, size, protect);
+
+    // In FiveInvader, virtual space directly maps physical space (1:1 address translation)
+    // If physAddr is 0, allocate physical memory block to avoid returning NULL
+    if (physAddr == 0) {
+        void* host = g_userHeap.AllocPhysical(size ? size : 0x1000, 0x1000);
+        if (host) {
+            physAddr = g_memory.MapVirtual(host);
+            LOGF_WARNING("[MmMapIoSpace] physAddr was 0, allocated fallback virtual address 0x{:08X}", physAddr);
+        }
+    }
+
+    ctx.r3.u64 = physAddr;
+}
+
+PPC_FUNC(__imp__XexLoadImage)
+{
+    const uint32_t lr = GET_CALLER_LR();
+    const char* name = ctx.r3.u32 ? (const char*)(base + ctx.r3.u32) : "NULL";
+    LOGF_WARNING("[XexLoadImage] caller=0x{:08X} name='{}' flags=0x{:X}", lr, name, ctx.r4.u32);
+    // Write pseudo module handle if output pointer provided in r6
+    if (ctx.r6.u32 != 0) {
+        *reinterpret_cast<be<uint32_t>*>(base + ctx.r6.u32) = 0x82000000;
+    }
+    ctx.r3.u64 = 0; // STATUS_SUCCESS
 }
 
 PPC_FUNC(__imp__XamUserGetAge)
@@ -7785,6 +7853,7 @@ GUEST_FUNCTION_HOOK(__imp__XexGetModuleSection, XexGetModuleSection);
 GUEST_FUNCTION_HOOK(__imp__RtlUnicodeToMultiByteN, RtlUnicodeToMultiByteN);
 GUEST_FUNCTION_HOOK(__imp__KeDelayExecutionThread, KeDelayExecutionThread);
 GUEST_FUNCTION_HOOK(__imp__ExFreePool, ExFreePool);
+GUEST_FUNCTION_HOOK(__imp__ExAllocatePool, ExAllocatePool);
 GUEST_FUNCTION_HOOK(__imp__NtQueryInformationFile, NtQueryInformationFile);
 GUEST_FUNCTION_HOOK(__imp__NtQueryVolumeInformationFile, NtQueryVolumeInformationFile);
 GUEST_FUNCTION_HOOK(__imp__NtQueryDirectoryFile, NtQueryDirectoryFile);

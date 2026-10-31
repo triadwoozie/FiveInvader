@@ -414,11 +414,15 @@ static bool copyAllFiles(VirtualFileSystem &sourceVfs, const std::filesystem::pa
 bool Installer::checkGameInstall(const std::filesystem::path &baseDirectory, std::filesystem::path &modulePath)
 {
     modulePath = baseDirectory / GameDirectory / GameExecutableFile;
+    if (std::filesystem::exists(modulePath))
+        return true;
 
-    if (!std::filesystem::exists(modulePath))
-        return false;
+    // Direct game directory without "game" subdirectory
+    modulePath = baseDirectory / GameExecutableFile;
+    if (std::filesystem::exists(modulePath))
+        return true;
 
-    return true;
+    return false;
 }
 
 bool Installer::checkDLCInstall(const std::filesystem::path &baseDirectory, DLC dlc)

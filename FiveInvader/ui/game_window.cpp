@@ -458,7 +458,7 @@ uint32_t GameWindow::GetWindowFlags()
     if (Config::Fullscreen)
         flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 
-#ifdef SDL_VULKAN_ENABLED
+#if defined(PLUME_SDL_VULKAN_ENABLED) || defined(SDL_VULKAN_ENABLED)
     flags |= SDL_WINDOW_VULKAN;
 #endif
 

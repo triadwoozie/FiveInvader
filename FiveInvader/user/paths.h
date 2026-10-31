@@ -14,6 +14,7 @@ inline std::unordered_map<std::string, std::filesystem::path> g_pathCache;
 bool CheckPortable();
 std::filesystem::path BuildUserPath();
 const std::filesystem::path& GetUserPath();
+void SetUserPath(const std::filesystem::path& path);
 
 inline std::filesystem::path GetGamePath()
 {
@@ -51,7 +52,11 @@ static std::string toLower(std::string str) {
 };
 
 inline void BuildPathCache(const std::string& gamePath) {
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(gamePath)) {
+    std::error_code ec;
+    if (!std::filesystem::exists(gamePath, ec))
+        return;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(gamePath, ec)) {
+        if (ec) break;
         std::string fullPath = entry.path().string();
         std::string key = toLower(fullPath);
         g_pathCache[key] = entry.path();

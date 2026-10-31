@@ -16,6 +16,10 @@ CONFIG_DEFINE_LOCALISED("Input", bool, AllowBackgroundInput, false, false);
 CONFIG_DEFINE_ENUM_LOCALISED("Input", EControllerIcons, ControllerIcons, EControllerIcons::Auto, false);
 CONFIG_DEFINE_ENUM_LOCALISED("Input", ELightDash, LightDash, ELightDash::X, false);
 CONFIG_DEFINE_ENUM_LOCALISED("Input", ESlidingAttack, SlidingAttack, ESlidingAttack::X, false);
+CONFIG_DEFINE_LOCALISED("Input", float, MouseSensitivityX, 1.0f, false);
+CONFIG_DEFINE_LOCALISED("Input", float, MouseSensitivityY, 1.0f, false);
+CONFIG_DEFINE_LOCALISED("Input", bool, MouseInvertY, false, false);
+CONFIG_DEFINE_LOCALISED("Input", float, MouseSmoothing, 0.5f, false);
 
 // GTA V Control Scheme - Face Buttons
 CONFIG_DEFINE_ENUM("Bindings", SDL_Scancode, Key_A, SDL_SCANCODE_LSHIFT, false);      // Sprint (on foot) / Handbrake (in car)
@@ -60,11 +64,6 @@ CONFIG_DEFINE_ENUM("Bindings", SDL_Scancode, Key_Horn, SDL_SCANCODE_H, false);  
 CONFIG_DEFINE_ENUM("Bindings", SDL_Scancode, Key_Headlight, SDL_SCANCODE_G, false);    // Headlights (in vehicle)
 CONFIG_DEFINE_ENUM("Bindings", SDL_Scancode, Key_RadioNext, SDL_SCANCODE_X, false);    // Next Radio Station
 CONFIG_DEFINE_ENUM("Bindings", SDL_Scancode, Key_RadioPrev, SDL_SCANCODE_Z, false);    // Previous Radio Station
-
-CONFIG_DEFINE_LOCALISED("Input", float, MouseSensitivityX, 1.0f, false);
-CONFIG_DEFINE_LOCALISED("Input", float, MouseSensitivityY, 1.0f, false);
-CONFIG_DEFINE_LOCALISED("Input", bool, MouseInvertY, false, false);
-CONFIG_DEFINE_LOCALISED("Input", float, MouseSmoothing, 0.5f, false);
 
 CONFIG_DEFINE_LOCALISED("Audio", float, MasterVolume, 1.0f, false);
 CONFIG_DEFINE_LOCALISED("Audio", float, MusicVolume, 0.6f, false);

@@ -45,8 +45,10 @@ NOTES.md
 # Documentation - Ignore all except build/dump/install/multiplayer guides
 docs/*.md
 !docs/AGENT_HANDOVER.md
+!docs/ARCHITECTURE_AND_PHASES.md
 !docs/BUILDING.md
 !docs/DUMPING-en.md
+!docs/FIRST_BOOT_REPORT.md
 !docs/GTA5_BRINGUP_ROADMAP.md
 !docs/INSTALLATION_ARCHITECTURE.md
 !docs/ONLINE_MULTIPLAYER.md

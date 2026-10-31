@@ -9,8 +9,19 @@ bool CheckPortable()
     return std::filesystem::exists(g_executableRoot / "portable.txt");
 }
 
+void SetUserPath(const std::filesystem::path& path)
+{
+    g_userPath = path;
+}
+
 std::filesystem::path BuildUserPath()
 {
+    if (const char* env = getenv("FIVEINVADER_GAME_DIR"))
+        return std::filesystem::path(env);
+
+    if (const char* env = getenv("FIVEINVADER_PATH"))
+        return std::filesystem::path(env);
+
     if (CheckPortable())
         return g_executableRoot;
 
