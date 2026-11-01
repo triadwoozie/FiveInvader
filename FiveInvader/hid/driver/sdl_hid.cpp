@@ -498,6 +498,7 @@ void hid::ResetMouseWheelDelta()
 
 void hid::Init()
 {
+    SDL_SetHint("SDL_JOYSTICK_UDEV", "0");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_GAMECUBE, "1");
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS3, "1");

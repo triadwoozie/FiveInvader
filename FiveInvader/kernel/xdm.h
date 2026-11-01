@@ -198,11 +198,18 @@ inline T* GetInvalidKernelObject()
 
 extern Mutex g_kernelLock;
 
+inline bool IsValidHostVtable(void* obj) {
+    if (!obj) return false;
+    uintptr_t vptr = *(uintptr_t*)obj;
+    // Host C++ vtables for FiveInvader kernel objects reside in .data.rel.ro (0x0F000000 - 0x10000000)
+    return (vptr >= 0x0E000000 && vptr < 0x11000000 && (vptr & 7) == 0);
+}
+
 template<typename T>
 inline T* QueryKernelObject(XDISPATCHER_HEADER& header)
 {
     std::lock_guard guard{ g_kernelLock };
-    if (header.WaitListHead.Flink != OBJECT_SIGNATURE)
+    if (header.WaitListHead.Flink != OBJECT_SIGNATURE || header.WaitListHead.Blink == 0)
     {
         header.WaitListHead.Flink = OBJECT_SIGNATURE;
         auto* obj = CreateKernelObject<T>(reinterpret_cast<typename T::guest_type*>(&header));
@@ -211,15 +218,26 @@ inline T* QueryKernelObject(XDISPATCHER_HEADER& header)
         return obj;
     }
 
-    return static_cast<T*>(g_memory.Translate(header.WaitListHead.Blink.get()));
+    auto* obj = static_cast<T*>(g_memory.Translate(header.WaitListHead.Blink.get()));
+    if (!IsValidHostVtable(obj))
+    {
+        auto* newObj = CreateKernelObject<T>(reinterpret_cast<typename T::guest_type*>(&header));
+        header.WaitListHead.Blink = g_memory.MapVirtual(newObj);
+        return newObj;
+    }
+    return obj;
 }
 
 // Get object without initialisation
 template<typename T>
 inline T* TryQueryKernelObject(XDISPATCHER_HEADER& header)
 {
-    if (header.WaitListHead.Flink != OBJECT_SIGNATURE)
+    if (header.WaitListHead.Flink != OBJECT_SIGNATURE || header.WaitListHead.Blink == 0)
         return nullptr;
 
-    return static_cast<T*>(g_memory.Translate(header.WaitListHead.Blink.get()));
+    auto* obj = static_cast<T*>(g_memory.Translate(header.WaitListHead.Blink.get()));
+    if (!IsValidHostVtable(obj))
+        return nullptr;
+
+    return obj;
 }

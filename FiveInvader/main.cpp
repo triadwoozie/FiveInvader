@@ -413,7 +413,7 @@ int main(int argc, char *argv[])
     int cliHeight = 0;
     int cliVsync = -1;
     int cliFullscreen = -1;
-    int cliFps = 0;
+    int cliFps = -1;
 
     for (uint32_t i = 1; i < argc; i++)
     {
@@ -487,6 +487,17 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--vsync") == 0)
         {
             cliVsync = 1;
+            if ((i + 1) < argc)
+            {
+                const char* value = argv[i + 1];
+                if (strcmp(value, "0") == 0 || strcmp(value, "1") == 0)
+                {
+                    cliVsync = value[0] - '0';
+                    ++i;
+                }
+                else if (value[0] != '-')
+                    fprintf(stderr, "[Main] Invalid value for --vsync: %s. Expected 0 or 1.\n", value);
+            }
         }
         else if (strcmp(argv[i], "--no-vsync") == 0)
         {
@@ -495,6 +506,17 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--fullscreen") == 0)
         {
             cliFullscreen = 1;
+            if ((i + 1) < argc)
+            {
+                const char* value = argv[i + 1];
+                if (strcmp(value, "0") == 0 || strcmp(value, "1") == 0)
+                {
+                    cliFullscreen = value[0] - '0';
+                    ++i;
+                }
+                else if (value[0] != '-')
+                    fprintf(stderr, "[Main] Invalid value for --fullscreen: %s. Expected 0 or 1.\n", value);
+            }
         }
         else if (strcmp(argv[i], "--windowed") == 0)
         {
@@ -551,7 +573,7 @@ int main(int argc, char *argv[])
         Config::Fullscreen = (cliFullscreen == 1);
     }
 
-    if (cliFps > 0)
+    if (cliFps >= 0)
     {
         Config::FPS = cliFps;
     }
@@ -622,7 +644,8 @@ int main(int argc, char *argv[])
     }
 #endif
 
-    // Check the time since the last time an update was checked. Store the new time if the difference is more than six hours.
+    // Update checker disabled (leftover from UnleashedRecomp)
+    /*
     constexpr double TimeBetweenUpdateChecksInSeconds = 6 * 60 * 60;
     time_t timeNow = std::time(nullptr);
     double timeDifferenceSeconds = difftime(timeNow, Config::LastChecked);
@@ -633,6 +656,7 @@ int main(int argc, char *argv[])
         Config::LastChecked = timeNow;
         Config::Save();
     }
+    */
 
     if (Config::ShowConsole)
         os::process::ShowConsole();

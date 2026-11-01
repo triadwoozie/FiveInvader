@@ -48,7 +48,7 @@ void* Heap::AllocPhysical(size_t size, size_t alignment)
 
     std::lock_guard lock(physicalMutex);
 
-    void* ptr = o1heapAllocate(physicalHeap, size + alignment);
+    void* ptr = o1heapAllocate(physicalHeap, size + alignment + 16);
     if (ptr == nullptr)
     {
         const O1HeapDiagnostics diag = o1heapGetDiagnostics(physicalHeap);
@@ -64,7 +64,7 @@ void* Heap::AllocPhysical(size_t size, size_t alignment)
         std::fflush(stderr);
         return nullptr;
     }
-    size_t aligned = ((size_t)ptr + alignment) & ~(alignment - 1);
+    size_t aligned = ((size_t)ptr + 16 + alignment - 1) & ~(alignment - 1);
 
     *((void**)aligned - 1) = ptr;
     *((size_t*)aligned - 2) = size + O1HEAP_ALIGNMENT;

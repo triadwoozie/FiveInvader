@@ -120,6 +120,18 @@ void sub_82332868(PPCContext& ctx, uint8_t* base);
 void sub_83217D38(PPCContext& ctx, uint8_t* base);
 void sub_8226B3B8(PPCContext& ctx, uint8_t* base);
 void sub_83480F88(PPCContext& ctx, uint8_t* base);
+void sub_8266BB00(PPCContext& ctx, uint8_t* base);
+void sub_8229AD78(PPCContext& ctx, uint8_t* base);
+void sub_829855F8(PPCContext& ctx, uint8_t* base);
+void sub_82985550(PPCContext& ctx, uint8_t* base);
+void sub_831E2DB8(PPCContext& ctx, uint8_t* base);
+void sub_831E3240(PPCContext& ctx, uint8_t* base);
+void sub_829856D0(PPCContext& ctx, uint8_t* base);
+void sub_82924148(PPCContext& ctx, uint8_t* base);
+void sub_82D95030(PPCContext& ctx, uint8_t* base);
+void sub_83521D38(PPCContext& ctx, uint8_t* base);
+void sub_836B1768(PPCContext& ctx, uint8_t* base);
+void sub_83536A60(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -158,6 +170,18 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x83217D38, &::sub_83217D38);
     PatchFuncMapping(0x8226B3B8, &::sub_8226B3B8);
     PatchFuncMapping(0x83480F88, &::sub_83480F88);
+    PatchFuncMapping(0x8266BB00, &::sub_8266BB00);
+    PatchFuncMapping(0x8229AD78, &::sub_8229AD78);
+    PatchFuncMapping(0x829855F8, &::sub_829855F8);
+    PatchFuncMapping(0x82985550, &::sub_82985550);
+    PatchFuncMapping(0x831E2DB8, &::sub_831E2DB8);
+    PatchFuncMapping(0x831E3240, &::sub_831E3240);
+    PatchFuncMapping(0x829856D0, &::sub_829856D0);
+    PatchFuncMapping(0x82924148, &::sub_82924148);
+    PatchFuncMapping(0x82D95030, &::sub_82D95030);
+    PatchFuncMapping(0x83521D38, &::sub_83521D38);
+    PatchFuncMapping(0x836B1768, &::sub_836B1768);
+    PatchFuncMapping(0x83536A60, &::sub_83536A60);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -367,6 +391,12 @@ void PumpSdlEventsIfNeeded()
             {
                 std::_Exit(0);
             }
+        }
+
+        if (g_vdSwapCounter.load(std::memory_order_relaxed) > 0 ||
+            g_pm4PacketCounter.load(std::memory_order_relaxed) > 0)
+        {
+            GameWindow::ShowAndRaise();
         }
 
         static auto s_lastTitleUpdate = std::chrono::steady_clock::now();
@@ -3097,7 +3127,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         }
     }
 
-    if (!obj)
+    if (!IsValidHostVtable(obj))
     {
         static int s_invalidWaitCount = 0;
         if (++s_invalidWaitCount <= 20 || s_invalidWaitCount % 10000 == 0)
@@ -3112,16 +3142,28 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
     }
 
     // KERNEL POLICY: Fail-open during Boot/Init only for the main thread (workers must sleep on queues)
-    if (timeout == INFINITE && ShouldFailOpenWait() && isMainThread) {
-        uint32_t result = obj->Wait(10);  // Short wait instead of infinite
+    if (ShouldFailOpenWait() && isMainThread) {
+        static uint32_t s_lastMainHandle = 0;
+        static int s_consecutiveTimeouts = 0;
+        uint32_t waitMs = (timeout == INFINITE) ? 1000 : std::min(timeout, 1000u);
+        uint32_t result = obj->Wait(waitMs);
         if (result == STATUS_TIMEOUT) {
-            static int s_failOpenObj = 0;
-            ++s_failOpenObj;
-            if (s_failOpenObj <= 50 || s_failOpenObj % 1000 == 0) {
-                LOGF_WARNING("[FAIL-OPEN] NtWaitEx #{} infinite->success handle=0x{:08X} caller=0x{:08X}", 
-                            s_failOpenObj, Handle, callerLR);
+            if (Handle == s_lastMainHandle) {
+                ++s_consecutiveTimeouts;
+            } else {
+                s_lastMainHandle = Handle;
+                s_consecutiveTimeouts = 1;
             }
-            return STATUS_SUCCESS;
+            if (s_consecutiveTimeouts >= 5) {
+                static int s_failOpenObj = 0;
+                if (++s_failOpenObj <= 50 || s_failOpenObj % 100 == 0) {
+                    LOGF_WARNING("[FAIL-OPEN] NtWaitEx #{} (timeout={}ms, consecutive={}) -> SUCCESS handle=0x{:08X} caller=0x{:08X}", 
+                                s_failOpenObj, timeout, s_consecutiveTimeouts, Handle, callerLR);
+                }
+                return STATUS_SUCCESS;
+            }
+        } else {
+            s_consecutiveTimeouts = 0;
         }
         return result;
     }
@@ -4906,9 +4948,7 @@ void ScanRingBufferForPM4Packets()
     if (packetsFound > 0) {
         s_scannedOnce = true;
     }
-    g_pm4PacketCounter.store(g_gpuRingBuffer.pm4DrawCount + g_gpuRingBuffer.pm4ShaderLoadCount +
-                             g_gpuRingBuffer.pm4SetConstantCount + g_gpuRingBuffer.pm4SwapCount +
-                             g_gpuRingBuffer.pm4OtherCount, std::memory_order_relaxed);
+    g_pm4PacketCounter.store(g_gpuRingBuffer.pm4DrawCount + g_gpuRingBuffer.pm4SwapCount, std::memory_order_relaxed);
     s_scanCount++;
 }
 
@@ -4979,8 +5019,13 @@ static std::thread g_vblankThread;
 
 void FireVBlankCallback() {
     if (g_gpuRingBuffer.interruptCallback != 0) {
-        // Create a temporary context to call the guest callback
-        PPCContext ctx{};
+        static std::unique_ptr<GuestThreadContext> s_vblankContext;
+        if (!s_vblankContext) {
+            s_vblankContext = std::make_unique<GuestThreadContext>(5);
+        }
+
+        // Set up context with valid stack and TLS on the dedicated vblank context
+        PPCContext ctx = s_vblankContext->ppcContext;
         ctx.r3.u32 = 1;  // Interrupt reason 1 = VBlank / vertical blank (expected by sub_836B1768)
         ctx.r4.u32 = g_gpuRingBuffer.interruptUserData;  // Context/userData
         SetPPCContext(ctx);
@@ -5269,11 +5314,17 @@ uint32_t KeWaitForSingleObject(XDISPATCHER_HEADER* Object, uint32_t WaitReason, 
     switch (Object->Type)
     {
         case 0:
-        case 1:
-            return QueryKernelObject<Event>(*Object)->Wait(timeout);
+        case 1: {
+            auto* evt = QueryKernelObject<Event>(*Object);
+            if (!IsValidHostVtable(evt)) return ShouldFailOpenWait() ? STATUS_SUCCESS : STATUS_TIMEOUT;
+            return evt->Wait(timeout);
+        }
 
-        case 5:
-            return QueryKernelObject<Semaphore>(*Object)->Wait(timeout);
+        case 5: {
+            auto* sem = QueryKernelObject<Semaphore>(*Object);
+            if (!IsValidHostVtable(sem)) return ShouldFailOpenWait() ? STATUS_SUCCESS : STATUS_TIMEOUT;
+            return sem->Wait(timeout);
+        }
 
         default:
             LOGF_IMPL(Utility, "KeWaitForSingleObject", "Unrecognized kernel object type: {}", Object->Type);
@@ -5707,7 +5758,7 @@ uint32_t NtReleaseSemaphore(uint32_t Handle, uint32_t ReleaseCount, int32_t* Pre
         }
     }
 
-    if (!obj)
+    if (!IsValidHostVtable(obj))
     {
         if (s_count <= 20 || s_count % 100 == 0)
         {
@@ -12610,6 +12661,1311 @@ loc_83480FE0:
     ctx.r1.s64 = ctx.r1.s64 + 160;
     __restgprlr_24(ctx, base);
 }
+
+// =============================================================================
+// RAGE State Machine & Allocator Traps Instrumentation and Diagnostics
+// =============================================================================
+
+extern "C" void __imp__sub_824B9C20(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_824B9C20)
+{
+    static std::atomic<uint64_t> s_smCalls{0};
+    uint64_t c = ++s_smCalls;
+    uint32_t obj = ctx.r3.u32;
+    uint16_t state = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 12) : 0;
+    uint16_t nextState = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 14) : 0;
+    uint16_t pendingState = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 16) : 0;
+    if (c <= 20 || c % 100 == 0) {
+        LOGF_INFO("[sub_824B9C20] StateMachine enter #{} obj=0x{:08X} state={}/{} pending={}",
+                  c, obj, state, nextState, pendingState);
+    }
+    __imp__sub_824B9C20(ctx, base);
+    uint16_t endState = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 12) : 0;
+    if (c <= 20 || c % 100 == 0) {
+        LOGF_INFO("[sub_824B9C20] StateMachine exit #{} state={} ret={}",
+                  c, endState, (int32_t)ctx.r3.s32);
+    }
+}
+
+extern "C" void __imp__sub_825777D0(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_825777D0)
+{
+    static std::atomic<uint64_t> s_s1Calls{0};
+    uint64_t c = ++s_s1Calls;
+    LOGF_INFO("[sub_825777D0] State 1 handler enter #{} obj=0x{:08X}", c, ctx.r3.u32);
+    __imp__sub_825777D0(ctx, base);
+    LOGF_INFO("[sub_825777D0] State 1 handler exit #{} ret={}", c, (int32_t)ctx.r3.s32);
+}
+
+extern "C" void __imp__sub_82577590(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82577590)
+{
+    LOGF_INFO("[sub_82577590] State 1 sub_82577590 enter obj=0x{:08X}", ctx.r3.u32);
+    auto t0 = std::chrono::steady_clock::now();
+    __imp__sub_82577590(ctx, base);
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    LOGF_INFO("[sub_82577590] State 1 sub_82577590 exit elapsed={}ms", ms);
+}
+
+PPC_EXTERN_FUNC(__savegprlr_28);
+PPC_EXTERN_FUNC(__restgprlr_28);
+PPC_EXTERN_FUNC(sub_824D5AA0);
+
+PPC_FUNC(sub_83194A08)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    uint32_t ea{};
+    __savegprlr_28(ctx, base);
+    ea = -128 + ctx.r1.u32;
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+    ctx.r29.u64 = ctx.r3.u64;
+    ctx.r31.u64 = ctx.r4.u64;
+
+    cr6.compare<uint32_t>(ctx.r4.u32, 16, ctx.xer);
+    if (!cr6.eq) goto loc_83194A30;
+
+    // Out of memory across all buddy orders
+    ctx.r3.s64 = -1;
+    ctx.r1.s64 = ctx.r1.s64 + 128;
+    __restgprlr_28(ctx, base);
+    return;
+
+loc_83194A30:
+    ctx.r11.s64 = ctx.r31.s64 + 70;
+    ctx.r3.u64 = ctx.r29.u64;
+    ctx.r10.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 1) & 0xFFFFFFFE;
+    ctx.r30.u64 = PPC_LOAD_U16(ctx.r10.u32 + ctx.r29.u32);
+
+    // CRITICAL: 65534 (0xFFFE) and 65535 (0xFFFF) both represent empty list / no free block!
+    if (ctx.r30.u32 >= 65534) goto loc_83194A60;
+
+    ctx.r5.u64 = ctx.r31.u64;
+    ctx.r4.u64 = ctx.r30.u64;
+    sub_8254ABC8(ctx, base);
+    ctx.r3.u64 = ctx.r30.u64;
+    ctx.r1.s64 = ctx.r1.s64 + 128;
+    __restgprlr_28(ctx, base);
+    return;
+
+loc_83194A60:
+    ctx.r4.s64 = ctx.r31.s64 + 1;
+    sub_83194A08(ctx, base);
+    ctx.r30.u64 = ctx.r3.u32 & 0xFFFF;
+    ctx.r28.u64 = ctx.r3.u64;
+
+    // Higher order returned empty / out of memory: return -1
+    if (ctx.r30.u32 >= 65534) {
+        ctx.r3.s64 = -1;
+        ctx.r1.s64 = ctx.r1.s64 + 128;
+        __restgprlr_28(ctx, base);
+        return;
+    }
+
+    ctx.r11.s64 = 1;
+    ctx.r5.u64 = ctx.r31.u64;
+    ctx.r10.u64 = ctx.r31.u8 & 0x20 ? 0 : (ctx.r11.u32 << (ctx.r31.u8 & 0x3F));
+    ctx.r9.u64 = ctx.r10.u64 ^ ctx.r30.u64;
+    ctx.r3.u64 = ctx.r29.u64;
+    ctx.r4.u64 = ctx.r9.u32 & 0xFFFF;
+    sub_824D5AA0(ctx, base);
+
+    ctx.r11.u64 = __builtin_rotateleft64(ctx.r30.u32 | (ctx.r30.u64 << 32), 3) & 0xFFFFFFF8;
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r29.u32 + 0);
+    ctx.r11.u64 = ctx.r30.u64 + ctx.r11.u64;
+    ctx.r11.u64 = ctx.r11.u64 + ctx.r10.u64;
+    ctx.r10.s64 = ctx.r11.s64 + 4;
+    ctx.r8.u64 = PPC_LOAD_U16(ctx.r11.u32 + 4);
+    ctx.r8.u64 = (__builtin_rotateleft32(ctx.r31.u32, 11) & 0xFFFFF800) | (ctx.r8.u64 & 0xFFFFFFFF000007FF);
+    PPC_STORE_U16(ctx.r11.u32 + 4, ctx.r8.u16);
+
+    ctx.r3.u64 = ctx.r28.u64;
+    ctx.r1.s64 = ctx.r1.s64 + 128;
+    __restgprlr_28(ctx, base);
+    return;
+}
+
+PPC_FUNC(sub_8245C968)
+{
+    uint32_t obj = ctx.r3.u32;
+    if (obj < 0x10000 || obj >= PPC_MEMORY_SIZE - 4) {
+        return;
+    }
+    uint32_t vtbl = PPC_LOAD_U32(obj + 0);
+    if (vtbl < 0x10000 || vtbl >= PPC_MEMORY_SIZE - 4) {
+        return;
+    }
+    uint32_t fn = PPC_LOAD_U32(vtbl + 0);
+    if (fn < 0x82000000 || fn >= 0x83E00000) {
+        LOGF_WARNING("[sub_8245C968] Invalid fn=0x{:08X} (vtbl=0x{:08X}, obj=0x{:08X})", fn, vtbl, obj);
+        return;
+    }
+    PPCFunc* target = PPC_LOOKUP_FUNC(base, fn);
+    if (!target) {
+        LOGF_WARNING("[sub_8245C968] NULL host func for fn=0x{:08X} (vtbl=0x{:08X}, obj=0x{:08X})", fn, vtbl, obj);
+        return;
+    }
+    ctx.r4.s64 = 1;
+    target(ctx, base);
+}
+
+extern "C" void __imp__sub_82294200(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82294200)
+{
+    __imp__sub_82294200(ctx, base);
+    if (ctx.r3.u32 >= 0xFFFE0000 || ctx.r3.u32 < 0x10000) {
+        ctx.r3.u64 = 0;
+    }
+}
+
+extern "C" void __imp__sub_8254ABC8(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8254ABC8)
+{
+    uint32_t block = ctx.r4.u32 & 0xFFFF;
+    if (block >= 65534) {
+        // Block is empty sentinel (0xFFFE or 0xFFFF) - ignore corrupt unlinking
+        return;
+    }
+    __imp__sub_8254ABC8(ctx, base);
+}
+
+// Depth-limited and cycle-guarded Radix Trie insertion routines (sub_834ED4D8, sub_834ED550, sub_834ED5D8)
+PPC_FUNC(sub_834ED4D8)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    ctx.r11.s64 = 0;
+    PPC_STORE_U32(ctx.r4.u32 + 28, ctx.r11.u32);
+    PPC_STORE_U32(ctx.r4.u32 + 24, ctx.r11.u32);
+    PPC_STORE_U32(ctx.r4.u32 + 20, ctx.r11.u32);
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) {
+        PPC_STORE_U32(ctx.r3.u32 + 0, ctx.r4.u32);
+        PPC_STORE_U32(ctx.r4.u32 + 20, ctx.r3.u32);
+        ctx.r3.s64 = 0;
+        return;
+    }
+    ctx.r10.u64 = ctx.r4.u64;
+    ctx.r3.u64 = ctx.r11.u64;
+    cr6.compare<uint32_t>(ctx.r11.u32, ctx.r4.u32, ctx.xer);
+    if (cr6.eq) return;
+
+    int iter = 0;
+    while (++iter <= 32) {
+        ctx.r11.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0x1;
+        ctx.r10.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0xFFFFFFFE;
+        ctx.r11.s64 = ctx.r11.s64 + 6;
+        ctx.r9.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 2) & 0xFFFFFFFC;
+        ctx.r11.u64 = PPC_LOAD_U32(ctx.r9.u32 + ctx.r3.u32);
+        cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+        if (cr6.eq) {
+            PPC_STORE_U32(ctx.r9.u32 + ctx.r3.u32, ctx.r4.u32);
+            PPC_STORE_U32(ctx.r4.u32 + 20, ctx.r3.u32);
+            ctx.r3.s64 = 0;
+            return;
+        }
+        ctx.r3.u64 = ctx.r11.u64;
+        cr6.compare<uint32_t>(ctx.r11.u32, ctx.r4.u32, ctx.xer);
+        if (cr6.eq) return;
+    }
+    LOGF_WARNING("[sub_834ED4D8] Depth limit 32 reached! tree=0x{:08X} node=0x{:08X}", ctx.r3.u32, ctx.r4.u32);
+    ctx.r3.s64 = 0;
+}
+
+PPC_FUNC(sub_834ED550)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    ctx.r11.s64 = 0;
+    PPC_STORE_U32(ctx.r4.u32 + 8, ctx.r11.u32);
+    PPC_STORE_U32(ctx.r4.u32 + 4, ctx.r11.u32);
+    PPC_STORE_U32(ctx.r4.u32 + 0, ctx.r11.u32);
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) {
+        PPC_STORE_U32(ctx.r3.u32 + 0, ctx.r4.u32);
+        PPC_STORE_U32(ctx.r4.u32 + 0, ctx.r3.u32);
+        ctx.r3.s64 = 0;
+        return;
+    }
+    ctx.r3.u64 = ctx.r11.u64;
+    ctx.r8.u64 = PPC_LOAD_U32(ctx.r4.u32 + 16);
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);
+    ctx.r10.u64 = ctx.r8.u64;
+    cr6.compare<uint32_t>(ctx.r11.u32, ctx.r8.u32, ctx.xer);
+    if (cr6.eq) return;
+
+    int iter = 0;
+    uint32_t visited[64];
+    while (++iter <= 48) {
+        visited[iter - 1] = ctx.r3.u32;
+        ctx.r11.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0x1;
+        ctx.r10.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0xFFFFFFFE;
+        ctx.r11.s64 = ctx.r11.s64 + 1;
+        ctx.r9.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 2) & 0xFFFFFFFC;
+        ctx.r11.u64 = PPC_LOAD_U32(ctx.r9.u32 + ctx.r3.u32);
+        cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+        if (cr6.eq) {
+            PPC_STORE_U32(ctx.r9.u32 + ctx.r3.u32, ctx.r4.u32);
+            PPC_STORE_U32(ctx.r4.u32 + 0, ctx.r3.u32);
+            ctx.r3.s64 = 0;
+            return;
+        }
+        ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);
+        ctx.r3.u64 = ctx.r11.u64;
+        cr6.compare<uint32_t>(ctx.r9.u32, ctx.r8.u32, ctx.xer);
+        if (cr6.eq) return;
+    }
+    LOGF_WARNING("[sub_834ED550] Depth limit reached! node=0x{:08X} key=0x{:08X} cur=0x{:08X} curKey=0x{:08X} visited[0]=0x{:08X} visited[1]=0x{:08X}",
+                 ctx.r4.u32, ctx.r8.u32, ctx.r3.u32, ctx.r9.u32, visited[0], visited[1]);
+    ctx.r3.s64 = 0;
+}
+
+PPC_FUNC(sub_834ED5D8)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    ctx.r11.s64 = 0;
+    PPC_STORE_U32(ctx.r4.u32 + 16, ctx.r11.u32);
+    PPC_STORE_U32(ctx.r4.u32 + 12, ctx.r11.u32);
+    PPC_STORE_U32(ctx.r4.u32 + 8, ctx.r11.u32);
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) {
+        PPC_STORE_U32(ctx.r3.u32 + 0, ctx.r4.u32);
+        PPC_STORE_U32(ctx.r4.u32 + 8, ctx.r3.u32);
+        ctx.r3.s64 = 0;
+        return;
+    }
+    ctx.r3.u64 = ctx.r11.u64;
+    ctx.r8.u64 = PPC_LOAD_U32(ctx.r4.u32 + 36);
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 36);
+    ctx.r10.u64 = ctx.r8.u64;
+    cr6.compare<uint32_t>(ctx.r11.u32, ctx.r8.u32, ctx.xer);
+    if (cr6.eq) return;
+
+    int iter = 0;
+    while (++iter <= 32) {
+        ctx.r11.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0x1;
+        ctx.r10.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0xFFFFFFFE;
+        ctx.r11.s64 = ctx.r11.s64 + 3;
+        ctx.r9.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 2) & 0xFFFFFFFC;
+        ctx.r11.u64 = PPC_LOAD_U32(ctx.r9.u32 + ctx.r3.u32);
+        cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+        if (cr6.eq) {
+            PPC_STORE_U32(ctx.r9.u32 + ctx.r3.u32, ctx.r4.u32);
+            PPC_STORE_U32(ctx.r4.u32 + 8, ctx.r3.u32);
+            ctx.r3.s64 = 0;
+            return;
+        }
+        ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 36);
+        ctx.r3.u64 = ctx.r11.u64;
+        cr6.compare<uint32_t>(ctx.r9.u32, ctx.r8.u32, ctx.xer);
+        if (cr6.eq) return;
+    }
+    LOGF_WARNING("[sub_834ED5D8] Depth limit 32 reached! tree=0x{:08X} node=0x{:08X} key=0x{:08X}",
+                 ctx.r3.u32, ctx.r4.u32, ctx.r8.u32);
+    ctx.r3.s64 = 0;
+}
+
+// Cycle-guarded spine/trie walk (sub_834F2E48)
+PPC_FUNC(sub_834F2E48)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    PPCRegister temp{};
+
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    ctx.r3.s64 = 0;
+    ctx.r7.s64 = -1;
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    if (cr6.eq) return;
+
+    ctx.r6.s64 = 0;
+    ctx.r8.u64 = ctx.r4.u64;
+
+    int iter1 = 0;
+    while (++iter1 <= 32)
+    {
+        ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);
+        ctx.r10.s64 = ctx.r4.s64 - ctx.r9.s64;
+        cr6.compare<uint32_t>(ctx.r9.u32, ctx.r4.u32, ctx.xer);
+        if (!cr6.gt)
+        {
+            cr6.compare<uint32_t>(ctx.r10.u32, ctx.r7.u32, ctx.xer);
+            if (cr6.lt)
+            {
+                ctx.r3.u64 = ctx.r11.u64;
+                ctx.r7.u64 = ctx.r10.u64;
+                cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+                if (cr6.eq) return;
+            }
+        }
+        ctx.r9.u64 = __builtin_rotateleft64(ctx.r8.u32 | (ctx.r8.u64 << 32), 1) & 0x1;
+        ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+        ctx.r9.s64 = ctx.r9.s64 + 1;
+        cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+        ctx.r5.u64 = __builtin_rotateleft64(ctx.r9.u32 | (ctx.r9.u64 << 32), 2) & 0xFFFFFFFC;
+        ctx.r11.u64 = PPC_LOAD_U32(ctx.r5.u32 + ctx.r11.u32);
+        if (!cr6.eq && ctx.r10.u32 != ctx.r11.u32)
+        {
+            ctx.r6.u64 = ctx.r10.u64;
+        }
+        if (ctx.r11.u32 == 0)
+        {
+            goto loc_834F2ECC;
+        }
+        ctx.r8.u64 = __builtin_rotateleft64(ctx.r8.u32 | (ctx.r8.u64 << 32), 1) & 0xFFFFFFFE;
+    }
+
+loc_834F2ECC:
+    ctx.r11.u64 = ctx.r6.u64;
+    cr6.compare<uint32_t>(ctx.r6.u32, 0, ctx.xer);
+    if (cr6.eq) return;
+
+    int iter2 = 0;
+    while (++iter2 <= 64)
+    {
+        ctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);
+        ctx.r10.s64 = ctx.r4.s64 - ctx.r9.s64;
+        cr6.compare<uint32_t>(ctx.r9.u32, ctx.r4.u32, ctx.xer);
+        if (!cr6.gt)
+        {
+            cr6.compare<uint32_t>(ctx.r10.u32, ctx.r7.u32, ctx.xer);
+            if (cr6.lt)
+            {
+                ctx.r7.u64 = ctx.r10.u64;
+                ctx.r3.u64 = ctx.r11.u64;
+            }
+        }
+        ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);
+        ctx.xer.ca = ctx.r10.u32 > 0;
+        ctx.r9.s64 = ctx.r10.s64 + -1;
+        temp.u8 = (~ctx.r9.u32 + ctx.r10.u32 < ~ctx.r9.u32) | (~ctx.r9.u32 + ctx.r10.u32 + ctx.xer.ca < ctx.xer.ca);
+        ctx.r10.u64 = ~ctx.r9.u64 + ctx.r10.u64 + ctx.xer.ca;
+        ctx.xer.ca = temp.u8;
+        ctx.r8.s64 = ctx.r10.s64 + 1;
+        ctx.r6.u64 = __builtin_rotateleft64(ctx.r8.u32 | (ctx.r8.u64 << 32), 2) & 0xFFFFFFFC;
+        ctx.r11.u64 = PPC_LOAD_U32(ctx.r6.u32 + ctx.r11.u32);
+        cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+        if (cr6.eq) return;
+    }
+    LOGF_WARNING("[sub_834F2E48] Cycle detected in spine walk! Breaking cycle. result=0x{:08X}", ctx.r3.u32);
+}
+
+// Loop-guarded memory block allocation spin trap (sub_823EBC80)
+PPC_FUNC(sub_823EBC80)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    uint32_t ea{};
+    __savegprlr_28(ctx, base);
+    ea = -128 + ctx.r1.u32;
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+    ctx.r11.s64 = 0;
+    ctx.r31.u64 = ctx.r3.u64;
+    ctx.r29.u64 = ctx.r4.u64;
+    PPC_STORE_U8(ctx.r1.u32 + 80, ctx.r11.u8);
+    ctx.r28.s64 = ctx.r3.s64 + 20;
+
+    int loopCount = 0;
+loc_823EBCA0:
+    if (++loopCount > 200) {
+        LOGF_WARNING("[sub_823EBC80] Loop exceeded 200 iterations (allocator spin trap)! Breaking out.");
+        ctx.r3.s64 = 0;
+        ctx.r1.s64 = ctx.r1.s64 + 128;
+        __restgprlr_28(ctx, base);
+        return;
+    }
+
+    ctx.r5.s64 = ctx.r1.s64 + 84;
+    ctx.r4.u64 = ctx.r29.u64;
+    ctx.r3.u64 = ctx.r28.u64;
+    sub_823EBB58(ctx, base);
+    cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+    if (!cr6.eq) goto loc_823EBD24;
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 16);
+    ctx.r3.u64 = ctx.r31.u64;
+    ctx.r30.s64 = ctx.r11.s64 + 1;
+    sub_834F0450(ctx, base);
+    ctx.r6.u64 = ctx.r3.u64;
+    ctx.r5.u64 = ctx.r30.u64;
+    ctx.r4.u64 = ctx.r29.u64;
+    ctx.r3.u64 = ctx.r31.u64;
+    ctx.r7.s64 = ctx.r1.s64 + 80;
+    sub_8350DDE8(ctx, base);
+    cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+    if (!cr6.eq) goto loc_823EBD0C;
+    ctx.r10.u64 = PPC_LOAD_U8(ctx.r1.u32 + 80);
+    cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+    if (cr6.eq) goto loc_823EBD0C;
+    ctx.r7.s64 = ctx.r1.s64 + 80;
+    ctx.r6.u64 = PPC_LOAD_U32(ctx.r31.u32 + 504);
+    ctx.r5.u64 = ctx.r30.u64;
+    ctx.r4.u64 = ctx.r29.u64;
+    ctx.r3.u64 = ctx.r31.u64;
+    sub_8350DDE8(ctx, base);
+loc_823EBD0C:
+    ctx.r10.u64 = PPC_LOAD_U8(ctx.r1.u32 + 80);
+    cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+    if (!cr6.eq) goto loc_823EBCA0;
+    ctx.r3.s64 = 0;
+    ctx.r1.s64 = ctx.r1.s64 + 128;
+    __restgprlr_28(ctx, base);
+    return;
+loc_823EBD24:
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r1.u32 + 84);
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);
+    ctx.r10.s64 = ctx.r10.s64 + 1;
+    PPC_STORE_U32(ctx.r11.u32 + 16, ctx.r10.u32);
+    ctx.r1.s64 = ctx.r1.s64 + 128;
+    __restgprlr_28(ctx, base);
+    return;
+}
+
+// Cycle-guarded BST node unlink (sub_8248EAE0)
+PPC_FUNC(sub_8248EAE0)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    PPCRegister temp{};
+    // lwz r11,0(r4)
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r4.u32 + 0);
+    // lwz r8,20(r4)
+    ctx.r8.u64 = PPC_LOAD_U32(ctx.r4.u32 + 20);
+    // cmplw cr6,r11,r4
+    cr6.compare<uint32_t>(ctx.r11.u32, ctx.r4.u32, ctx.xer);
+    // beq cr6,0x8248eb00
+    if (cr6.eq) goto loc_8248EB00;
+    // lwz r10,4(r4)
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r4.u32 + 4);
+    // stw r11,0(r10)
+    PPC_STORE_U32(ctx.r10.u32 + 0, ctx.r11.u32);
+    // stw r10,4(r11)
+    PPC_STORE_U32(ctx.r11.u32 + 4, ctx.r10.u32);
+    // b 0x8248eb54
+    goto loc_8248EB54;
+loc_8248EB00:
+    // lwz r11,28(r4)
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r4.u32 + 28);
+    // addi r9,r4,28
+    ctx.r9.s64 = ctx.r4.s64 + 28;
+    // cmplwi cr6,r11,0
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    // bne cr6,0x8248eb20
+    if (!cr6.eq) goto loc_8248EB20;
+    // lwz r11,24(r4)
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r4.u32 + 24);
+    // addi r9,r4,24
+    ctx.r9.s64 = ctx.r4.s64 + 24;
+    // cmplwi cr6,r11,0
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    // beq cr6,0x8248eb54
+    if (cr6.eq) goto loc_8248EB54;
+loc_8248EB20:
+    {
+        uint32_t loop_guard = 0;
+        while (true) {
+            if (++loop_guard > 5000) {
+                LOGF_ERROR("[sub_8248EAE0] CYCLE DETECTED in BST node unlink! Breaking cycle. r3=0x{:08X} r4=0x{:08X} r11=0x{:08X}",
+                           ctx.r3.u32, ctx.r4.u32, ctx.r11.u32);
+                PPC_STORE_U32(ctx.r9.u32 + 0, 0);
+                goto loc_8248EB54;
+            }
+            // lwz r7,28(r11)
+            ctx.r7.u64 = PPC_LOAD_U32(ctx.r11.u32 + 28);
+            // addi r10,r11,28
+            ctx.r10.s64 = ctx.r11.s64 + 28;
+            // cmplwi cr6,r7,0
+            cr6.compare<uint32_t>(ctx.r7.u32, 0, ctx.xer);
+            // bne cr6,0x8248eb40
+            if (!cr6.eq) {
+                ctx.r11.u64 = PPC_LOAD_U32(ctx.r10.u32 + 0);
+                ctx.r9.u64 = ctx.r10.u64;
+                continue;
+            }
+            // lwz r7,24(r11)
+            ctx.r7.u64 = PPC_LOAD_U32(ctx.r11.u32 + 24);
+            // addi r10,r11,24
+            ctx.r10.s64 = ctx.r11.s64 + 24;
+            // cmplwi cr6,r7,0
+            cr6.compare<uint32_t>(ctx.r7.u32, 0, ctx.xer);
+            // beq cr6,0x8248eb4c
+            if (cr6.eq) {
+                ctx.r10.s64 = 0;
+                PPC_STORE_U32(ctx.r9.u32 + 0, ctx.r10.u32);
+                break;
+            }
+            ctx.r11.u64 = PPC_LOAD_U32(ctx.r10.u32 + 0);
+            ctx.r9.u64 = ctx.r10.u64;
+        }
+    }
+loc_8248EB54:
+    // cmplwi cr6,r8,0
+    cr6.compare<uint32_t>(ctx.r8.u32, 0, ctx.xer);
+    // beqlr cr6
+    if (cr6.eq) return;
+    // lwz r10,32(r4)
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r4.u32 + 32);
+    // addi r10,r10,1
+    ctx.r10.s64 = ctx.r10.s64 + 1;
+    // rlwinm r10,r10,2,0,29
+    ctx.r10.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 2) & 0xFFFFFFFC;
+    // lwzx r9,r10,r3
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + ctx.r3.u32);
+    // cmplw cr6,r4,r9
+    cr6.compare<uint32_t>(ctx.r4.u32, ctx.r9.u32, ctx.xer);
+    // bne cr6,0x8248eb9c
+    if (!cr6.eq) goto loc_8248EB9C;
+    // stwx r11,r10,r3
+    PPC_STORE_U32(ctx.r10.u32 + ctx.r3.u32, ctx.r11.u32);
+    // cmplwi cr6,r11,0
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    // bne cr6,0x8248ebc0
+    if (!cr6.eq) goto loc_8248EBC0;
+    // lwz r11,32(r4)
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r4.u32 + 32);
+    // li r10,1
+    ctx.r10.s64 = 1;
+    // lwz r9,0(r3)
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    // slw r8,r10,r11
+    ctx.r8.u64 = ctx.r11.u8 & 0x20 ? 0 : (ctx.r10.u32 << (ctx.r11.u8 & 0x3F));
+    // andc r7,r9,r8
+    ctx.r7.u64 = ctx.r9.u64 & ~ctx.r8.u64;
+    // stw r7,0(r3)
+    PPC_STORE_U32(ctx.r3.u32 + 0, ctx.r7.u32);
+    // blr 
+    return;
+loc_8248EB9C:
+    // lwz r10,24(r8)
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r8.u32 + 24);
+    // cmplwi cr6,r11,0
+    cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+    // subf r9,r10,r4
+    ctx.r9.s64 = ctx.r4.s64 - ctx.r10.s64;
+    // addic r7,r9,-1
+    ctx.xer.ca = ctx.r9.u32 > 0;
+    ctx.r7.s64 = ctx.r9.s64 + -1;
+    // subfe r10,r7,r9
+    temp.u8 = (~ctx.r7.u32 + ctx.r9.u32 < ~ctx.r7.u32) | (~ctx.r7.u32 + ctx.r9.u32 + ctx.xer.ca < ctx.xer.ca);
+    ctx.r10.u64 = ~ctx.r7.u64 + ctx.r9.u64 + ctx.xer.ca;
+    ctx.xer.ca = temp.u8;
+    // addi r6,r10,6
+    ctx.r6.s64 = ctx.r10.s64 + 6;
+    // rlwinm r5,r6,2,0,29
+    ctx.r5.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 2) & 0xFFFFFFFC;
+    // stwx r11,r5,r8
+    PPC_STORE_U32(ctx.r5.u32 + ctx.r8.u32, ctx.r11.u32);
+    // beqlr cr6
+    if (cr6.eq) return;
+loc_8248EBC0:
+    // stw r8,20(r11)
+    PPC_STORE_U32(ctx.r11.u32 + 20, ctx.r8.u32);
+    // lwz r10,24(r4)
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r4.u32 + 24);
+    // cmplwi cr6,r10,0
+    cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+    // beq cr6,0x8248ebd8
+    if (cr6.eq) goto loc_8248EBD8;
+    // stw r10,24(r11)
+    PPC_STORE_U32(ctx.r11.u32 + 24, ctx.r10.u32);
+    // stw r11,20(r10)
+    PPC_STORE_U32(ctx.r10.u32 + 20, ctx.r11.u32);
+loc_8248EBD8:
+    // lwz r10,28(r4)
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r4.u32 + 28);
+    // cmplwi cr6,r10,0
+    cr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);
+    // beqlr cr6
+    if (cr6.eq) return;
+    // stw r10,28(r11)
+    PPC_STORE_U32(ctx.r11.u32 + 28, ctx.r10.u32);
+    // stw r11,20(r10)
+    PPC_STORE_U32(ctx.r10.u32 + 20, ctx.r11.u32);
+    return;
+}
+
+// Guarded implementation of sub_8351A9E8 (destructor / callback dispatcher)
+PPC_FUNC(sub_8351A9E8)
+{
+    PPC_FUNC_PROLOGUE();
+    uint32_t ea = -96 + ctx.r1.u32;
+    PPC_STORE_U32(ctx.r1.u32 - 8, ctx.r12.u32);
+    PPC_STORE_U64(ctx.r1.u32 - 16, ctx.r31.u64);
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+
+    if (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 24) {
+        ctx.r31.u64 = PPC_LOAD_U32(ctx.r3.u32 + 20);
+        if (ctx.r31.u32 != 0 && ctx.r31.u32 >= 0x10000 && ctx.r31.u32 < PPC_MEMORY_SIZE - 24) {
+            uint32_t r31_val = ctx.r31.u32;
+            PPC_STORE_U32(r31_val + 12, ctx.r4.u32);
+            ctx.r4.s64 = (int64_t)r31_val + 16;
+            PPC_STORE_U32(r31_val + 20, r31_val);
+
+            uint32_t obj = PPC_LOAD_U32(r31_val + 8);
+            if (obj >= 0x10000 && obj < PPC_MEMORY_SIZE - 4) {
+                uint32_t vtbl1 = PPC_LOAD_U32(obj + 0);
+                if (vtbl1 >= 0x10000 && vtbl1 < PPC_MEMORY_SIZE - 24) {
+                    uint32_t fn1 = PPC_LOAD_U32(vtbl1 + 20);
+                    if (fn1 >= 0x82000000 && fn1 < 0x83E00000) {
+                        ctx.r3.u64 = obj;
+                        ctx.r10.u64 = fn1;
+                        PPCFunc* target1 = PPC_LOOKUP_FUNC(base, fn1);
+                        if (target1) {
+                            target1(ctx, base);
+                        }
+                    } else {
+                        LOGF_WARNING("[sub_8351A9E8] Skipping invalid indirect call fn1=0x{:08X} (vtbl1=0x{:08X}, obj=0x{:08X})", fn1, vtbl1, obj);
+                    }
+                }
+
+                // Second indirect call
+                uint32_t vtbl2 = PPC_LOAD_U32(obj + 0);
+                if (vtbl2 >= 0x10000 && vtbl2 < PPC_MEMORY_SIZE - 28) {
+                    uint32_t fn2 = PPC_LOAD_U32(vtbl2 + 24);
+                    if (fn2 >= 0x82000000 && fn2 < 0x83E00000) {
+                        ctx.r3.u64 = obj;
+                        ctx.r4.u64 = PPC_LOAD_U32(r31_val + 12);
+                        ctx.r8.u64 = fn2;
+                        PPCFunc* target2 = PPC_LOOKUP_FUNC(base, fn2);
+                        if (target2) {
+                            target2(ctx, base);
+                        }
+                    } else {
+                        LOGF_WARNING("[sub_8351A9E8] Skipping invalid indirect call fn2=0x{:08X} (vtbl2=0x{:08X}, obj=0x{:08X})", fn2, vtbl2, obj);
+                    }
+                }
+            }
+        }
+    }
+
+    ctx.r1.s64 = ctx.r1.s64 + 96;
+    ctx.r12.u64 = PPC_LOAD_U32(ctx.r1.u32 - 8);
+    ctx.r31.u64 = PPC_LOAD_U64(ctx.r1.u32 - 16);
+}
+
+PPC_EXTERN_FUNC(sub_834FB050);
+PPC_EXTERN_FUNC(sub_834FCA30);
+
+// Guarded implementation of sub_83508578 (memory allocator unlinking & callback)
+PPC_FUNC(sub_83508578)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCRegister ctr{};
+    PPCCRRegister cr6{};
+    uint32_t ea = -112 + ctx.r1.u32;
+    __savegprlr_29(ctx, base);
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+
+    ctx.r30.u64 = ctx.r3.u64;
+    ctx.r31.u64 = ctx.r4.u64;
+    ctx.r29.u64 = (ctx.r4.u32 >= 0x10000 && ctx.r4.u32 < PPC_MEMORY_SIZE - 28) ? PPC_LOAD_U32(ctx.r4.u32 + 24) : 0;
+
+    if (ctx.r30.u32 >= 0x10000 && ctx.r30.u32 < PPC_MEMORY_SIZE - 548) {
+        ctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + 544);
+        cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+        if (!cr6.eq && ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 4) {
+            ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+            ctx.r5.u64 = ctx.r29.u64;
+            ctx.r4.u64 = PPC_LOAD_U32(ctx.r30.u32 + 0);
+            if (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 12) {
+                ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);
+                ctr.u64 = ctx.r10.u64;
+                if (ctr.u32 >= 0x82000000 && ctr.u32 < 0x83E00000) {
+                    PPCFunc* target = PPC_LOOKUP_FUNC(base, ctr.u32);
+                    if (target) target(ctx, base);
+                }
+            }
+        }
+
+        ctx.r11.u64 = PPC_LOAD_U32(ctx.r30.u32 + 520);
+        ctx.r10.s64 = -2083782656; // 0x83CC0000
+        ctx.r5.u64 = ctx.r29.u64;
+        ctx.r9.s64 = ctx.r11.s64 - ctx.r29.s64;
+        PPC_STORE_U32(ctx.r30.u32 + 520, ctx.r9.u32);
+
+        ctx.r4.u64 = (ctx.r31.u32 >= 0x10000 && ctx.r31.u32 < PPC_MEMORY_SIZE - 32) ? PPC_LOAD_U32(ctx.r31.u32 + 28) : 0;
+        ctx.r3.u64 = PPC_LOAD_U32(ctx.r10.u32 + -40);
+        sub_834FB050(ctx, base);
+
+        ctx.r7.u64 = (ctx.r31.u32 >= 0x10000 && ctx.r31.u32 < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U32(ctx.r31.u32 + 16) : 0;
+        ctx.r6.u64 = (ctx.r31.u32 >= 0x10000 && ctx.r31.u32 < PPC_MEMORY_SIZE - 16) ? PPC_LOAD_U16(ctx.r31.u32 + 14) : 0;
+        ctx.r8.s64 = 1;
+        ctx.r5.u64 = __builtin_rotateleft64(ctx.r7.u32 | (ctx.r7.u64 << 32), 0) & 0x80000000;
+        ctx.r6.u64 = ctx.r6.u8 & 0x20 ? 0 : (ctx.r8.u32 << (ctx.r6.u8 & 0x3F));
+        cr6.compare<uint32_t>(ctx.r5.u32, 0, ctx.xer);
+        if (cr6.eq) {
+            cr6.compare<uint32_t>(ctx.r6.u32, 4096, ctx.xer);
+            if (!cr6.gt) {
+                ctx.r6.s64 = 4096;
+            }
+            ctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + 4);
+            ctx.r5.u64 = ctx.r29.u64;
+            ctx.r4.u64 = (ctx.r31.u32 >= 0x10000 && ctx.r31.u32 < PPC_MEMORY_SIZE - 32) ? PPC_LOAD_U32(ctx.r31.u32 + 28) : 0;
+            if (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 4) {
+                ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+                if (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 24) {
+                    ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 20);
+                    ctr.u64 = ctx.r10.u64;
+                    if (ctr.u32 >= 0x82000000 && ctr.u32 < 0x83E00000) {
+                        PPCFunc* target = PPC_LOOKUP_FUNC(base, ctr.u32);
+                        if (target) target(ctx, base);
+                    }
+                }
+            }
+        } else {
+            ctx.r11.u64 = __builtin_rotateleft32(ctx.r7.u32, 0);
+            ctx.r10.u64 = PPC_LOAD_U32(ctx.r30.u32 + 520);
+            ctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + 4);
+            ctx.r9.u64 = ctx.r11.u32 & 0x7FFFFFFF;
+            ctx.r8.s64 = ctx.r10.s64 - ctx.r9.s64;
+            PPC_STORE_U32(ctx.r30.u32 + 520, ctx.r8.u32);
+            if (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 4) {
+                ctx.r5.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+                ctx.r4.u64 = (ctx.r31.u32 >= 0x10000 && ctx.r31.u32 < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U32(ctx.r31.u32 + 16) : 0;
+                ctx.r11.u64 = ctx.r4.u32 & 0x7FFFFFFF;
+                ctx.r7.u64 = (ctx.r31.u32 >= 0x10000 && ctx.r31.u32 < PPC_MEMORY_SIZE - 32) ? PPC_LOAD_U32(ctx.r31.u32 + 28) : 0;
+                if (ctx.r5.u32 >= 0x10000 && ctx.r5.u32 < PPC_MEMORY_SIZE - 36) {
+                    ctx.r10.u64 = PPC_LOAD_U32(ctx.r5.u32 + 32);
+                    ctx.r5.u64 = ctx.r11.u64 + ctx.r29.u64;
+                    ctx.r4.s64 = ctx.r7.s64 - ctx.r11.s64;
+                    ctr.u64 = ctx.r10.u64;
+                    if (ctr.u32 >= 0x82000000 && ctr.u32 < 0x83E00000) {
+                        PPCFunc* target = PPC_LOOKUP_FUNC(base, ctr.u32);
+                        if (target) target(ctx, base);
+                    }
+                }
+            }
+        }
+    }
+
+    if (ctx.r31.u32 >= 0x10000 && ctx.r31.u32 < PPC_MEMORY_SIZE - 12) {
+        ctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+        ctx.r4.u64 = ctx.r31.u64;
+        ctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 4);
+        if (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 8) {
+            PPC_STORE_U32(ctx.r11.u32 + 4, ctx.r10.u32);
+        }
+        ctx.r9.u64 = PPC_LOAD_U32(ctx.r31.u32 + 4);
+        ctx.r8.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+        if (ctx.r9.u32 >= 0x10000 && ctx.r9.u32 < PPC_MEMORY_SIZE - 4) {
+            PPC_STORE_U32(ctx.r9.u32 + 0, ctx.r8.u32);
+        }
+        ctx.r5.u64 = PPC_LOAD_U32(ctx.r31.u32 + 8);
+        ctx.r3.u64 = (ctx.r30.u32 >= 0x10000 && ctx.r30.u32 < PPC_MEMORY_SIZE - 12) ? PPC_LOAD_U32(ctx.r30.u32 + 8) : 0;
+        sub_834FCA30(ctx, base);
+    }
+
+    ctx.r1.s64 = ctx.r1.s64 + 112;
+    __restgprlr_29(ctx, base);
+}
+
+PPC_EXTERN_FUNC(__savegprlr_27);
+PPC_EXTERN_FUNC(__restgprlr_27);
+PPC_EXTERN_FUNC(sub_83549B08);
+PPC_EXTERN_FUNC(sub_83548870);
+PPC_EXTERN_FUNC(sub_82400C88);
+PPC_EXTERN_FUNC(sub_83523A10);
+PPC_EXTERN_FUNC(sub_835238D8);
+
+// Guarded implementation of sub_83549B08 (hash table growth check)
+PPC_FUNC(sub_83549B08)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 4) return;
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    if (ctx.r11.u32 == 0) {
+        ctx.r5.s64 = 4;
+        sub_83548870(ctx, base);
+        return;
+    }
+    if (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 8) return;
+    uint32_t count = PPC_LOAD_U32(ctx.r11.u32 + 0);
+    uint32_t mask = PPC_LOAD_U32(ctx.r11.u32 + 4);
+    uint32_t cap = mask + 1;
+    if (count >= cap || (count * 5 > cap * 4)) {
+        ctx.r5.u64 = (uint64_t)cap * 2;
+        if (ctx.r5.u32 < 4) ctx.r5.u32 = 4;
+        sub_83548870(ctx, base);
+    }
+}
+
+// Guarded implementation of sub_83532920 (hash table insertion with loop bounding)
+PPC_FUNC(sub_83532920)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCCRRegister cr6{};
+    uint32_t ea = -128 + ctx.r1.u32;
+    __savegprlr_27(ctx, base);
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+
+    ctx.r31.u64 = ctx.r3.u64;
+    ctx.r27.u64 = ctx.r5.u64;
+    ctx.r30.u64 = ctx.r6.u64;
+
+    sub_83549B08(ctx, base);
+
+    if (ctx.r31.u32 < 0x10000 || ctx.r31.u32 >= PPC_MEMORY_SIZE - 4) {
+        ctx.r1.s64 = ctx.r1.s64 + 128;
+        __restgprlr_27(ctx, base);
+        return;
+    }
+
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+    if (ctx.r10.u32 < 0x10000 || ctx.r10.u32 >= PPC_MEMORY_SIZE - 8) {
+        ctx.r1.s64 = ctx.r1.s64 + 128;
+        __restgprlr_27(ctx, base);
+        return;
+    }
+
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 4);
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r10.u32 + 0);
+    ctx.r30.u64 = ctx.r9.u64 & ctx.r30.u64;
+    ctx.r8.s64 = ctx.r11.s64 + 1;
+    ctx.r11.u64 = __builtin_rotateleft64(ctx.r30.u32 | (ctx.r30.u64 << 32), 1) & 0xFFFFFFFE;
+    PPC_STORE_U32(ctx.r10.u32 + 0, ctx.r8.u32);
+    ctx.r7.u64 = ctx.r30.u64 + ctx.r11.u64;
+    ctx.r10.u64 = __builtin_rotateleft64(ctx.r7.u32 | (ctx.r7.u64 << 32), 2) & 0xFFFFFFFC;
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+    ctx.r10.u64 = ctx.r10.u64 + ctx.r11.u64;
+    ctx.r6.u64 = PPC_LOAD_U32(ctx.r10.u32 + 8);
+    ctx.r28.s64 = ctx.r10.s64 + 8;
+    cr6.compare<int32_t>(ctx.r6.s32, -2, ctx.xer);
+    if (!cr6.eq) goto loc_835329A4;
+
+    ctx.r11.s64 = -1;
+    PPC_STORE_U32(ctx.r28.u32 + 0, ctx.r11.u32);
+    ctx.r3.u64 = PPC_LOAD_U32(ctx.r27.u32 + 0);
+    cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+    if (!cr6.eq) {
+        sub_82400C88(ctx, base);
+    }
+loc_83532990:
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r27.u32 + 0);
+    PPC_STORE_U32(ctx.r28.u32 + 8, ctx.r11.u32);
+    PPC_STORE_U32(ctx.r28.u32 + 4, ctx.r30.u32);
+    ctx.r1.s64 = ctx.r1.s64 + 128;
+    __restgprlr_27(ctx, base);
+    return;
+
+loc_835329A4:
+    ctx.r29.u64 = ctx.r30.u64;
+    {
+        uint32_t mask = (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 8) ? PPC_LOAD_U32(ctx.r11.u32 + 4) : 0;
+        uint32_t max_probe = (mask + 1) * 2 + 16;
+        uint32_t probe_count = 0;
+        while (true) {
+            if (++probe_count > max_probe) {
+                LOGF_WARNING("[sub_83532920] Table full! Linear probe exceeded {} iters (mask={})", probe_count, mask);
+                ctx.r1.s64 = ctx.r1.s64 + 128;
+                __restgprlr_27(ctx, base);
+                return;
+            }
+            ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);
+            ctx.r9.s64 = ctx.r29.s64 + 1;
+            ctx.r29.u64 = ctx.r10.u64 & ctx.r9.u64;
+            ctx.r10.u64 = __builtin_rotateleft64(ctx.r29.u32 | (ctx.r29.u64 << 32), 1) & 0xFFFFFFFE;
+            ctx.r8.u64 = ctx.r29.u64 + ctx.r10.u64;
+            ctx.r10.u64 = __builtin_rotateleft64(ctx.r8.u32 | (ctx.r8.u64 << 32), 2) & 0xFFFFFFFC;
+            ctx.r10.u64 = ctx.r10.u64 + ctx.r11.u64;
+            ctx.r3.s64 = ctx.r10.s64 + 8;
+            ctx.r7.u64 = PPC_LOAD_U32(ctx.r10.u32 + 8);
+            cr6.compare<int32_t>(ctx.r7.s32, -2, ctx.xer);
+            if (cr6.eq) break;
+        }
+    }
+
+    ctx.r10.u64 = PPC_LOAD_U32(ctx.r28.u32 + 4);
+    cr6.compare<uint32_t>(ctx.r10.u32, ctx.r30.u32, ctx.xer);
+    if (!cr6.eq) goto loc_83532A0C;
+    cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+    if (!cr6.eq) {
+        ctx.r4.u64 = ctx.r28.u64;
+        sub_83523A10(ctx, base);
+    }
+loc_835329F0:
+    ctx.r3.s64 = ctx.r28.s64 + 8;
+    ctx.r4.u64 = ctx.r27.u64;
+    sub_835238D8(ctx, base);
+    PPC_STORE_U32(ctx.r28.u32 + 0, ctx.r29.u32);
+    PPC_STORE_U32(ctx.r28.u32 + 4, ctx.r30.u32);
+    ctx.r1.s64 = ctx.r1.s64 + 128;
+    __restgprlr_27(ctx, base);
+    return;
+
+loc_83532A0C:
+    ctx.r9.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0xFFFFFFFE;
+    ctx.r10.u64 = ctx.r10.u64 + ctx.r9.u64;
+    ctx.r10.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 2) & 0xFFFFFFFC;
+    ctx.r10.u64 = ctx.r10.u64 + ctx.r11.u64;
+    ctx.r31.s64 = ctx.r10.s64 + 8;
+    ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 8);
+    cr6.compare<int32_t>(ctx.r9.s32, ctx.r30.s32, ctx.xer);
+    if (cr6.eq) goto loc_83532A50;
+
+    {
+        uint32_t chain_count = 0;
+        while (true) {
+            if (++chain_count > 64) {
+                LOGF_WARNING("[sub_83532920] Collision chain cycle detected! iters={}", chain_count);
+                ctx.r1.s64 = ctx.r1.s64 + 128;
+                __restgprlr_27(ctx, base);
+                return;
+            }
+            ctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);
+            ctx.r9.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0xFFFFFFFE;
+            ctx.r10.u64 = ctx.r10.u64 + ctx.r9.u64;
+            ctx.r10.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 2) & 0xFFFFFFFC;
+            ctx.r10.u64 = ctx.r10.u64 + ctx.r11.u64;
+            ctx.r31.s64 = ctx.r10.s64 + 8;
+            ctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 8);
+            cr6.compare<int32_t>(ctx.r9.s32, ctx.r30.s32, ctx.xer);
+            if (cr6.eq) break;
+        }
+    }
+
+loc_83532A50:
+    cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+    if (!cr6.eq) {
+        ctx.r4.u64 = ctx.r28.u64;
+        sub_83523A10(ctx, base);
+    }
+loc_83532A60:
+    PPC_STORE_U32(ctx.r31.u32 + 0, ctx.r29.u32);
+    ctx.r3.s64 = ctx.r28.s64 + 8;
+    ctx.r4.u64 = ctx.r27.u64;
+    sub_835238D8(ctx, base);
+    ctx.r11.s64 = -1;
+    PPC_STORE_U32(ctx.r28.u32 + 4, ctx.r30.u32);
+    PPC_STORE_U32(ctx.r28.u32 + 0, ctx.r11.u32);
+    ctx.r1.s64 = ctx.r1.s64 + 128;
+    __restgprlr_27(ctx, base);
+}
+
+// Guarded implementation of sub_8266BB00 (display / window listener getter)
+PPC_FUNC(sub_8266BB00)
+{
+    static uint32_t s_dummyObj = 0;
+    auto get_dummy = [&]() -> uint32_t {
+        if (s_dummyObj == 0) {
+            void* objPtr = g_userHeap.Alloc(512);
+            memset(objPtr, 0, 512);
+            s_dummyObj = g_memory.MapVirtual(objPtr);
+
+            void* vtblPtr = g_userHeap.Alloc(1024);
+            memset(vtblPtr, 0, 1024);
+            uint32_t dummyVtbl = g_memory.MapVirtual(vtblPtr);
+
+            PPC_STORE_U32(s_dummyObj, dummyVtbl);
+            // Initialize vtable entries (256 methods) with sub_83549B4C (which is 'blr')
+            for (int i = 0; i < 256; ++i) {
+                PPC_STORE_U32(dummyVtbl + i * 4, 0x83549B4C);
+            }
+            LOGF_INFO("[sub_8266BB00] Initialized dummy listener object at 0x{:08X} (vtbl 0x{:08X})", s_dummyObj, dummyVtbl);
+        }
+        return s_dummyObj;
+    };
+
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 40) {
+        ctx.r3.u64 = get_dummy();
+        return;
+    }
+
+    uint32_t val = PPC_LOAD_U32(ctx.r3.u32 + 36);
+    if (val >= 0x10000 && val < PPC_MEMORY_SIZE - 256) {
+        uint32_t vtbl = PPC_LOAD_U32(val + 0);
+        if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE - 256) {
+            ctx.r3.u64 = val;
+            return;
+        }
+    }
+
+    ctx.r3.u64 = get_dummy();
+}
+
+// RAGE State transition function (sub_8229AD78)
+PPC_FUNC(sub_8229AD78)
+{
+    uint16_t oldState = (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 16) ? PPC_LOAD_U16(ctx.r3.u32 + 14) : 0;
+    if (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 16) {
+        PPC_STORE_U16(ctx.r3.u32 + 14, ctx.r4.u16);
+    }
+    LOGF_WARNING("===============================================================");
+    LOGF_WARNING("[RAGE_STATE] Transition: State {} -> State {} (obj=0x{:08X})", oldState, ctx.r4.u16, ctx.r3.u32);
+    LOGF_WARNING("===============================================================");
+}
+
+extern "C" PPC_FUNC(__imp__sub_829855F8);
+PPC_FUNC(sub_829855F8)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 32) {
+        ctx.r3.u64 = 0;
+        return;
+    }
+    __imp__sub_829855F8(ctx, base);
+}
+
+extern "C" PPC_FUNC(__imp__sub_82985550);
+PPC_FUNC(sub_82985550)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 32) {
+        ctx.r3.u64 = 0;
+        return;
+    }
+    __imp__sub_82985550(ctx, base);
+}
+
+extern "C" PPC_FUNC(__imp__sub_831E2DB8);
+PPC_FUNC(sub_831E2DB8)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 32) {
+        ctx.r3.s64 = -1;
+        return;
+    }
+    uint32_t obj = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    if (obj < 0x10000 || obj >= PPC_MEMORY_SIZE - 4) {
+        ctx.r3.s64 = -1;
+        return;
+    }
+    uint32_t vtbl = PPC_LOAD_U32(obj + 0);
+    if (vtbl < 0x10000 || vtbl >= PPC_MEMORY_SIZE - 28) {
+        ctx.r3.s64 = -1;
+        return;
+    }
+    uint32_t fn = PPC_LOAD_U32(vtbl + 24);
+    if (fn < 0x82000000 || fn >= 0x83E00000) {
+        ctx.r3.s64 = -1;
+        return;
+    }
+    __imp__sub_831E2DB8(ctx, base);
+}
+
+extern "C" PPC_FUNC(__imp__sub_829856D0);
+PPC_FUNC(sub_829856D0)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 32) {
+        ctx.r3.u64 = 0;
+        return;
+    }
+    __imp__sub_829856D0(ctx, base);
+}
+
+PPC_EXTERN_FUNC(sub_83210AF0);
+extern "C" PPC_FUNC(__imp__sub_82924148);
+PPC_FUNC(sub_82924148)
+{
+    PPCContext savedCtx = ctx;
+
+    uint32_t dictAddr = (uint32_t)-2087321600 - 30388; // 0x838A894C
+    uint32_t dict = (dictAddr >= 0x10000 && dictAddr < PPC_MEMORY_SIZE - 4) ? PPC_LOAD_U32(dictAddr) : 0;
+    if (dict == 0) {
+        ctx.r3.s64 = 0;
+        return;
+    }
+
+    // Call sub_823C0348 to get hash of name (r4)
+    ctx.r3.u64 = ctx.r4.u64;
+    ctx.r4.s64 = 0;
+    sub_823C0348(ctx, base);
+    uint32_t hash = ctx.r3.u32;
+
+    // Call sub_83210AF0(dict, hash)
+    ctx.r3.u64 = dict;
+    ctx.r4.u64 = hash;
+    sub_83210AF0(ctx, base);
+    uint32_t entry = ctx.r3.u32;
+
+    // Validate the entry and its nested pointers
+    bool valid = false;
+    if (entry >= 0x10000 && entry < PPC_MEMORY_SIZE - 68) {
+        uint32_t r10 = PPC_LOAD_U32(entry + 64);
+        if (r10 >= 0x10000 && r10 < PPC_MEMORY_SIZE - 4) {
+            uint32_t r9 = PPC_LOAD_U32(r10);
+            if (r9 >= 0x10000 && r9 < PPC_MEMORY_SIZE - 4) {
+                uint32_t r3_obj = PPC_LOAD_U32(r9);
+                if (r3_obj >= 0x10000 && r3_obj < PPC_MEMORY_SIZE - 8) {
+                    uint32_t r11_arr = PPC_LOAD_U32(r3_obj + 4);
+                    if (r11_arr >= 0x10000 && r11_arr < PPC_MEMORY_SIZE - 4) {
+                        uint32_t item = PPC_LOAD_U32(r11_arr);
+                        if (item >= 0x10000 && item < PPC_MEMORY_SIZE - 4) {
+                            uint32_t vtbl = PPC_LOAD_U32(item);
+                            if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE - 52) {
+                                uint32_t method = PPC_LOAD_U32(vtbl + 48);
+                                if (method >= 0x82000000 && method < 0x83E00000) {
+                                    valid = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ctx = savedCtx;
+
+    if (valid) {
+        __imp__sub_82924148(ctx, base);
+    } else {
+        ctx.r3.s64 = 0;
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_82D95030);
+PPC_FUNC(sub_82D95030)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 16 || (ctx.r3.u32 & 3) != 0) {
+        return;
+    }
+    uint32_t obj_struct = ctx.r3.u32;
+    uint16_t count = PPC_LOAD_U16(obj_struct + 8);
+    uint32_t arr = PPC_LOAD_U32(obj_struct + 4);
+    if (count == 0 || arr < 0x10000 || arr >= PPC_MEMORY_SIZE - (count * 8ULL)) {
+        PPC_STORE_U16(obj_struct + 8, 0);
+        PPC_STORE_U8(obj_struct + 0, 1);
+        return;
+    }
+
+    // Sanitize any corrupt callback entries so bctrl doesn't explode
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t item_obj = PPC_LOAD_U32(arr + i * 8 + 4);
+        if (item_obj != 0) {
+            if (item_obj < 0x10000 || item_obj >= PPC_MEMORY_SIZE - 4 || (item_obj & 3) != 0) {
+                PPC_STORE_U32(arr + i * 8 + 4, 0);
+                continue;
+            }
+            uint32_t vtbl = PPC_LOAD_U32(item_obj);
+            if (vtbl < 0x82000000 || vtbl >= PPC_MEMORY_SIZE - 4 || (vtbl & 3) != 0) {
+                PPC_STORE_U32(arr + i * 8 + 4, 0);
+                continue;
+            }
+            uint32_t func = PPC_LOAD_U32(vtbl);
+            if (func < 0x82000000 || func >= PPC_CODE_SIZE) {
+                PPC_STORE_U32(arr + i * 8 + 4, 0);
+                continue;
+            }
+        }
+    }
+
+    __imp__sub_82D95030(ctx, base);
+}
+
+extern "C" PPC_FUNC(__imp__sub_83521D38);
+PPC_FUNC(sub_83521D38)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 4 || (ctx.r3.u32 & 3) != 0) {
+        return;
+    }
+    uint32_t r31 = ctx.r3.u32;
+    uint32_t buf = PPC_LOAD_U32(r31);
+    if (buf == 0 || buf < 0x10000 || buf >= PPC_MEMORY_SIZE - 8) {
+        return;
+    }
+    uint32_t raw_count = PPC_LOAD_U32(buf + 4);
+    // If raw_count == 0xFFFFFFFF (-1), count is 0; avoids mtctr 0 -> bdnz 4-billion-iteration underflow!
+    if (raw_count != 0xFFFFFFFF && raw_count < 100000) {
+        uint32_t count = raw_count + 1;
+        for (uint32_t i = 0; i < count; i++) {
+            uint32_t elem = buf + i * 24;
+            if (elem < PPC_MEMORY_SIZE - 12) {
+                uint32_t val = PPC_LOAD_U32(elem + 8);
+                if (val != (uint32_t)-2) {
+                    PPC_STORE_U32(elem + 8, (uint32_t)-2);
+                }
+            }
+        }
+    }
+
+    // Call the free method if allocator is valid
+    uint32_t mgr_addr = (uint32_t)-2083782656 - 68; // 0x83DCD000 - 68 = 0x83DCCFBC
+    if (mgr_addr < PPC_MEMORY_SIZE - 4) {
+        uint32_t mgr = PPC_LOAD_U32(mgr_addr);
+        if (mgr >= 0x10000 && mgr < PPC_MEMORY_SIZE - 4) {
+            uint32_t vtbl = PPC_LOAD_U32(mgr);
+            if (vtbl >= 0x82000000 && vtbl < PPC_MEMORY_SIZE - 52) {
+                uint32_t free_fn = PPC_LOAD_U32(vtbl + 48);
+                if (free_fn >= 0x82000000 && free_fn < PPC_CODE_SIZE) {
+                    ctx.r3.u64 = mgr;
+                    ctx.r4.u64 = buf;
+                    PPC_CALL_INDIRECT_FUNC(free_fn);
+                }
+            }
+        }
+    }
+    PPC_STORE_U32(r31, 0);
+}
+
+extern "C" PPC_FUNC(__imp__sub_836B4A68);
+PPC_FUNC(sub_836B1768)
+{
+    // r3 = interrupt reason (1 = VBlank)
+    // r4 = userData (device pointer 0x4004CD00)
+    if (ctx.r4.u32 < 0x10000 || ctx.r4.u32 >= PPC_MEMORY_SIZE - 11040) {
+        return;
+    }
+    uint32_t r11 = PPC_LOAD_U32(ctx.r4.u32 + 11028);
+    if (r11 >= 0x10000 && r11 < PPC_MEMORY_SIZE - 32) {
+        uint32_t callback = PPC_LOAD_U32(r11 + 16);
+        // Only call callback if it is a valid code address
+        if (callback >= 0x82000000 && callback < PPC_CODE_SIZE) {
+            PPCContext cbCtx = ctx;
+            cbCtx.r3.u64 = PPC_LOAD_U32(r11 + 20);
+            PPC_CALL_INDIRECT_FUNC(callback);
+        }
+    }
+    // Now execute the pending flag clear:
+    uint8_t cpu = ctx.r13.u32 ? PPC_LOAD_U8(ctx.r13.u32 + 268) : 5;
+    uint32_t mask = (1u << (cpu & 0x1F));
+    if (r11 >= 0x10000 && r11 < PPC_MEMORY_SIZE - 4) {
+        // Clear pending flag for this CPU
+        uint32_t flags = PPC_LOAD_U32(r11);
+        flags &= ~mask;
+        flags &= 0x3F;
+        PPC_STORE_U32(r11, flags);
+    }
+    // Check if reason != 1, call sub_836B4A68 if enabled
+    if (ctx.r3.u32 != 1) {
+        uint32_t flagAddr = 2143813632 + 25924;
+        if (flagAddr < PPC_MEMORY_SIZE - 4) {
+            uint32_t val = PPC_LOAD_U32(flagAddr);
+            if (val & 1) {
+                ctx.r3.u64 = ctx.r4.u64;
+                __imp__sub_836B4A68(ctx, base);
+            }
+        }
+    }
+}
+
+extern "C" PPC_FUNC(__imp__sub_83536A60);
+PPC_FUNC(sub_83536A60)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 140 || (ctx.r3.u32 & 3) != 0) {
+        return;
+    }
+    uint32_t r31 = ctx.r3.u32;
+    uint32_t count = PPC_LOAD_U32(r31 + 136);
+    uint32_t buf = PPC_LOAD_U32(r31 + 120);
+    if (count > 100000 || buf < 0x10000 || buf >= PPC_MEMORY_SIZE - (count * 48ULL)) {
+        PPC_STORE_U32(r31 + 136, 0);
+    }
+    __imp__sub_83536A60(ctx, base);
+}
+
+
+
+
+
+
+
 
 
 

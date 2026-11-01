@@ -3285,6 +3285,14 @@ void Video::Present()
     if (!lock.owns_lock())
         return;
 
+    extern std::atomic<uint64_t> g_vdSwapCounter;
+    extern std::atomic<uint64_t> g_pm4PacketCounter;
+    if (g_vdSwapCounter.load(std::memory_order_relaxed) > 0 ||
+        g_pm4PacketCounter.load(std::memory_order_relaxed) > 0)
+    {
+        GameWindow::ShowAndRaise();
+    }
+
     if (!g_swapChain || !g_backBuffer || !g_device)
         return;
 

@@ -515,6 +515,34 @@ std::filesystem::path FileSystem::ResolvePath(const std::string_view& path, bool
         // This ensures Title Update files override base game files
         std::string rootStr(root);
         std::transform(rootStr.begin(), rootStr.end(), rootStr.begin(), ::tolower);
+
+        // Handle devkit X: drive or RAGE dev build prefixes (e.g. X:\GTA5\build\dev\...)
+        {
+            std::string sLower(pathSuffix);
+            std::transform(sLower.begin(), sLower.end(), sLower.begin(), ::tolower);
+            std::replace(sLower.begin(), sLower.end(), '\\', '/');
+            while (!sLower.empty() && sLower.front() == '/')
+                sLower.erase(0, 1);
+
+            if (rootStr == "x" || sLower.rfind("gta5/build/dev/", 0) == 0 || sLower.rfind("build/dev/", 0) == 0)
+            {
+                std::string sub(pathSuffix);
+                while (!sub.empty() && (sub.front() == '/' || sub.front() == '\\'))
+                    sub.erase(0, 1);
+
+                if (sLower.rfind("gta5/build/dev/", 0) == 0)
+                    sub = sub.substr(15);
+                else if (sLower.rfind("build/dev/", 0) == 0)
+                    sub = sub.substr(10);
+
+                std::filesystem::path redirected = s_extractedPath / sub;
+                if (std::filesystem::exists(redirected))
+                {
+                    LOGF_IMPL(Utility, "Game", "Devkit X: drive redirect: '{}' -> '{}'", path, redirected.string());
+                    return redirected;
+                }
+            }
+        }
         
         if (rootStr == "game")
         {

@@ -50,6 +50,7 @@ public:
     static std::vector<SDL_DisplayMode> GetDisplayModes(bool ignoreInvalidModes = true, bool ignoreRefreshRates = true);
     static int FindNearestDisplayMode();
     static bool IsPositionValid();
+    static void ShowAndRaise();
     static void Init(const char* sdlVideoDriver = nullptr);
     static void Update();
 };

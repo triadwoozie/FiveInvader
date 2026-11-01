@@ -9,6 +9,7 @@
 #include <cpu/guest_thread.h>
 #include <ranges>
 #include <unordered_set>
+#include <mutex>
 #include "xxHashMap.h"
 #include <user/paths.h>
 #include <SDL.h>
@@ -16,11 +17,19 @@
 // Debug logging control
 #define SAVE_SYSTEM_DEBUG_LOGGING 1
 
+struct XamNotificationItem
+{
+    uint32_t id;
+    uint32_t param;
+};
+
 struct XamListener : KernelObject
 {
     uint32_t id{};
     uint64_t areas{};
-    std::vector<std::tuple<uint32_t, uint32_t>> notifications;
+    static constexpr size_t MAX_NOTIFS = 64;
+    XamNotificationItem notifications[MAX_NOTIFS]{};
+    uint32_t notifCount{0};
 
     XamListener(const XamListener&) = delete;
     XamListener& operator=(const XamListener&) = delete;
@@ -90,6 +99,7 @@ struct XamEnumerator : XamEnumeratorBase
 };
 
 std::array<xxHashMap<XHOSTCONTENT_DATA>, 3> gContentRegistry{};
+static std::mutex s_notifyLock;
 std::unordered_set<XamListener*> gListeners{};
 xxHashMap<std::string> gRootMap;
 
@@ -110,11 +120,13 @@ void XamRootCreate(const std::string_view& root, const std::string_view& path)
 
 XamListener::XamListener()
 {
+    std::lock_guard lock(s_notifyLock);
     gListeners.insert(this);
 }
 
 XamListener::~XamListener()
 {
+    std::lock_guard lock(s_notifyLock);
     gListeners.erase(this);
 }
 
@@ -154,32 +166,49 @@ uint32_t XamNotifyCreateListener(uint64_t qwAreas)
 
 void XamNotifyEnqueueEvent(uint32_t dwId, uint32_t dwParam)
 {
+    std::lock_guard lock(s_notifyLock);
     for (const auto& listener : gListeners)
     {
         if (((1 << MSG_AREA(dwId)) & listener->areas) == 0)
             continue;
 
-        listener->notifications.emplace_back(dwId, dwParam);
+        if (listener->notifCount < XamListener::MAX_NOTIFS)
+        {
+            listener->notifications[listener->notifCount++] = { dwId, dwParam };
+        }
     }
 }
 
 bool XNotifyGetNext(uint32_t hNotification, uint32_t dwMsgFilter, be<uint32_t>* pdwId, be<uint32_t>* pParam)
 {
-    auto& listener = *GetKernelObject<XamListener>(hNotification);
+    if (!IsValidKernelHandle(hNotification))
+        return false;
+
+    std::lock_guard lock(s_notifyLock);
+    auto* pListener = GetKernelObject<XamListener>(hNotification);
+    if (!pListener || gListeners.find(pListener) == gListeners.end())
+        return false;
+
+    auto& listener = *pListener;
+
+    if (listener.notifCount > XamListener::MAX_NOTIFS)
+        listener.notifCount = 0;
 
     if (dwMsgFilter)
     {
-        for (size_t i = 0; i < listener.notifications.size(); i++)
+        for (uint32_t i = 0; i < listener.notifCount; i++)
         {
-            if (std::get<0>(listener.notifications[i]) == dwMsgFilter)
+            if (listener.notifications[i].id == dwMsgFilter)
             {
                 if (pdwId)
-                    *pdwId = std::get<0>(listener.notifications[i]);
+                    *pdwId = listener.notifications[i].id;
 
                 if (pParam)
-                    *pParam = std::get<1>(listener.notifications[i]);
+                    *pParam = listener.notifications[i].param;
 
-                listener.notifications.erase(listener.notifications.begin() + i);
+                for (uint32_t j = i; j + 1 < listener.notifCount; j++)
+                    listener.notifications[j] = listener.notifications[j + 1];
+                listener.notifCount--;
 
                 return true;
             }
@@ -187,16 +216,18 @@ bool XNotifyGetNext(uint32_t hNotification, uint32_t dwMsgFilter, be<uint32_t>* 
     }
     else
     {
-        if (listener.notifications.empty())
+        if (listener.notifCount == 0)
             return false;
 
         if (pdwId)
-            *pdwId = std::get<0>(listener.notifications[0]);
+            *pdwId = listener.notifications[0].id;
 
         if (pParam)
-            *pParam = std::get<1>(listener.notifications[0]);
+            *pParam = listener.notifications[0].param;
 
-        listener.notifications.erase(listener.notifications.begin());
+        for (uint32_t j = 0; j + 1 < listener.notifCount; j++)
+            listener.notifications[j] = listener.notifications[j + 1];
+        listener.notifCount--;
 
         return true;
     }
@@ -314,7 +345,13 @@ uint32_t XamGetPrivateEnumStructureFromHandle(uint32_t hEnum, void** ppEnumData)
 
 uint32_t XamEnumerate(uint32_t hEnum, uint32_t dwFlags, void* pvBuffer, uint32_t cbBuffer, be<uint32_t>* pcItemsReturned, XXOVERLAPPED* pOverlapped)
 {
+    if (!IsValidKernelHandle(hEnum))
+        return ERROR_INVALID_HANDLE;
+
     auto* enumerator = GetKernelObject<XamEnumeratorBase>(hEnum);
+    if (!enumerator || !IsValidHostVtable(enumerator))
+        return ERROR_INVALID_HANDLE;
+
     const auto count = enumerator->Next(pvBuffer);
 
     if (count == -1)

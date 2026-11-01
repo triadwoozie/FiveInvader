@@ -99,6 +99,20 @@ namespace VFS
             result.erase(0, 1);
         }
         
+        // Normalize slashes for devkit check
+        std::string lower = result;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        std::replace(lower.begin(), lower.end(), '\\', '/');
+
+        if (lower.rfind("gta5/build/dev/", 0) == 0)
+        {
+            result = result.substr(15);
+        }
+        else if (lower.rfind("build/dev/", 0) == 0)
+        {
+            result = result.substr(10);
+        }
+
         return result;
     }
     

@@ -154,6 +154,20 @@ int Window_OnSDLEvent(void*, SDL_Event* event)
     return 0;
 }
 
+void GameWindow::ShowAndRaise()
+{
+    static std::atomic<bool> s_hasRaised{false};
+    if (!s_hasRaised.exchange(true))
+    {
+        if (s_pWindow)
+        {
+            LOGFN("[GameWindow] Showing and raising window to foreground (game booted / active rendering)!");
+            SDL_ShowWindow(s_pWindow);
+            SDL_RaiseWindow(s_pWindow);
+        }
+    }
+}
+
 void GameWindow::Init(const char* sdlVideoDriver)
 {
 #ifdef __linux__
@@ -208,9 +222,10 @@ void GameWindow::Init(const char* sdlVideoDriver)
     if (!IsPositionValid())
         GameWindow::ResetDimensions();
 
-    s_pWindow = SDL_CreateWindow("FiveInvader", s_x, s_y, s_width, s_height, GetWindowFlags());
-    SDL_ShowWindow(s_pWindow);
-    SDL_RaiseWindow(s_pWindow);
+    s_pWindow = SDL_CreateWindow("Grand Theft Auto V", s_x, s_y, s_width, s_height, GetWindowFlags());
+    // Started hidden in background until guest engine issues its first draw/VdSwap call
+    // SDL_ShowWindow(s_pWindow);
+    // SDL_RaiseWindow(s_pWindow);
 
     if (IsFullscreen())
         SDL_ShowCursor(SDL_DISABLE);
@@ -245,9 +260,6 @@ void GameWindow::Init(const char* sdlVideoDriver)
 #endif
 
     SetTitleBarColour();
-
-    SDL_ShowWindow(s_pWindow);
-    SDL_RaiseWindow(s_pWindow);
 }
 
 void GameWindow::Update()
@@ -453,7 +465,7 @@ void GameWindow::ResetDimensions()
 
 uint32_t GameWindow::GetWindowFlags()
 {
-    uint32_t flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    uint32_t flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 
     if (Config::WindowState == EWindowState::Maximised)
         flags |= SDL_WINDOW_MAXIMIZED;
