@@ -13,12 +13,19 @@ Run it after every XenonRecomp regeneration.
 """
 
 import pathlib
+import re
 import sys
 
 PATCHES = {
     "loc_82F96068": ("-2113339392", "12328"),
     "loc_82F960E0": ("-2113339392", "12196"),
 }
+
+DIVWU_PATTERN = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)(?P<comment>// divwu(?:\.)? r\d+,r\d+,r\d+)\n"
+    r"(?P<code_indent>[ \t]*)(?P<dst>ctx\.r\d+\.u32) = "
+    r"(?P<src>ctx\.r\d+\.u32) / (?P<divisor>ctx\.r\d+\.u32);$"
+)
 
 
 def patch_file(path: pathlib.Path) -> bool:
@@ -43,11 +50,31 @@ def patch_file(path: pathlib.Path) -> bool:
     return changed
 
 
+def patch_divwu_zero_division(path: pathlib.Path) -> bool:
+    text = path.read_text()
+    patched = DIVWU_PATTERN.sub(
+        lambda match: (
+            f"{match.group('indent')}{match.group('comment')}\n"
+            f"{match.group('code_indent')}if ({match.group('divisor')} != 0) "
+            f"{match.group('dst')} = {match.group('src')} / {match.group('divisor')};"
+        ),
+        text,
+    )
+    if patched == text:
+        return False
+    path.write_text(patched)
+    return True
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <ppc output directory>", file=sys.stderr)
         return 1
     ppc_dir = pathlib.Path(sys.argv[1])
+    for path in ppc_dir.glob("ppc_recomp.*.cpp"):
+        if patch_divwu_zero_division(path):
+            print(f"Guarded divwu-by-zero semantics in {path}")
+
     path = ppc_dir / "ppc_recomp.219.cpp"
     if not path.exists():
         return 0

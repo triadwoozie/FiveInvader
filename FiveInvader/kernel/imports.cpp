@@ -43,7 +43,6 @@
 #include "io/net_socket.h"
 #include "io/net_session.h"
 
-
 // =============================================================================
 // KERNEL PHASE SYSTEM - Fail-open waits during Boot/Init (Xenia-style)
 // =============================================================================
@@ -3044,6 +3043,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
     // Trace all wait calls to understand blocking
     static int s_waitCount = 0;
     ++s_waitCount;
+    PPCContext* ppcContext = GetPPCContext();
     uint32_t callerLR = GET_CALLER_LR();
     ScopedWaitTracker waitTracker("NtWaitForSingleObjectEx", Handle, timeout, callerLR);
     bool isMainThread = (g_kernelMainThreadIdSet && std::this_thread::get_id() == g_kernelMainThreadId);
@@ -3053,8 +3053,9 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         std::stringstream ssTid, ssMain;
         ssTid << std::this_thread::get_id();
         ssMain << g_kernelMainThreadId;
-        LOGF_WARNING("[NtWaitEx] #{} handle=0x{:08X} timeout={} isMain={} tid={} mainTid={}",
-                  s_waitCount, Handle, timeout, isMainThread, ssTid.str(), ssMain.str());
+        LOGF_WARNING("[NtWaitEx] #{} handle=0x{:08X} timeout={} isMain={} tid={} mainTid={} sp=0x{:08X} tls=0x{:08X}",
+                  s_waitCount, Handle, timeout, isMainThread, ssTid.str(), ssMain.str(),
+                  ppcContext ? ppcContext->r1.u32 : 0u, ppcContext ? ppcContext->r13.u32 : 0u);
     }
 
     // POST-INIT FIX: timeout=0 polls are frame sync checks
@@ -5712,6 +5713,7 @@ uint32_t NtSetEvent(Event* handle, uint32_t* previousState)
 uint32_t NtCreateSemaphore(be<uint32_t>* Handle, XOBJECT_ATTRIBUTES* ObjectAttributes, uint32_t InitialCount, uint32_t MaximumCount)
 {
     static int s_count = 0; ++s_count;
+    PPCContext* ppcContext = GetPPCContext();
     const uint32_t outputGuestAddress =
         Handle != nullptr && g_memory.IsInMemoryRange(Handle)
             ? g_memory.MapVirtual(Handle)
@@ -5726,11 +5728,13 @@ uint32_t NtCreateSemaphore(be<uint32_t>* Handle, XOBJECT_ATTRIBUTES* ObjectAttri
         // Store the kernel handle for later signaling
         std::lock_guard<std::mutex> lock(g_semaphoreTrackMutex);
         g_blockingSemaphoreAddrs.insert(handle);  // Track handle directly
-        LOGF_WARNING("[NtCreateSemaphore] #{} handle=0x{:08X} out=0x{:08X} count=0 max={}",
-                     s_count, handle, outputGuestAddress, MaximumCount);
+        LOGF_WARNING("[NtCreateSemaphore] #{} handle=0x{:08X} out=0x{:08X} count=0 max={} sp=0x{:08X} tls=0x{:08X}",
+                     s_count, handle, outputGuestAddress, MaximumCount,
+                     ppcContext ? ppcContext->r1.u32 : 0u, ppcContext ? ppcContext->r13.u32 : 0u);
     } else if (s_count <= 50) {
-        LOGF_WARNING("[NtCreateSemaphore] #{} handle=0x{:08X} out=0x{:08X} count={} max={}",
-                     s_count, handle, outputGuestAddress, InitialCount, MaximumCount);
+        LOGF_WARNING("[NtCreateSemaphore] #{} handle=0x{:08X} out=0x{:08X} count={} max={} sp=0x{:08X} tls=0x{:08X}",
+                     s_count, handle, outputGuestAddress, InitialCount, MaximumCount,
+                     ppcContext ? ppcContext->r1.u32 : 0u, ppcContext ? ppcContext->r13.u32 : 0u);
     }
     
     return STATUS_SUCCESS;
@@ -5775,8 +5779,7 @@ uint32_t NtReleaseSemaphore(uint32_t Handle, uint32_t ReleaseCount, int32_t* Pre
         }
         return STATUS_INVALID_HANDLE;
     }
-    uint32_t callerLR = GET_CALLER_LR();
-    
+    PPCContext* ppcContext = GetPPCContext();
     // Check if this is actually a semaphore
     Semaphore* sem = dynamic_cast<Semaphore*>(obj);
     if (!sem)
@@ -5802,9 +5805,12 @@ uint32_t NtReleaseSemaphore(uint32_t Handle, uint32_t ReleaseCount, int32_t* Pre
     if (s_count <= 30 || isBlockingSemaphore || s_count % 100 == 0)
     {
         uint32_t curCount = sem->count.load();
-        LOGF_WARNING("[NtReleaseSemaphore] #{} handle=0x{:08X} release={} count={}/{}{}", 
+        std::stringstream ssTid;
+        ssTid << std::this_thread::get_id();
+        LOGF_WARNING("[NtReleaseSemaphore] #{} handle=0x{:08X} release={} count={}/{}{} tid={} sp=0x{:08X} tls=0x{:08X}",
                   s_count, Handle, ReleaseCount, curCount, sem->maximumCount,
-                  isBlockingSemaphore ? " *** BLOCKING SEM ***" : "");
+                  isBlockingSemaphore ? " *** BLOCKING SEM ***" : "", ssTid.str(),
+                  ppcContext ? ppcContext->r1.u32 : 0u, ppcContext ? ppcContext->r13.u32 : 0u);
     }
     
     // the game releases semaphore with 1 maximum number of releases more than once
