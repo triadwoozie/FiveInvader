@@ -4734,6 +4734,261 @@ static uint32_t* TranslateGpuPhysical(uint32_t address)
     return reinterpret_cast<uint32_t*>(g_memory.Translate(guestAlias));
 }
 
+static void DispatchGraphicsInterrupt(uint32_t source, uint32_t cpu)
+{
+    const uint32_t callback = g_gpuRingBuffer.interruptCallback;
+    if (callback == 0)
+        return;
+
+    PPCContext* previousContext = GetPPCContext();
+    PPCContext interruptContext = previousContext ? *previousContext : PPCContext{};
+    interruptContext.r3.u32 = source;
+    interruptContext.r4.u32 = g_gpuRingBuffer.interruptUserData;
+    if (interruptContext.r13.u32 < PPC_MEMORY_SIZE - 269)
+        *reinterpret_cast<uint8_t*>(
+            g_memory.Translate(interruptContext.r13.u32 + 268)) = static_cast<uint8_t>(cpu);
+    static std::atomic<uint32_t> s_dispatchCount{0};
+    const uint32_t dispatchCount = ++s_dispatchCount;
+    if (dispatchCount <= 8)
+        LOGF_INFO("[GPU IRQ] dispatch #{} source={} cpu={} callback=0x{:08X} userData=0x{:08X}",
+                  dispatchCount, source, cpu, callback, g_gpuRingBuffer.interruptUserData);
+    SetPPCContext(interruptContext);
+
+    if (PPCFunc* callbackFunction = g_memory.FindFunction(callback))
+    {
+        callbackFunction(interruptContext, g_memory.base);
+        if (dispatchCount <= 8)
+            LOGF_INFO("[GPU IRQ] dispatch #{} completed return=0x{:08X}",
+                      dispatchCount, static_cast<uint32_t>(interruptContext.r3.u32));
+    }
+    else
+        LOGF_WARNING("[GPU] Graphics interrupt callback is unmapped: 0x{:08X}", callback);
+
+    if (previousContext)
+        SetPPCContext(*previousContext);
+    else
+        g_ppcContext = nullptr;
+}
+
+static bool StoreGpuWrite(uint32_t address, uint32_t value)
+{
+    uint8_t* destination = reinterpret_cast<uint8_t*>(
+        TranslateGpuPhysical(address & ~0x3u));
+    if (!destination)
+        return false;
+
+    const uint32_t endianness = address & 0x3u;
+    switch (endianness)
+    {
+        case 1: value = static_cast<uint32_t>(
+                    (value & 0x00FF00FFu) << 8 |
+                    (value & 0xFF00FF00u) >> 8); break;
+        case 2: value = ByteSwap(value); break;
+        case 3: value = (value << 16) | (value >> 16); break;
+        default: break;
+    }
+
+    std::memcpy(destination, &value, sizeof(value));
+    return true;
+}
+
+static uint32_t GpuSwapPM4(uint32_t value, uint32_t endianness)
+{
+    switch (endianness & 0x3u)
+    {
+        case 1: return (value & 0x00FF00FFu) << 8 |
+                       (value & 0xFF00FF00u) >> 8;
+        case 2: return ByteSwap(value);
+        case 3: return (value << 16) | (value >> 16);
+        default: return value;
+    }
+}
+
+static uint32_t ExecutePM4Buffer(uint32_t* buffer, uint32_t dwordCount,
+                                uint32_t depth = 0,
+                                uint32_t* consumedDwords = nullptr)
+{
+    if (!buffer || depth > 8)
+        return 0;
+
+    static std::array<uint32_t, 0x10000> s_registerFile{};
+    uint32_t executed = 0;
+    uint32_t pos = 0;
+    const uint32_t limit = std::min(dwordCount, 4096u);
+
+    for (; pos < limit;)
+    {
+        const uint32_t packet = ByteSwap(buffer[pos]);
+        if (packet == 0)
+            break;
+
+        const uint32_t type = packet >> 30;
+        if (type == PM4_TYPE2)
+        {
+            ++pos;
+            continue;
+        }
+
+        if (type == PM4_TYPE0)
+        {
+            const uint32_t count = ((packet >> 16) & 0x3FFFu) + 1;
+            if (count > limit - pos - 1)
+                break;
+            uint32_t reg = packet & 0x7FFFu;
+            for (uint32_t i = 0; i < count; ++i)
+                s_registerFile[(reg + i) & 0xFFFFu] = ByteSwap(buffer[pos + 1 + i]);
+            pos += count + 1;
+            ++executed;
+            continue;
+        }
+
+        if (type != PM4_TYPE3)
+            break;
+
+        const uint32_t opcode = (packet >> 8) & 0x7Fu;
+        const uint32_t count = ((packet >> 16) & 0x3FFFu) + 1;
+        if (count > limit - pos - 1)
+            break;
+        auto payload = [&](uint32_t index) { return ByteSwap(buffer[pos + 1 + index]); };
+        bool waitConditionMet = true;
+
+        switch (opcode)
+        {
+            case PM4_INDIRECT_BUFFER:
+            case PM4_INDIRECT_BUFFER_PFD:
+                if (count >= 2)
+                {
+                    const uint32_t address = payload(0);
+                    const uint32_t indirectDwords = payload(1) & 0xFFFFFu;
+                    if (indirectDwords != 0)
+                    {
+                        uint32_t* indirect = TranslateGpuPhysical(address);
+                        if (indirect)
+                            executed += ExecutePM4Buffer(indirect, indirectDwords, depth + 1);
+                    }
+                }
+                break;
+            case PM4_MEM_WRITE:
+                if (count >= 2)
+                {
+                    uint32_t address = payload(0);
+                    for (uint32_t i = 1; i < count; ++i, address += 4)
+                    {
+                        if (!StoreGpuWrite(address, payload(i)))
+                            LOGF_WARNING("[PM4] MEM_WRITE target unmapped: 0x{:08X}", address);
+                    }
+                }
+                break;
+            case PM4_EVENT_WRITE_SHD:
+                if (count >= 3)
+                {
+                    const uint32_t initiator = payload(0);
+                    const uint32_t address = payload(1);
+                    const uint32_t value = payload(2);
+                    if (!StoreGpuWrite(address, value))
+                        LOGF_WARNING("[PM4] EVENT_WRITE_SHD target unmapped: 0x{:08X}", address);
+                    else
+                    {
+                        LOGF_INFO("[PM4] EVENT_WRITE_SHD executed initiator=0x{:08X} target=0x{:08X} value=0x{:08X}",
+                                  initiator, address, value);
+                    }
+                }
+                break;
+            case PM4_EVENT_WRITE_EXT:
+                if (count >= 2)
+                {
+                    const uint32_t address = payload(1);
+                    uint8_t* destination = reinterpret_cast<uint8_t*>(
+                        TranslateGpuPhysical(address & ~0x3u));
+                    if (destination)
+                    {
+                        static constexpr uint16_t extents[] = {0, 0x03FF, 0, 0x03FF, 0, 1};
+                        for (size_t i = 0; i < std::size(extents); ++i)
+                        {
+                            const uint16_t value = ByteSwap(extents[i]);
+                            std::memcpy(destination + i * sizeof(value), &value, sizeof(value));
+                        }
+                    }
+                }
+                break;
+            case PM4_SET_CONSTANT:
+            case PM4_SET_CONSTANT2:
+            case PM4_SET_SHADER_CONSTANTS:
+                if (count >= 2)
+                {
+                    const uint32_t reg = payload(0) & 0x7FFFu;
+                    for (uint32_t i = 1; i < count; ++i)
+                        s_registerFile[(reg + i - 1) & 0xFFFFu] = payload(i);
+                }
+                break;
+            case PM4_WAIT_REG_MEM:
+                if (count >= 5)
+                {
+                    const uint32_t waitInfo = payload(0);
+                    const uint32_t target = payload(1);
+                    const uint32_t reference = payload(2);
+                    const uint32_t mask = payload(3);
+                    uint32_t current = s_registerFile[target & 0xFFFFu];
+                    if (waitInfo & 0x10u)
+                    {
+                        uint32_t* targetPointer = TranslateGpuPhysical(target & ~0x3u);
+                        if (targetPointer)
+                        {
+                            std::memcpy(&current, targetPointer, sizeof(current));
+                            current = GpuSwapPM4(current, target & 0x3u);
+                        }
+                        else
+                        {
+                            waitConditionMet = false;
+                        }
+                    }
+                    const uint32_t compare = current & mask;
+                    const uint32_t relationBits =
+                        (static_cast<uint32_t>(compare < reference) << 1) |
+                        (static_cast<uint32_t>(compare <= reference) << 2) |
+                        (static_cast<uint32_t>(compare == reference) << 3) |
+                        (static_cast<uint32_t>(compare != reference) << 4) |
+                        (static_cast<uint32_t>(compare >= reference) << 5) |
+                        (static_cast<uint32_t>(compare > reference) << 6) |
+                        (1u << 7);
+                    waitConditionMet = waitConditionMet &&
+                        ((relationBits >> (waitInfo & 0x7u)) & 1u) != 0;
+                    LOGF_INFO("[PM4] WAIT_REG_MEM memory={} target=0x{:08X} current=0x{:08X} ref=0x{:08X} mask=0x{:08X} matched={}",
+                              (waitInfo & 0x10u) != 0, target, current, reference, mask,
+                              waitConditionMet);
+                }
+                break;
+            case PM4_EVENT_WRITE:
+                break;
+            case PM4_INTERRUPT:
+                if (count >= 1)
+                {
+                    const uint32_t cpuMask = payload(0);
+                    for (uint32_t cpu = 0; cpu < 6; ++cpu)
+                    {
+                        if (cpuMask & (1u << cpu))
+                            DispatchGraphicsInterrupt(1, cpu);
+                    }
+                }
+                break;
+            case PM4_DRAW_INDX:
+            case PM4_DRAW_INDX_2:
+                LOGF_WARNING("[PM4] Draw packet reached executor but guest GPU state translation is not implemented");
+                break;
+            default:
+                break;
+        }
+
+        if (!waitConditionMet)
+            break;
+        pos += count + 1;
+        ++executed;
+    }
+    if (consumedDwords)
+        *consumedDwords = pos;
+    return executed;
+}
+
 // Scan a command buffer for PM4 packets (helper function)
 // Returns number of packets found
 static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIndirect, uint32_t scanCount, uint32_t depth = 0) {
@@ -4982,6 +5237,31 @@ void ScanRingBufferForPM4Packets()
     if (packetsFound > 0) {
         s_scannedOnce = true;
     }
+
+    uint32_t consumedDwords = 0;
+    const uint32_t executionStart = g_gpuRingBuffer.processedReadPtr % ringBufferDwords;
+    const uint32_t executedPackets = ExecutePM4Buffer(
+        ringBuffer + executionStart, ringBufferDwords - executionStart, 0, &consumedDwords);
+    if (consumedDwords != 0)
+    {
+        g_gpuRingBuffer.processedReadPtr =
+            (executionStart + consumedDwords) % ringBufferDwords;
+        if (g_gpuRingBuffer.writebackEnabled && g_gpuRingBuffer.readPtrWritebackAddr != 0)
+        {
+            uint32_t* writeback = TranslateGpuPhysical(g_gpuRingBuffer.readPtrWritebackAddr);
+            if (writeback)
+            {
+                const uint32_t byteOffset = g_gpuRingBuffer.processedReadPtr * sizeof(uint32_t);
+                const uint32_t pointerValue = g_gpuRingBuffer.blockSize
+                    ? byteOffset / g_gpuRingBuffer.blockSize : byteOffset;
+                const uint32_t encodedPointer = ByteSwap(pointerValue);
+                std::memcpy(writeback, &encodedPointer, sizeof(encodedPointer));
+            }
+        }
+        LOGF_INFO("[PM4] Executor consumed {} packets / {} dwords; ring rptr={} dwords",
+                  executedPackets, consumedDwords, g_gpuRingBuffer.processedReadPtr);
+    }
+
     g_pm4PacketCounter.store(g_gpuRingBuffer.pm4DrawCount + g_gpuRingBuffer.pm4SwapCount, std::memory_order_relaxed);
     s_scanCount++;
 }
@@ -5064,9 +5344,12 @@ void FireVBlankCallback() {
 
         // Set up context with valid stack and TLS on the dedicated vblank context
         PPCContext ctx = s_vblankContext->ppcContext;
-        ctx.r3.u32 = 1;  // Interrupt reason 1 = VBlank / vertical blank (expected by sub_836B1768)
+        ctx.r3.u32 = 0;  // Xenia dispatches VBlank as source 0 on CPU 2.
         ctx.r4.u32 = g_gpuRingBuffer.interruptUserData;  // Context/userData
+        if (ctx.r13.u32 < PPC_MEMORY_SIZE - 269)
+            *reinterpret_cast<uint8_t*>(g_memory.Translate(ctx.r13.u32 + 268)) = 2;
         const uint32_t source = ctx.r3.u32;
+        PPCContext* previousContext = GetPPCContext();
         SetPPCContext(ctx);
         
         auto* callbackFunc = g_memory.FindFunction(g_gpuRingBuffer.interruptCallback);
@@ -5083,7 +5366,12 @@ void FireVBlankCallback() {
                          callbackCount, g_gpuRingBuffer.interruptCallback,
                          g_gpuRingBuffer.interruptUserData);
         }
-        
+
+        if (previousContext)
+            SetPPCContext(*previousContext);
+        else
+            g_ppcContext = nullptr;
+
         // VBlank callback complete - game code handles render loop naturally
     }
 }
@@ -14085,19 +14373,35 @@ PPC_FUNC(sub_83521D38)
 extern "C" PPC_FUNC(__imp__sub_836B4A68);
 PPC_FUNC(sub_836B1768)
 {
-    // r3 = interrupt reason (1 = VBlank)
+    // r3 = interrupt source (0 = VBlank, 1 = command-processor interrupt)
     // r4 = userData (device pointer 0x4004CD00)
+    const uint32_t interruptReason = ctx.r3.u32;
     if (ctx.r4.u32 < 0x10000 || ctx.r4.u32 >= PPC_MEMORY_SIZE - 11040) {
         return;
     }
     uint32_t r11 = PPC_LOAD_U32(ctx.r4.u32 + 11028);
+    static std::atomic<uint32_t> s_vblankCount{0};
+    const uint32_t vblankCount = interruptReason == 0 ? ++s_vblankCount : 0;
+    if (vblankCount > 0 && vblankCount <= 4)
+        LOGF_INFO("[GPU IRQ] sub_836B1768 VBlank userData=0x{:08X} deviceState=0x{:08X}",
+                  ctx.r4.u32, r11);
     if (r11 >= 0x10000 && r11 < PPC_MEMORY_SIZE - 32) {
         uint32_t callback = PPC_LOAD_U32(r11 + 16);
+        if (vblankCount > 0 && vblankCount <= 4)
+            LOGF_INFO("[GPU IRQ] VBlank pending=0x{:08X} guestCallback=0x{:08X} callbackArg=0x{:08X}",
+                      PPC_LOAD_U32(r11), callback, PPC_LOAD_U32(r11 + 20));
         // Only call callback if it is a valid code address
         if (callback >= 0x82000000 && callback < PPC_CODE_SIZE) {
             PPCContext cbCtx = ctx;
             cbCtx.r3.u64 = PPC_LOAD_U32(r11 + 20);
-            PPC_CALL_INDIRECT_FUNC(callback);
+            PPCContext* previousContext = GetPPCContext();
+            SetPPCContext(cbCtx);
+            if (PPCFunc* callbackFunction = g_memory.FindFunction(callback))
+                callbackFunction(cbCtx, base);
+            if (previousContext)
+                SetPPCContext(*previousContext);
+            else
+                g_ppcContext = nullptr;
         }
     }
     // Now execute the pending flag clear:
@@ -14111,10 +14415,13 @@ PPC_FUNC(sub_836B1768)
         PPC_STORE_U32(r11, flags);
     }
     // Check if reason != 1, call sub_836B4A68 if enabled
-    if (ctx.r3.u32 != 1) {
+    if (interruptReason != 1) {
         uint32_t flagAddr = 2143813632 + 25924;
         if (flagAddr < PPC_MEMORY_SIZE - 4) {
             uint32_t val = PPC_LOAD_U32(flagAddr);
+            if (vblankCount > 0 && vblankCount <= 4)
+                LOGF_INFO("[GPU IRQ] VBlank dispatch flag=0x{:08X} value=0x{:08X}",
+                          flagAddr, val);
             if (val & 1) {
                 ctx.r3.u64 = ctx.r4.u64;
                 __imp__sub_836B4A68(ctx, base);
