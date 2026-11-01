@@ -50,6 +50,12 @@ static void UnmappedIndirectHandler(PPCContext& ctx, uint8_t* base)
     }
 }
 
+void PPCHandleInvalidIndirectCall(PPCContext& ctx, uint8_t* base, uint32_t target)
+{
+    ctx.r12.u64 = target;
+    UnmappedIndirectHandler(ctx, base);
+}
+
 Memory::Memory()
 {
 #ifdef _WIN32

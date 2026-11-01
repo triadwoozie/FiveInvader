@@ -269,24 +269,23 @@ void KiSystemStartup()
         auto partPath = GetGamePath() / partFiles[i];
         if (std::filesystem::exists(partPath)) {
             std::string partPathStr = (const char*)partPath.u8string().c_str();
-            std::string partDirStr = (const char*)GetGamePath().u8string().c_str();
             
             // Register for DLC and marketplace content types
             auto installContentDLC = XamMakeContent(XCONTENTTYPE_DLC, partitionNames[i]);
-            XamRegisterContent(installContentDLC, partDirStr);
+            XamRegisterContent(installContentDLC, partPathStr);
             XamContentCreateEx(0, partitionNames[i], &installContentDLC, OPEN_EXISTING, nullptr, nullptr, 0, 0, nullptr);
 
             auto partContentDLC = XamMakeContent(XCONTENTTYPE_DLC, partFiles[i]);
-            XamRegisterContent(partContentDLC, partDirStr);
+            XamRegisterContent(partContentDLC, partPathStr);
 
-            // Register roots for both partition hex names and friendly names
-            XamRootCreate(partitionNames[i], partDirStr);
+            // These roots are RPF7 archive devices, not directories containing the archives.
+            XamRootCreate(partitionNames[i], partPathStr);
             std::string partRootName = std::string("part") + std::to_string(i);
-            XamRootCreate(partRootName, partDirStr);
+            XamRootCreate(partRootName, partPathStr);
             std::string installRootName = std::string("install") + std::to_string(i);
-            XamRootCreate(installRootName, partDirStr);
+            XamRootCreate(installRootName, partPathStr);
 
-            LOGF_IMPL(Utility, "Main", "Registered Disc 1 Partition {}: {} -> {}", i, partitionNames[i], partPathStr);
+            LOGF_IMPL(Utility, "Main", "Registered Disc 1 Partition {} archive device: {} -> {}", i, partitionNames[i], partPathStr);
         }
     }
 
@@ -384,6 +383,7 @@ int main(int argc, char *argv[])
     sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
+    sigaction(SIGFPE, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
 #endif
 

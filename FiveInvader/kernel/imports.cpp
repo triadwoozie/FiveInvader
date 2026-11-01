@@ -2429,6 +2429,12 @@ uint32_t NtCreateFile
         return STATUS_INVALID_PARAMETER;
     RecordRecentFile(guestPath);
 
+    static std::atomic<uint32_t> s_createTraceCount{0};
+    const uint32_t createTraceCount =
+        s_createTraceCount.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (createTraceCount <= 300)
+        LOGF_INFO("[NtCreateFile] guest path #{}: '{}'", createTraceCount, guestPath);
+
     // === PHASE 2: Storage Init File Tracing ===
     static int s_storageInitFileCount = 0;
     if (g_inStorageInit.load()) {
@@ -2515,28 +2521,6 @@ uint32_t NtCreateFile
         }
     }
     // === END VFS-BASED FILE SERVING ===
-
-    // Xbox 360 harddisk partition probing bypass (e.g. \Device\Harddisk0\partition0)
-    {
-        std::string pathLower = guestPath;
-        std::transform(pathLower.begin(), pathLower.end(), pathLower.begin(), ::tolower);
-        if (pathLower.find("device\\harddisk") != std::string::npos ||
-            pathLower.find("device/harddisk") != std::string::npos)
-        {
-            NtFileHandle* hFile = CreateKernelObject<NtFileHandle>();
-            hFile->path = "/dev/null";
-            hFile->isRpf = false;
-            const uint32_t handleValue = GetKernelHandle(hFile);
-            g_ntFileHandles.emplace(handleValue, hFile);
-            *FileHandle = handleValue;
-            LOGF_INFO("[NtCreateFile] Harddisk partition access '{}' -> handle 0x{:08X}", guestPath, handleValue);
-            if (IoStatusBlock) {
-                IoStatusBlock->Status = STATUS_SUCCESS;
-                IoStatusBlock->Information = 1;
-            }
-            return STATUS_SUCCESS;
-        }
-    }
 
     std::filesystem::path resolved = ResolveGuestPathBestEffort(guestPath);
 
@@ -3072,7 +3056,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         LOGF_WARNING("[NtWaitEx] #{} handle=0x{:08X} timeout={} isMain={} tid={} mainTid={}",
                   s_waitCount, Handle, timeout, isMainThread, ssTid.str(), ssMain.str());
     }
-    
+
     // POST-INIT FIX: timeout=0 polls are frame sync checks
     // After init completes, return success to let scheduler invoke render callbacks
     if (timeout == 0 && !ShouldFailOpenWait()) {
@@ -4443,10 +4427,9 @@ void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
         return;
 
     uint32_t guestAddr = g_memory.MapVirtual(cs);
-    if (guestAddr < 0x10000)
+    if (guestAddr < 0x10000000)
         return;
 
-    // printf("RtlLeaveCriticalSection");
     cs->RecursionCount = cs->RecursionCount.get() - 1;
 
     if (cs->RecursionCount.get() != 0)
@@ -4463,12 +4446,12 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
         return;
 
     uint32_t guestAddr = g_memory.MapVirtual(cs);
-    if (guestAddr < 0x10000)
+    if (guestAddr < 0x10000000)
     {
         static uint32_t s_lowCount = 0;
         if (++s_lowCount <= 10)
         {
-            LOGF_WARNING("[LOCK] RtlEnterCriticalSection ignored low/null address 0x{:08X} (caller=0x{:08X})",
+            LOGF_WARNING("[LOCK] RtlEnterCriticalSection ignored invalid low address 0x{:08X} (caller=0x{:08X})",
                          guestAddr, GET_CALLER_LR());
         }
         return;
@@ -4477,45 +4460,48 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
     static int s_count = 0;
     static int s_waitCount = 0;
     ++s_count;
-    
-    be<uint32_t> thisThread = (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
+
+    be<uint32_t> thisThread =
+        (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
 
     std::atomic_ref owningThread(cs->OwningThread);
-    
+
     int loopCount = 0;
-    
-    while (true) 
+
+    while (true)
     {
         be<uint32_t> previousOwner = 0;
 
-        if (owningThread.compare_exchange_weak(previousOwner, thisThread) || previousOwner == thisThread)
+        if (owningThread.compare_exchange_weak(previousOwner, thisThread) ||
+            previousOwner == thisThread)
         {
             cs->RecursionCount = cs->RecursionCount.get() + 1;
             return;
         }
 
-        // Log when we're waiting on a lock held by another thread
-        if (loopCount == 0) {
+        if (loopCount == 0)
+        {
             ++s_waitCount;
-            if (s_waitCount <= 20) {
+            if (s_waitCount <= 20)
+            {
                 LOGF_WARNING("[LOCK] RtlEnterCriticalSection #{} thisThread=0x{:08X} WAITING on owner=0x{:08X} cs=0x{:08X}",
-                             s_count, thisThread.get(), previousOwner.get(), reinterpret_cast<uintptr_t>(cs) & 0xFFFFFFFF);
+                             s_count, thisThread.get(), previousOwner.get(),
+                             reinterpret_cast<uintptr_t>(cs) & 0xFFFFFFFF);
             }
         }
         ++loopCount;
-        
-        // Log periodically if waiting for an unusually long time (> 500ms)
-        if (loopCount % 5000 == 0) {
+
+        if (loopCount % 5000 == 0)
+        {
             LOGF_WARNING("[LOCK] Long wait on cs=0x{:08X} ({} spins, owner=0x{:08X}, thisThread=0x{:08X})",
-                         reinterpret_cast<uintptr_t>(cs) & 0xFFFFFFFF, loopCount, previousOwner.get(), thisThread.get());
+                         reinterpret_cast<uintptr_t>(cs) & 0xFFFFFFFF, loopCount,
+                         previousOwner.get(), thisThread.get());
         }
-        
-        // Yield briefly for quick handoff, sleep slightly if contended
-        if (loopCount < 50) {
+
+        if (loopCount < 50)
             std::this_thread::yield();
-        } else {
+        else
             std::this_thread::sleep_for(std::chrono::microseconds(50));
-        }
     }
 }
 
@@ -4555,7 +4541,7 @@ uint32_t RtlInitializeCriticalSection(XRTL_CRITICAL_SECTION* cs)
         return 0xC0000008;
 
     uint32_t guestAddr = g_memory.MapVirtual(cs);
-    if (guestAddr < 0x10000)
+    if (guestAddr < 0x10000000)
         return 0xC0000008;
 
     // printf("RtlInitializeCriticalSection %x\n", cs);
@@ -4688,7 +4674,8 @@ void VdEnableRingBufferRPtrWriteBack(uint32_t writebackAddr, uint32_t blockSizeL
     // Immediately write 0 to the writeback address to indicate GPU is caught up
     if (writebackAddr != 0)
     {
-        uint32_t* hostPtr = reinterpret_cast<uint32_t*>(g_memory.Translate(writebackAddr));
+        uint32_t* hostPtr = reinterpret_cast<uint32_t*>(
+            g_memory.Translate(0xC0000000u | (writebackAddr & 0x1FFFFFFFu)));
         if (hostPtr)
         {
             *hostPtr = 0;  // GPU read pointer = 0 (caught up with write pointer initially)
@@ -4709,10 +4696,20 @@ void VdInitializeRingBuffer(uint32_t physAddr, uint32_t sizeLog2)
               physAddr, sizeLog2, g_gpuRingBuffer.ringBufferSize);
 }
 
+static uint32_t* TranslateGpuPhysical(uint32_t address)
+{
+    const uint32_t guestAlias = 0xC0000000u | (address & 0x1FFFFFFFu);
+    if (guestAlias > PPC_MEMORY_SIZE - sizeof(uint32_t))
+        return nullptr;
+
+    return reinterpret_cast<uint32_t*>(g_memory.Translate(guestAlias));
+}
+
 // Scan a command buffer for PM4 packets (helper function)
 // Returns number of packets found
-static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIndirect, uint32_t scanCount) {
-    static bool s_loggedIndirect = false;
+static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIndirect, uint32_t scanCount, uint32_t depth = 0) {
+    static uint32_t s_loggedWaitCount = 0;
+    const bool accountPackets = scanCount == 0;
     uint32_t packetsFound = 0;
     uint32_t pos = 0;
     uint32_t maxScan = std::min(bufferDwords, 1024u);
@@ -4726,67 +4723,90 @@ static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIn
             uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
             
             // Log ALL packets from indirect buffers for first few scans
-            if (isIndirect && !s_loggedIndirect && scanCount < 5) {
+            if (isIndirect && scanCount == 0) {
                 LOGF_WARNING("[PM4-IB] opcode=0x{:02X}({}) count={} pos={}",
                     opcode, GetPM4OpcodeName(opcode), count, pos);
             }
             
             // Count by type & process fences
             switch (opcode) {
-                case PM4_DRAW_INDX:
-                case PM4_DRAW_INDX_2:
-                    g_gpuRingBuffer.pm4DrawCount++;
+                case PM4_INDIRECT_BUFFER_PFD:
+                case PM4_INDIRECT_BUFFER: {
+                    if (count >= 2 && pos + 2 < maxScan && depth < 8) {
+                        const uint32_t indirectAddress = ByteSwap(buffer[pos + 1]);
+                        const uint32_t indirectSize = ByteSwap(buffer[pos + 2]) & 0xFFFFFu;
+                        uint32_t* indirect = TranslateGpuPhysical(indirectAddress);
+                        if (isIndirect && scanCount == 0) {
+                            LOGF_WARNING(
+                                "[PM4-IB] nested addr=0x{:08X} size={} dwords depth={}",
+                                indirectAddress, indirectSize, depth + 1);
+                        }
+                        if (indirect != nullptr && indirectSize != 0) {
+                            packetsFound += ScanPM4Buffer(
+                                indirect, indirectSize, true, scanCount, depth + 1);
+                        }
+                    }
+                    if (accountPackets) g_gpuRingBuffer.pm4OtherCount++;
                     break;
+                }
+                case PM4_WAIT_REG_MEM: {
+                    if (s_loggedWaitCount < 16 && count >= 5 && pos + 5 < maxScan) {
+                        const uint32_t waitInfo = ByteSwap(buffer[pos + 1]);
+                        const uint32_t pollAddress = ByteSwap(buffer[pos + 2]);
+                        const uint32_t reference = ByteSwap(buffer[pos + 3]);
+                        const uint32_t mask = ByteSwap(buffer[pos + 4]);
+                        const uint32_t waitValue = ByteSwap(buffer[pos + 5]);
+                        const bool isMemory = (waitInfo & 0x10) != 0;
+                        const uint32_t* poll = isMemory
+                            ? TranslateGpuPhysical(pollAddress & ~0x3u)
+                            : nullptr;
+                        const uint32_t currentValue = poll ? ByteSwap(*poll) : 0;
+                        LOGF_WARNING(
+                            "[PM4-IB] WAIT_REG_MEM scan={} indirect={} info=0x{:08X} target={} address=0x{:08X} ref=0x{:08X} mask=0x{:08X} wait=0x{:08X} current=0x{:08X}",
+                            scanCount, isIndirect,
+                            waitInfo, isMemory ? "memory" : "register",
+                            pollAddress, reference, mask, waitValue, currentValue);
+                        ++s_loggedWaitCount;
+                    }
+                    g_gpuRingBuffer.pm4OtherCount++;
+                    break;
+                }
+                case PM4_DRAW_INDX:
+                case PM4_DRAW_INDX_2: {
+                    static uint32_t s_loggedDrawCount = 0;
+                    if (s_loggedDrawCount < 10 && count >= 1 && pos + 1 < maxScan) {
+                        const uint32_t initiator = ByteSwap(buffer[pos + 1]);
+                        LOGF_WARNING(
+                            "[PM4-IB] draw initiator=0x{:08X} primitive={} source={} indexSize={} indices={}",
+                            initiator, initiator & 0x3Fu, (initiator >> 6) & 0x3u,
+                            (initiator >> 11) & 0x1u, initiator >> 16);
+                        ++s_loggedDrawCount;
+                    }
+                    if (accountPackets) g_gpuRingBuffer.pm4DrawCount++;
+                    break;
+                }
                 case PM4_IM_LOAD:
                 case PM4_IM_LOAD_IMMEDIATE:
-                    g_gpuRingBuffer.pm4ShaderLoadCount++;
+                    if (accountPackets) g_gpuRingBuffer.pm4ShaderLoadCount++;
                     break;
                 case PM4_SET_CONSTANT:
                 case PM4_SET_CONSTANT2:
                 case PM4_SET_SHADER_CONSTANTS:
-                    g_gpuRingBuffer.pm4SetConstantCount++;
+                    if (accountPackets) g_gpuRingBuffer.pm4SetConstantCount++;
                     break;
                 case PM4_XE_SWAP:
-                    g_gpuRingBuffer.pm4SwapCount++;
+                    if (accountPackets) g_gpuRingBuffer.pm4SwapCount++;
                     break;
                 case PM4_EVENT_WRITE_SHD:
                 case PM4_EVENT_WRITE_EXT: {
-                    // PM4_EVENT_WRITE_SHD writes a timestamp/fence to memory
-                    // dword 0: event initiator
-                    // dword 1: write address (physical)
-                    // dword 2: write value
-                    if (pos + 3 < maxScan && count >= 3) {
-                        uint32_t destAddr = ByteSwap(buffer[pos + 2]);
-                        uint32_t val = ByteSwap(buffer[pos + 3]);
-                        if (destAddr != 0) {
-                            uint32_t* hostDest = reinterpret_cast<uint32_t*>(g_memory.Translate(destAddr));
-                            if (hostDest) {
-                                *hostDest = ByteSwap(val);
-                            }
-                        }
-                    }
-                    g_gpuRingBuffer.pm4OtherCount++;
+                    if (accountPackets) g_gpuRingBuffer.pm4OtherCount++;
                     break;
                 }
-                case PM4_MEM_WRITE: {
-                    // PM4_MEM_WRITE writes data directly to memory
-                    // dword 0: address
-                    // dword 1: value
-                    if (pos + 2 < maxScan && count >= 2) {
-                        uint32_t destAddr = ByteSwap(buffer[pos + 1]);
-                        uint32_t val = ByteSwap(buffer[pos + 2]);
-                        if (destAddr != 0) {
-                            uint32_t* hostDest = reinterpret_cast<uint32_t*>(g_memory.Translate(destAddr));
-                            if (hostDest) {
-                                *hostDest = ByteSwap(val);
-                            }
-                        }
-                    }
-                    g_gpuRingBuffer.pm4OtherCount++;
+                case PM4_MEM_WRITE:
+                    if (accountPackets) g_gpuRingBuffer.pm4OtherCount++;
                     break;
-                }
                 default:
-                    g_gpuRingBuffer.pm4OtherCount++;
+                    if (accountPackets) g_gpuRingBuffer.pm4OtherCount++;
                     break;
             }
             
@@ -4799,7 +4819,7 @@ static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIn
             uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
             
             // Log first few TYPE0 packets from indirect buffers
-            if (isIndirect && !s_loggedIndirect && scanCount < 2 && packetsFound < 10) {
+            if (isIndirect && scanCount == 0) {
                 LOGF_WARNING("[PM4-IB] TYPE0 reg=0x{:04X} count={} pos={}",
                     regIndex, count, pos);
             }
@@ -4808,15 +4828,17 @@ static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIn
             packetsFound++;
         }
         else if (type == PM4_TYPE2) {
+            if (isIndirect && scanCount == 0) {
+                LOGF_WARNING("[PM4-IB] TYPE2 pos={}", pos);
+            }
             pos++;
         }
         else {
+            if (isIndirect && scanCount == 0) {
+                LOGF_WARNING("[PM4-IB] type={} raw=0x{:08X} pos={}", type, packet, pos);
+            }
             pos++;
         }
-    }
-    
-    if (isIndirect && packetsFound > 0) {
-        s_loggedIndirect = true;
     }
     
     return packetsFound;
@@ -4830,8 +4852,7 @@ void ScanRingBufferForPM4Packets()
         return;
     
     // Get pointer to ring buffer in host memory
-    uint32_t* ringBuffer = reinterpret_cast<uint32_t*>(
-        g_memory.Translate(g_gpuRingBuffer.ringBufferBase));
+    uint32_t* ringBuffer = TranslateGpuPhysical(g_gpuRingBuffer.ringBufferBase);
     if (!ringBuffer)
         return;
     
@@ -4874,31 +4895,6 @@ void ScanRingBufferForPM4Packets()
                         ibAddr, ibSize);
                 }
             }
-            else if (opcode == PM4_EVENT_WRITE_SHD || opcode == PM4_EVENT_WRITE_EXT) {
-                if (pos + 3 < maxScan && count >= 3) {
-                    uint32_t destAddr = ByteSwap(ringBuffer[pos + 2]);
-                    uint32_t val = ByteSwap(ringBuffer[pos + 3]);
-                    if (destAddr != 0) {
-                        uint32_t* hostDest = reinterpret_cast<uint32_t*>(g_memory.Translate(destAddr));
-                        if (hostDest) {
-                            *hostDest = ByteSwap(val);
-                        }
-                    }
-                }
-            }
-            else if (opcode == PM4_MEM_WRITE) {
-                if (pos + 2 < maxScan && count >= 2) {
-                    uint32_t destAddr = ByteSwap(ringBuffer[pos + 1]);
-                    uint32_t val = ByteSwap(ringBuffer[pos + 2]);
-                    if (destAddr != 0) {
-                        uint32_t* hostDest = reinterpret_cast<uint32_t*>(g_memory.Translate(destAddr));
-                        if (hostDest) {
-                            *hostDest = ByteSwap(val);
-                        }
-                    }
-                }
-            }
-            
             // Count by type (primary buffer)
             g_gpuRingBuffer.pm4OtherCount++;
             
@@ -4922,7 +4918,7 @@ void ScanRingBufferForPM4Packets()
     for (const auto& [ibAddr, ibSize] : indirectBuffers) {
         if (ibAddr == 0 || ibSize == 0) continue;
         
-        uint32_t* ibBuffer = reinterpret_cast<uint32_t*>(g_memory.Translate(ibAddr));
+        uint32_t* ibBuffer = TranslateGpuPhysical(ibAddr);
         if (ibBuffer) {
             uint32_t ibPackets = ScanPM4Buffer(ibBuffer, ibSize, true, s_scanCount);
             packetsFound += ibPackets;
@@ -4954,8 +4950,10 @@ void ScanRingBufferForPM4Packets()
 
 uint32_t MmGetPhysicalAddress(uint32_t address)
 {
-    LOGF_UTILITY("0x{:x}", address);
-    return address;
+    const uint32_t physicalAddress =
+        address >= 0x80000000u ? address & 0x1FFFFFFFu : address;
+    LOGF_UTILITY("virtual=0x{:08X} physical=0x{:08X}", address, physicalAddress);
+    return physicalAddress;
 }
 
 void VdSetSystemCommandBufferGpuIdentifierAddress()
@@ -5520,14 +5518,19 @@ bool RtlTryEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
     if (!cs)
         return false;
 
+    if (g_memory.MapVirtual(cs) < 0x10000000)
+        return false;
+
     // printf("RtlTryEnterCriticalSection\n");
-    be<uint32_t> thisThread = (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
+    be<uint32_t> thisThread =
+        (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
 
     std::atomic_ref owningThread(cs->OwningThread);
 
     be<uint32_t> previousOwner = 0;
 
-    if (owningThread.compare_exchange_weak(previousOwner, thisThread) || previousOwner == thisThread)
+    if (owningThread.compare_exchange_weak(previousOwner, thisThread) ||
+        previousOwner == thisThread)
     {
         cs->RecursionCount = cs->RecursionCount.get() + 1;
         return true;
@@ -5539,6 +5542,9 @@ bool RtlTryEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 void RtlInitializeCriticalSectionAndSpinCount(XRTL_CRITICAL_SECTION* cs, uint32_t spinCount)
 {
     if (!cs)
+        return;
+
+    if (g_memory.MapVirtual(cs) < 0x10000000)
         return;
 
     // printf("RtlInitializeCriticalSectionAndSpinCount\n");
@@ -5706,7 +5712,10 @@ uint32_t NtSetEvent(Event* handle, uint32_t* previousState)
 uint32_t NtCreateSemaphore(be<uint32_t>* Handle, XOBJECT_ATTRIBUTES* ObjectAttributes, uint32_t InitialCount, uint32_t MaximumCount)
 {
     static int s_count = 0; ++s_count;
-    uint32_t callerLR = GET_CALLER_LR();
+    const uint32_t outputGuestAddress =
+        Handle != nullptr && g_memory.IsInMemoryRange(Handle)
+            ? g_memory.MapVirtual(Handle)
+            : 0;
     
     Semaphore* sem = CreateKernelObject<Semaphore>(InitialCount, MaximumCount);
     *Handle = GetKernelHandle(sem);
@@ -5717,11 +5726,11 @@ uint32_t NtCreateSemaphore(be<uint32_t>* Handle, XOBJECT_ATTRIBUTES* ObjectAttri
         // Store the kernel handle for later signaling
         std::lock_guard<std::mutex> lock(g_semaphoreTrackMutex);
         g_blockingSemaphoreAddrs.insert(handle);  // Track handle directly
-        LOGF_WARNING("[NtCreateSemaphore] #{} handle=0x{:08X} count=0 max={} - TRACKED for signaling", 
-                     s_count, handle, MaximumCount);
+        LOGF_WARNING("[NtCreateSemaphore] #{} handle=0x{:08X} out=0x{:08X} count=0 max={}",
+                     s_count, handle, outputGuestAddress, MaximumCount);
     } else if (s_count <= 50) {
-        LOGF_WARNING("[NtCreateSemaphore] #{} handle=0x{:08X} count={} max={}", 
-                     s_count, handle, InitialCount, MaximumCount);
+        LOGF_WARNING("[NtCreateSemaphore] #{} handle=0x{:08X} out=0x{:08X} count={} max={}",
+                     s_count, handle, outputGuestAddress, InitialCount, MaximumCount);
     }
     
     return STATUS_SUCCESS;
@@ -9724,13 +9733,8 @@ PPC_FUNC(sub_831939E0)
 // =============================================================================
 // GPU Ring Buffer Wait & PM4 Dispatch Hooks (sub_8250D988, sub_82220140)
 // =============================================================================
-// GTA V's rendering engine writes PM4 command packets into a ring buffer and
-// calls sub_8250D988 to ensure sufficient free space before continuing.
-// Without an asynchronous physical Xenos GPU advancing the read pointer,
-// the CPU spins in sub_82220140 waiting for read_ptr to catch up with write_ptr.
-//
-// These hooks advance the GPU read pointer to match the write pointer,
-// preventing spinlocks and allowing PM4 command packets to be parsed.
+// GTA V calls sub_8250D988 to ensure sufficient room in the ring buffer.
+// The hook observes the ring without fabricating a read-pointer/fence update.
 // =============================================================================
 PPC_FUNC(sub_8250D988)
 {
@@ -9738,30 +9742,12 @@ PPC_FUNC(sub_8250D988)
     ++s_flushCount;
 
     uint32_t dev = ctx.r3.u32;
-    uint32_t writePtr = ctx.r4.u32;
-
-    if (dev != 0 && dev >= 0x80000000)
-    {
-        uint32_t pReadPtr = PPC_LOAD_U32(dev + 11024);
-        if (pReadPtr != 0 && pReadPtr >= 0x80000000)
-        {
-            // Advance GPU read pointer to catch up with CPU write pointer
-            PPC_STORE_U32(pReadPtr + 0, writePtr);
-        }
-    }
-
-    if (g_gpuRingBuffer.readPtrWritebackAddr != 0)
-    {
-        uint32_t* hostPtr = reinterpret_cast<uint32_t*>(g_memory.Translate(g_gpuRingBuffer.readPtrWritebackAddr));
-        if (hostPtr)
-        {
-            *hostPtr = writePtr;
-        }
-    }
+    uint32_t requestedSize = ctx.r4.u32;
 
     if (s_flushCount <= 20 || (s_flushCount % 200 == 0))
     {
-        LOGF_INFO("[GPU RING] sub_8250D988 #{} dev=0x{:08X} writePtr=0x{:08X}", s_flushCount, dev, writePtr);
+        LOGF_INFO("[GPU RING] sub_8250D988 #{} dev=0x{:08X} requestedSize={} flags=0x{:08X}",
+                  s_flushCount, dev, requestedSize, ctx.r5.u32);
     }
 
     ScanRingBufferForPM4Packets();
@@ -9769,22 +9755,7 @@ PPC_FUNC(sub_8250D988)
 
 PPC_FUNC(sub_82220140)
 {
-    uint32_t waitObj = ctx.r3.u32;
-    if (waitObj != 0 && waitObj >= 0x80000000)
-    {
-        uint32_t dev = PPC_LOAD_U32(waitObj + 0);
-        if (dev != 0 && dev >= 0x80000000)
-        {
-            uint32_t pReadPtr = PPC_LOAD_U32(dev + 11024);
-            uint32_t writePtr = PPC_LOAD_U32(dev + 48);
-            if (pReadPtr != 0 && pReadPtr >= 0x80000000 && writePtr != 0)
-            {
-                PPC_STORE_U32(pReadPtr + 0, writePtr);
-            }
-        }
-    }
-
-    // Return 0 so callers immediately exit the spin loop
+    // Signal that no wait is required; do not modify guest fence state.
     ctx.r3.s64 = 0;
 }
 
@@ -12698,6 +12669,11 @@ PPC_FUNC(sub_825777D0)
 }
 
 extern "C" void __imp__sub_82577590(PPCContext& ctx, uint8_t* base);
+extern "C" void S1ProgressLog(const char* function, uint32_t guestR3)
+{
+    LOGF_WARNING("[S1-PROGRESS] {} r3=0x{:08X}", function, guestR3);
+}
+
 PPC_FUNC(sub_82577590)
 {
     LOGF_INFO("[sub_82577590] State 1 sub_82577590 enter obj=0x{:08X}", ctx.r3.u32);
@@ -13124,6 +13100,29 @@ PPC_FUNC(sub_823EBC80)
     ctx.r29.u64 = ctx.r4.u64;
     PPC_STORE_U8(ctx.r1.u32 + 80, ctx.r11.u8);
     ctx.r28.s64 = ctx.r3.s64 + 20;
+
+    static std::atomic<uint64_t> s_allocTraceCount{0};
+    if (s_allocTraceCount.fetch_add(1, std::memory_order_relaxed) == 0) {
+        const uint32_t object = ctx.r31.u32;
+        if (object >= 0x10000 && object <= UINT32_MAX - 544) {
+            const uint32_t pool = PPC_LOAD_U32(object + 8);
+            const bool poolValid = pool >= 0x10000 && pool <= UINT32_MAX - 20;
+            LOGF_INFO("[sub_823EBC80] first allocation object=0x{:08X} size=0x{:08X} pool=0x{:08X} count={} align={} capacity=0x{:08X} used=0x{:08X} free=0x{:08X} grow=0x{:08X}",
+                      object, ctx.r29.u32, pool,
+                      PPC_LOAD_U32(object + 16), PPC_LOAD_U32(object + 20),
+                      PPC_LOAD_U32(object + 504), PPC_LOAD_U32(object + 520),
+                      PPC_LOAD_U32(object + 540), PPC_LOAD_U32(object + 544));
+            if (poolValid) {
+                LOGF_INFO("[sub_823EBC80] pool fields={:08X},{:08X},{:08X},{:08X},{:08X},{:08X}",
+                          PPC_LOAD_U32(pool), PPC_LOAD_U32(pool + 4),
+                          PPC_LOAD_U32(pool + 8), PPC_LOAD_U32(pool + 12),
+                          PPC_LOAD_U32(pool + 16), PPC_LOAD_U32(pool + 20));
+            }
+        } else {
+            LOGF_WARNING("[sub_823EBC80] invalid allocation object=0x{:08X} size=0x{:08X}",
+                         object, ctx.r29.u32);
+        }
+    }
 
     int loopCount = 0;
 loc_823EBCA0:
@@ -13736,9 +13735,27 @@ PPC_FUNC(sub_8266BB00)
     uint32_t val = PPC_LOAD_U32(ctx.r3.u32 + 36);
     if (val >= 0x10000 && val < PPC_MEMORY_SIZE - 256) {
         uint32_t vtbl = PPC_LOAD_U32(val + 0);
-        if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE - 256) {
-            ctx.r3.u64 = val;
-            return;
+        if (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE - 220 && (vtbl & 3) == 0) {
+            uint32_t target = PPC_LOAD_U32(vtbl + 216);
+            if (target >= PPC_CODE_BASE &&
+                target < PPC_CODE_BASE + PPC_CODE_SIZE &&
+                PPC_LOOKUP_FUNC(base, target) != nullptr) {
+                ctx.r3.u64 = val;
+                return;
+            }
+            static bool loggedInvalidTarget = false;
+            if (!loggedInvalidTarget) {
+                LOGF_INFO("[sub_8266BB00] Replacing invalid listener vtable target 0x{:08X} (object 0x{:08X}, vtable 0x{:08X})",
+                    target, val, vtbl);
+                loggedInvalidTarget = true;
+            }
+        } else {
+            static bool loggedInvalidVtable = false;
+            if (!loggedInvalidVtable) {
+                LOGF_INFO("[sub_8266BB00] Replacing invalid listener vtable 0x{:08X} (object 0x{:08X})",
+                    vtbl, val);
+                loggedInvalidVtable = true;
+            }
         }
     }
 
@@ -14012,20 +14029,3 @@ PPC_FUNC(sub_83536A60)
     }
     __imp__sub_83536A60(ctx, base);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
