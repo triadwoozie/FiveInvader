@@ -32,8 +32,11 @@ add_custom_command(
         $<TARGET_FILE:XenonRecomp> "${CMAKE_CURRENT_SOURCE_DIR}/config/GTA5.toml" "${FIVEINVADER_TOOLS_ROOT}/XenonRecomp/XenonUtils/ppc_context.h"
     COMMAND
         python3 "${CMAKE_CURRENT_SOURCE_DIR}/../tools/patch_ppc_case_blocks.py" "${CMAKE_CURRENT_SOURCE_DIR}/ppc"
+    COMMAND
+        python3 "${CMAKE_CURRENT_SOURCE_DIR}/../tools/patch_ppc_allocator_guards.py"
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/../tools/patch_ppc_case_blocks.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/patch_ppc_allocator_guards.py"
         XenonRecomp
         "${CMAKE_CURRENT_SOURCE_DIR}/private/default.xex"
         "${CMAKE_CURRENT_SOURCE_DIR}/config/GTA5.toml"

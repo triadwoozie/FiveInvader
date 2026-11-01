@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Apply allocator indirect call guards to decompiled PowerPC units:
-- FiveInvaderLib/ppc/ppc_recomp.96.cpp: sub_828F1AE0 indirect call guard
-- FiveInvaderLib/ppc/ppc_recomp.268.cpp: sub_83213570 & sub_83213A34 allocator fallback guards
-- FiveInvaderLib/ppc/ppc_recomp.269.cpp: sub_8321D9F8 allocator fallback guards
-"""
+"""Reapply runtime-critical fixes to generated PowerPC units."""
 
 import pathlib
 import sys
@@ -26,8 +22,36 @@ def patch_file(path: pathlib.Path, old_text: str, new_text: str) -> bool:
     print(f"Successfully patched: {path.name}")
     return True
 
+
+def patch_worker_list_updates(path: pathlib.Path) -> bool:
+    if not path.exists():
+        print(f"File not found: {path}")
+        return False
+
+    content = path.read_text(encoding="utf-8")
+    old_text = "\t// lhzu r9,12(r10)\n\t// addi r11,r11,1"
+    new_text = (
+        "\t// lhzu r9,12(r10)\n"
+        "\tctx.r10.s64 = ctx.r10.s64 + 12;\n"
+        "\tctx.r9.u64 = PPC_LOAD_U16(ctx.r10.u32);\n"
+        "\t// addi r11,r11,1"
+    )
+    if old_text not in content:
+        if new_text in content:
+            print(f"Already patched worker-list updates: {path.name}")
+            return False
+        print(f"Worker-list update pattern not found in: {path.name}")
+        return False
+
+    content = content.replace(old_text, new_text)
+    path.write_text(content, encoding="utf-8")
+    print(f"Patched worker-list updates: {path.name}")
+    return True
+
+
 def main():
     ppc_dir = REPO_ROOT / "FiveInvaderLib" / "ppc"
+    patch_worker_list_updates(ppc_dir / "ppc_recomp.337.cpp")
 
     # Patch 269: sub_8321D9F8
     target_269_old = """\t// lwzx r3,r10,r11

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <array>
 #include <deque>
+#include <limits>
 #include <sstream>
 #include <stdafx.h>
 #include <cpu/ppc_context.h>
@@ -27,6 +28,9 @@
 #include "heap.h"
 #include "memory.h"
 #include <memory>
+#if defined(__linux__)
+#include <openssl/evp.h>
+#endif
 #include "xam.h"
 #include "xdm.h"
 #include <hid/hid.h>
@@ -1338,6 +1342,48 @@ namespace
         }
         
         LOGF_IMPL(Utility, "DecryptRpfBufferInPlace", "Decrypted {} bytes (skipped {} leading bytes)", alignedLen, skipBytes);
+#elif defined(__linux__)
+        if (alignedLen > static_cast<uint32_t>(std::numeric_limits<int>::max()))
+        {
+            LOGF_IMPL(Utility, "DecryptRpfBufferInPlace",
+                      "Aligned buffer exceeds OpenSSL limit (len={})", alignedLen);
+            return;
+        }
+
+        std::vector<uint8_t> decrypted(alignedLen + EVP_MAX_BLOCK_LENGTH);
+        for (int iter = 0; iter < 16; ++iter)
+        {
+            EVP_CIPHER_CTX* context = EVP_CIPHER_CTX_new();
+            if (!context)
+            {
+                LOGF_IMPL(Utility, "DecryptRpfBufferInPlace",
+                          "Failed to allocate OpenSSL cipher context");
+                return;
+            }
+
+            int outputLength = 0;
+            int finalLength = 0;
+            const bool success =
+                EVP_DecryptInit_ex(context, EVP_aes_256_ecb(), nullptr,
+                                   g_aesKey.data(), nullptr) == 1 &&
+                EVP_CIPHER_CTX_set_padding(context, 0) == 1 &&
+                EVP_DecryptUpdate(context, decrypted.data(), &outputLength,
+                                  alignedStart, static_cast<int>(alignedLen)) == 1 &&
+                EVP_DecryptFinal_ex(context, decrypted.data() + outputLength,
+                                    &finalLength) == 1;
+            EVP_CIPHER_CTX_free(context);
+
+            if (!success || static_cast<uint32_t>(outputLength + finalLength) != alignedLen)
+            {
+                LOGF_IMPL(Utility, "DecryptRpfBufferInPlace",
+                          "OpenSSL AES decrypt failed (iter={})", iter);
+                return;
+            }
+
+            std::memcpy(alignedStart, decrypted.data(), alignedLen);
+        }
+        LOGF_IMPL(Utility, "DecryptRpfBufferInPlace",
+                  "Decrypted {} bytes (skipped {} leading bytes)", alignedLen, skipBytes);
 #else
         // Non-macOS: no AES implementation available here.
         LOGF_IMPL(Utility, "DecryptRpfBufferInPlace", "AES decrypt not implemented on this platform");
