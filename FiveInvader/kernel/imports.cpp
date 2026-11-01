@@ -5326,13 +5326,17 @@ uint32_t KeWaitForSingleObject(XDISPATCHER_HEADER* Object, uint32_t WaitReason, 
     // SONIC APPROACH: Simple direct kernel object wait - no SyncTable
     const uint32_t timeout = GuestTimeoutToMilliseconds(Timeout);
     static std::atomic<int> s_keWaitCount{0};
+    PPCContext* ppcContext = GetPPCContext();
+    const auto stackTrace = CaptureGuestStackTrace();
     uint32_t callerLR = GET_CALLER_LR();
     ScopedWaitTracker waitTracker("KeWaitForSingleObject", Object ? (uint32_t)((uint8_t*)Object - g_memory.base) : 0, timeout, callerLR);
     if (s_keWaitCount++ < 50 || s_keWaitCount % 200 == 0) {
-        LOGF_INFO("[TRACE] KeWaitForSingleObject: #{} obj=0x{:08X} type={} timeout={}ms caller=0x{:08X}",
+        LOGF_INFO("[TRACE] KeWaitForSingleObject: #{} obj=0x{:08X} type={} timeout={}ms caller=0x{:08X} sp=0x{:08X} tls=0x{:08X} stack={:08X},{:08X},{:08X},{:08X}",
                   s_keWaitCount.load(),
                   Object ? (uint32_t)((uint8_t*)Object - g_memory.base) : 0,
-                  Object ? Object->Type : -1, timeout, callerLR);
+                  Object ? Object->Type : -1, timeout, callerLR,
+                  ppcContext ? ppcContext->r1.u32 : 0u, ppcContext ? ppcContext->r13.u32 : 0u,
+                  stackTrace[0], stackTrace[1], stackTrace[2], stackTrace[3]);
     }
 
     if (!Object)
