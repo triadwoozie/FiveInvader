@@ -20,7 +20,7 @@ switch_table_file_path = "./GTA5_switch_tables.toml"
 # These optimizations reduce memory traffic to the CPU Context structure
 # and allow LLVM/Clang to perform aggressive register allocation in native code.
 
-skip_lr = true               # Elide link register context writes when safe
+skip_lr = false              # Preserve link register context for runtime caller diagnostics
 skip_msr = true              # Elide machine state register context synchronization
 ctr_as_local = true          # Allocate CTR (count register) as a local C++ variable
 cr_as_local = true           # Allocate CR (condition register fields) as local variables
