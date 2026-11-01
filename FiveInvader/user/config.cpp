@@ -776,9 +776,31 @@ bool ConfigDef<T, isHidden>::IsValueChanged()
     return m_storedValue != Value;
 }
 
+static std::filesystem::path s_customConfigPath;
+
+void Config::SetConfigPath(const std::filesystem::path& path)
+{
+    s_customConfigPath = path;
+}
+
 std::filesystem::path Config::GetConfigPath()
 {
-    return GetUserPath() / "config.toml";
+    if (!s_customConfigPath.empty())
+        return s_customConfigPath;
+
+    std::filesystem::path userConfig = GetUserPath() / "config.toml";
+    if (std::filesystem::exists(userConfig))
+        return userConfig;
+
+    std::filesystem::path cwdConfig = std::filesystem::current_path() / "config.toml";
+    if (std::filesystem::exists(cwdConfig))
+        return cwdConfig;
+
+    std::filesystem::path exeConfig = g_executableRoot / "config.toml";
+    if (std::filesystem::exists(exeConfig))
+        return exeConfig;
+
+    return userConfig;
 }
 
 void Config::CreateCallbacks()

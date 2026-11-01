@@ -1703,7 +1703,7 @@ static void CreateImGuiBackend()
     AchievementMenu::Init();
     AchievementOverlay::Init();
     OptionsMenu::Init();
-    InstallerWizard::Init();
+    // InstallerWizard::Init() stripped: installer UI is bypassed
 
     ImGui_ImplSDL2_InitForOther(GameWindow::s_pWindow);
 
@@ -3076,7 +3076,7 @@ static void DrawImGui()
     AchievementMenu::Draw();
     OptionsMenu::Draw();
     AchievementOverlay::Draw();
-    InstallerWizard::Draw();
+    // InstallerWizard::Draw(); - stripped: installer UI is bypassed
     ButtonWindow::Draw();
     MessageWindow::Draw();
     Fader::Draw();
@@ -3415,12 +3415,7 @@ void Video::Present()
     cmd.type = RenderCommandType::ExecutePendingStretchRectCommands;
     g_renderQueue.enqueue(cmd);
 
-    // ImGui has threading issues during gameplay - crashes with iterator assertions
-    // But the installer runs single-threaded, so enable ImGui for installer UI
-    if (InstallerWizard::s_isVisible)
-    {
-        DrawImGui();
-    }
+    // Installer wizard UI rendering stripped: installer UI is bypassed
 
     cmd.type = RenderCommandType::ExecuteCommandList;
     g_renderQueue.enqueue(cmd);

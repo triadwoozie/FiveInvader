@@ -319,7 +319,7 @@ const char* GameWindow::GetTitle()
 {
     if (Config::UseOfficialTitleOnTitleBar)
     {
-        return "SONIC THE HEDGEHOG";
+        return "Grand Theft Auto V";
     }
 
     return "FiveInvader";

@@ -257,6 +257,7 @@ public:
     static inline bool s_isCallbacksCreated;
 
     static std::filesystem::path GetConfigPath();
+    static void SetConfigPath(const std::filesystem::path& path);
 
     static void CreateCallbacks();
     static void Load();

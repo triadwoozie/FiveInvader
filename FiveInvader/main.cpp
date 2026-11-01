@@ -407,6 +407,13 @@ int main(int argc, char *argv[])
     bool forceInstallationCheck = false;
     bool graphicsApiRetry = false;
     const char *sdlVideoDriver = nullptr;
+    std::string cliConfigPath;
+    std::string cliLang;
+    int cliWidth = 0;
+    int cliHeight = 0;
+    int cliVsync = -1;
+    int cliFullscreen = -1;
+    int cliFps = 0;
 
     for (uint32_t i = 1; i < argc; i++)
     {
@@ -424,8 +431,7 @@ int main(int argc, char *argv[])
             else
                 LOGN_WARNING("No argument was specified for --sdl-video-driver. Option will be ignored.");
         }
-
-        if (strcmp(argv[i], "--game-dir") == 0 || strcmp(argv[i], "--game-path") == 0)
+        else if (strcmp(argv[i], "--game-dir") == 0 || strcmp(argv[i], "--game-path") == 0)
         {
             if ((i + 1) < argc)
             {
@@ -436,16 +442,119 @@ int main(int argc, char *argv[])
                 LOGN_WARNING("No argument was specified for --game-dir. Option will be ignored.");
             }
         }
+        else if (strcmp(argv[i], "--config") == 0)
+        {
+            if ((i + 1) < argc)
+            {
+                cliConfigPath = argv[++i];
+            }
+        }
+        else if (strcmp(argv[i], "--lang") == 0 || strcmp(argv[i], "--language") == 0)
+        {
+            if ((i + 1) < argc)
+            {
+                cliLang = argv[++i];
+            }
+        }
+        else if (strcmp(argv[i], "--width") == 0)
+        {
+            if ((i + 1) < argc)
+            {
+                cliWidth = std::atoi(argv[++i]);
+            }
+        }
+        else if (strcmp(argv[i], "--height") == 0)
+        {
+            if ((i + 1) < argc)
+            {
+                cliHeight = std::atoi(argv[++i]);
+            }
+        }
+        else if (strcmp(argv[i], "--res") == 0 || strcmp(argv[i], "--resolution") == 0)
+        {
+            if ((i + 1) < argc)
+            {
+                std::string resStr = argv[++i];
+                auto pos = resStr.find('x');
+                if (pos == std::string::npos) pos = resStr.find('X');
+                if (pos != std::string::npos)
+                {
+                    cliWidth = std::atoi(resStr.substr(0, pos).c_str());
+                    cliHeight = std::atoi(resStr.substr(pos + 1).c_str());
+                }
+            }
+        }
+        else if (strcmp(argv[i], "--vsync") == 0)
+        {
+            cliVsync = 1;
+        }
+        else if (strcmp(argv[i], "--no-vsync") == 0)
+        {
+            cliVsync = 0;
+        }
+        else if (strcmp(argv[i], "--fullscreen") == 0)
+        {
+            cliFullscreen = 1;
+        }
+        else if (strcmp(argv[i], "--windowed") == 0)
+        {
+            cliFullscreen = 0;
+        }
+        else if (strcmp(argv[i], "--fps") == 0)
+        {
+            if ((i + 1) < argc)
+            {
+                cliFps = std::atoi(argv[++i]);
+            }
+        }
     }
 
     if (!useDefaultWorkingDirectory)
     {
         // Set the current working directory to the executable's path.
         std::error_code ec;
-        std::filesystem::current_path(os::process::GetExecutablePath().parent_path(), ec);
+        std::filesystem::current_path(os::process::GetExecutableRoot(), ec);
     }
 
+    if (!cliConfigPath.empty())
+    {
+        Config::SetConfigPath(cliConfigPath);
+    }
     Config::Load();
+
+    // External launcher CLI overrides
+    if (!cliLang.empty())
+    {
+        std::string l = toLower(cliLang);
+        if (l == "en" || l == "english") Config::Language = ELanguage::English;
+        else if (l == "fr" || l == "french") Config::Language = ELanguage::French;
+        else if (l == "de" || l == "german") Config::Language = ELanguage::German;
+        else if (l == "it" || l == "italian") Config::Language = ELanguage::Italian;
+        else if (l == "es" || l == "spanish") Config::Language = ELanguage::Spanish;
+        else if (l == "ja" || l == "japanese") Config::Language = ELanguage::Japanese;
+        App::s_language = Config::Language;
+    }
+
+    if (cliWidth > 0 && cliHeight > 0)
+    {
+        Config::WindowWidth = cliWidth;
+        Config::WindowHeight = cliHeight;
+    }
+
+    if (cliVsync != -1)
+    {
+        Config::VSync = (cliVsync == 1);
+    }
+
+    if (cliFullscreen != -1)
+    {
+        Config::Fullscreen = (cliFullscreen == 1);
+    }
+
+    if (cliFps > 0)
+    {
+        Config::FPS = cliFps;
+    }
 
     if (forceInstallationCheck)
     {
@@ -532,28 +641,19 @@ int main(int argc, char *argv[])
 
     std::filesystem::path modulePath;
     bool isGameInstalled = Installer::checkGameInstall(GetGamePath(), modulePath);
-    bool runInstallerWizard = forceInstaller || forceDLCInstaller || !isGameInstalled;
-    
-    // TEMPORARY: Force installer UI to always show for preview
-    // TODO: Remove this line after UI preview is done
-    // runInstallerWizard = true;  // DISABLED - respect actual install check
-    
-     if (runInstallerWizard)
-     {
-         if (!Video::CreateHostDevice(sdlVideoDriver, graphicsApiRetry))
-         {
-             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, GameWindow::GetTitle(), Localise("Video_BackendError").c_str(), GameWindow::s_pWindow);
-             std::_Exit(1);
-         }
 
-         if (!InstallerWizard::Run(GetGamePath(), isGameInstalled && forceDLCInstaller))
-         {
-             std::_Exit(0);
-         }
-     }
+    if (!isGameInstalled)
+    {
+        fprintf(stderr, "[Main] Fatal: GTA V executable (default.xex) not found in '%s' or fallback paths.\n",
+                GetGamePath().string().c_str());
+        fprintf(stderr, "[Main] Please provide a valid game directory via --game-dir <path>.\n");
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, GameWindow::GetTitle(),
+            "GTA V executable (default.xex) not found.\nPlease specify the game directory using --game-dir <path>.",
+            GameWindow::s_pWindow);
+        std::_Exit(1);
+    }
 
-    // ModLoader::Init();
-
+    // Installer wizard is permanently bypassed for native GTA V direct execution
     printf("[Main] Calling KiSystemStartup...\n"); fflush(stdout);
     KiSystemStartup();
     printf("[Main] KiSystemStartup done\n"); fflush(stdout);
@@ -562,16 +662,14 @@ int main(int argc, char *argv[])
     uint32_t entry = LdrLoadModule(modulePath);
     printf("[Main] Module loaded, entry=0x%08X\n", entry); fflush(stdout);
 
-    if (!runInstallerWizard)
+    printf("[Main] Creating video device...\n"); fflush(stdout);
+    if (!Video::CreateHostDevice(sdlVideoDriver, graphicsApiRetry))
     {
-        printf("[Main] Creating video device...\n"); fflush(stdout);
-        if (!Video::CreateHostDevice(sdlVideoDriver, graphicsApiRetry))
-        {
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, GameWindow::GetTitle(), Localise("Video_BackendError").c_str(), GameWindow::s_pWindow);
-            std::_Exit(1);
-        }
-        printf("[Main] Video device created\n"); fflush(stdout);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, GameWindow::GetTitle(), Localise("Video_BackendError").c_str(), GameWindow::s_pWindow);
+        std::_Exit(1);
     }
+    printf("[Main] Video device created\n"); fflush(stdout);
+
     LOGN_WARNING("Start Guest Thread");
     LOGN_WARNING(modulePath.string());
     // Video::StartPipelinePrecompilation();

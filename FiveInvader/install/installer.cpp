@@ -1,5 +1,8 @@
 #include "installer.h"
 #include <functional>
+#include <user/paths.h>
+#include <os/process.h>
+#include <os/logger.h>
 #include "shader_converter.h"
 #include "iso_extractor.h"
 #include "rpf_extractor.h"
@@ -47,10 +50,6 @@ static std::string fromPath(const std::filesystem::path &path)
     return fromU8(path.u8string());
 }
 
-static std::string toLower(std::string str) {
-    std::transform(str.begin(), str.end(), str.begin(), [](unsigned char c) { return std::tolower(c); });
-    return str;
-};
 
 // Extract ZIP file to temp directory and return extracted STFS path
 static std::filesystem::path extractZipToTemp(const std::filesystem::path &zipPath)
@@ -413,14 +412,38 @@ static bool copyAllFiles(VirtualFileSystem &sourceVfs, const std::filesystem::pa
 
 bool Installer::checkGameInstall(const std::filesystem::path &baseDirectory, std::filesystem::path &modulePath)
 {
-    modulePath = baseDirectory / GameDirectory / GameExecutableFile;
-    if (std::filesystem::exists(modulePath))
-        return true;
+    std::vector<std::filesystem::path> candidates = {
+        baseDirectory / GameDirectory / GameExecutableFile,
+        baseDirectory / GameExecutableFile,
+        baseDirectory / "rom_data" / "extracted_disc2" / GameExecutableFile,
+        baseDirectory / ".." / "rom_data" / "extracted_disc2" / GameExecutableFile,
+        baseDirectory / "FiveInvaderLib" / "private" / GameExecutableFile,
+        os::process::GetExecutableRoot() / GameDirectory / GameExecutableFile,
+        os::process::GetExecutableRoot() / GameExecutableFile,
+        os::process::GetExecutableRoot() / "rom_data" / "extracted_disc2" / GameExecutableFile,
+        os::process::GetExecutableRoot() / ".." / "rom_data" / "extracted_disc2" / GameExecutableFile,
+        os::process::GetExecutableRoot() / ".." / ".." / "rom_data" / "extracted_disc2" / GameExecutableFile,
+        "/home/triadwoozie/Documents/FiveInvader/rom_data/extracted_disc2/default.xex"
+    };
 
-    // Direct game directory without "game" subdirectory
-    modulePath = baseDirectory / GameExecutableFile;
-    if (std::filesystem::exists(modulePath))
-        return true;
+    for (const auto& candidate : candidates)
+    {
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec))
+        {
+            modulePath = std::filesystem::canonical(candidate, ec);
+            if (ec) modulePath = candidate;
+
+            std::filesystem::path gameDir = modulePath.parent_path();
+            if (gameDir.filename() == "game")
+                gameDir = gameDir.parent_path();
+            SetUserPath(gameDir);
+
+            LOGFN_INFO("[Installer] Resolved game executable: '{}', game directory: '{}'",
+                       modulePath.string(), gameDir.string());
+            return true;
+        }
+    }
 
     return false;
 }

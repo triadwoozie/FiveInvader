@@ -1929,152 +1929,21 @@ static void ProcessMusic()
 
 void InstallerWizard::Init()
 {
-    auto &io = ImGui::GetIO();
-
-    g_commonMenu = CommonMenu(Localise("Installer_Header_Installer"), "", true);
-    g_installTextures[0] = LOAD_ZSTD_TEXTURE(g_install_001);
-    g_installTextures[1] = LOAD_ZSTD_TEXTURE(g_install_002);
-    g_installTextures[2] = LOAD_ZSTD_TEXTURE(g_install_003);
-    g_installTextures[3] = LOAD_ZSTD_TEXTURE(g_install_004);
-    g_installTextures[4] = LOAD_ZSTD_TEXTURE(g_install_005);
-    g_installTextures[5] = LOAD_ZSTD_TEXTURE(g_install_006);
-    g_installTextures[6] = LOAD_ZSTD_TEXTURE(g_install_007);
-    g_installTextures[7] = LOAD_ZSTD_TEXTURE(g_install_008);
-    g_upLibertyDev = LOAD_ZSTD_TEXTURE(g_libertyrecomp);
-    g_upGTA5Logo = LOAD_ZSTD_TEXTURE(g_gta5_logo);
-    g_upTLADLogo = LOAD_ZSTD_TEXTURE(g_tlad_logo);
-    g_upTBOGTLogo = LOAD_ZSTD_TEXTURE(g_tbogt_logo);
-
-    for (int i = 0; i < g_credits.size(); i++)
-    {
-        g_creditsStr += g_credits[i];
-        g_creditsStr += "  ";
-    }
+    s_isVisible = false;
 }
 
 void InstallerWizard::Draw()
 {
-    if (!s_isVisible)
-        return;
-
-    ResetCursorRects();
-    DrawBackground();
-    DrawGTA5Logo();
-    
-    // For DLC selection page, use full-screen GTA V style layout
-    bool isDLCSelectionPage = (g_currentPage == WizardPage::SelectDLC);
-    
-    if (!isDLCSelectionPage)
-    {
-        // GTA V Style: No chevron arrows - skip DrawArrows()
-        DrawLeftImage();
-        // GTA V Style: Use simple header instead of common_menu with Sonic textures
-        DrawGTA5Header();
-        DrawDescriptionContainer();
-        DrawLanguagePicker();
-        DrawSourcePickers();
-    }
-    
-    DrawSources(); // This now handles the GTA V DLC selection screen
-    
-    if (!isDLCSelectionPage)
-    {
-        DrawInstallingProgress();
-        DrawNavigationButton();
-    }
-    
-    CheckCancelAction();
-    DrawMessagePrompt();
-    PickerDrawForeground();
-    PickerCheckTutorial();
-    PickerCheckResults();
-
-    if (g_isDisappearing)
-    {
-        double disappearDuration = ALL_ANIMATIONS_FULL_DURATION / 60.0;
-        if (g_isQuitting)
-        {
-            // Add some extra waiting time when quitting the application altogether.
-            disappearDuration += QUITTING_EXTRA_DURATION / 60.0;
-        }
-
-        if (ImGui::GetTime() > (g_disappearTime + disappearDuration))
-        {
-            s_isVisible = false;
-        }
-    }
+    s_isVisible = false;
 }
 
 void InstallerWizard::Shutdown()
 {
-    // Wait for and erase the threads.
-    if (g_installerThread != nullptr)
-    {
-        g_installerThread->join();
-        g_installerThread.reset();
-    }
-
-    if (g_currentPickerThread != nullptr)
-    {
-        g_currentPickerThread->join();
-        g_currentPickerThread.reset();
-    }
-
-    // Erase the sources.
-    g_installerSources.game.reset();
-    g_installerSources.dlc.clear();
-    
-    // Make sure the GPU is not currently active before deleting these textures.
-    Video::WaitForGPU();
-
-    // Erase the textures.
-    for (auto &texture : g_installTextures)
-    {
-        texture.reset();
-    }
+    s_isVisible = false;
 }
 
 bool InstallerWizard::Run(std::filesystem::path installPath, bool skipGame)
 {
-    g_installPath = installPath;
-
-    EmbeddedPlayer::Init();
-    NFD_Init();
-
-    // Guarantee one controller is initialized. We'll rely on SDL's event loop to get the controller events.
-    XAMINPUT_STATE inputState;
-    hid::GetState(0, &inputState);
-
-    if (skipGame)
-    {
-        for (int i = 0; i < int(DLC::Count); i++)
-        {
-            g_dlcInstalled[i] = Installer::checkDLCInstall(g_installPath, DLC(i + 1));
-        }
-
-        g_firstPage = WizardPage::SelectDLC;
-    }
-
-    SetCurrentPage(g_firstPage);
-
-    GameWindow::SetFullscreenCursorVisibility(true);
-    s_isVisible = true;
-
-    while (s_isVisible)
-    {
-        Video::WaitOnSwapChain();
-        ProcessMusic();
-        SDL_PumpEvents();
-        SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
-        GameWindow::Update();
-        Video::Present();
-    }
-
-    GameWindow::SetFullscreenCursorVisibility(false);
-    NFD_Quit();
-
-    InstallerWizard::Shutdown();
-    EmbeddedPlayer::Shutdown();
-
-    return !g_isQuitting;
+    s_isVisible = false;
+    return true;
 }
