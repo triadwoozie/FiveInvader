@@ -7730,10 +7730,42 @@ GTA5_IMPORT_STUB(__imp__XamBackgroundDownloadGetMode)
 GTA5_IMPORT_STUB(__imp__XamBackgroundDownloadItemGetStatus)
 GTA5_IMPORT_STUB(__imp__XamBackgroundDownloadItemGetHistoryStatus)
 GTA5_IMPORT_STUB(__imp__XamContentResolve)
-GTA5_IMPORT_STUB(__imp__XamSwapDisc)
 GTA5_IMPORT_STUB(__imp__XamSwapCancel)
 GTA5_IMPORT_STUB(__imp__XexUnloadImage)
 #undef GTA5_IMPORT_STUB
+
+PPC_FUNC(__imp__XamSwapDisc)
+{
+    const uint32_t discNumber = ctx.r3.u32;
+    const uint32_t completion = ctx.r4.u32;
+    bool signaled = false;
+
+    if (IsValidKernelHandle(completion)) {
+        if (Event* event = GetKernelObject<Event>(completion)) {
+            event->Set();
+            signaled = true;
+        }
+    } else if (completion >= 0x10000 &&
+               completion <= PPC_MEMORY_SIZE - sizeof(XDISPATCHER_HEADER)) {
+        auto* header = reinterpret_cast<XDISPATCHER_HEADER*>(g_memory.Translate(completion));
+        if (header->Type == 0 || header->Type == 1) {
+            QueryKernelObject<Event>(*header)->Set();
+            header->SignalState = 1;
+            signaled = true;
+        }
+    }
+
+    if (signaled) {
+        ++g_keSetEventGeneration;
+        g_keSetEventGeneration.notify_all();
+        LOGF_INFO("[XamSwapDisc] disc={} completion=0x{:08X} signaled", discNumber, completion);
+        ctx.r3.u64 = ERROR_SUCCESS;
+    } else {
+        LOGF_WARNING("[XamSwapDisc] disc={} invalid completion event=0x{:08X}",
+                     discNumber, completion);
+        ctx.r3.u64 = ERROR_INVALID_PARAMETER;
+    }
+}
 
 PPC_FUNC(__imp__NtYieldExecution)
 {
