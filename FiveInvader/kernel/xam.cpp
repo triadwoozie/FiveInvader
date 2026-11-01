@@ -27,9 +27,7 @@ struct XamListener : KernelObject
 {
     uint32_t id{};
     uint64_t areas{};
-    static constexpr size_t MAX_NOTIFS = 64;
-    XamNotificationItem notifications[MAX_NOTIFS]{};
-    uint32_t notifCount{0};
+    std::vector<XamNotificationItem> notifications;
 
     XamListener(const XamListener&) = delete;
     XamListener& operator=(const XamListener&) = delete;
@@ -40,61 +38,51 @@ struct XamListener : KernelObject
 
 struct XamEnumeratorBase : KernelObject
 {
+    virtual ~XamEnumeratorBase() = default;
     virtual uint32_t Next(void* buffer)
     {
         return -1;
     }
 };
 
-template<typename TIterator = std::vector<XHOSTCONTENT_DATA>::iterator>
-struct XamEnumerator : XamEnumeratorBase
+struct XamContentEnumerator : XamEnumeratorBase
 {
-    uint32_t fetch;
-    size_t size;
-    TIterator position;
-    TIterator begin;
-    TIterator end;
+    uint32_t fetch{0};
+    size_t itemSize{0};
+    std::vector<XCONTENT_DATA> items;
+    size_t currentIndex{0};
 
-    XamEnumerator() = default;
-    XamEnumerator(uint32_t fetch, size_t size, TIterator begin, TIterator end) : fetch(fetch), size(size), position(begin), begin(begin), end(end)
+    XamContentEnumerator() = default;
+    XamContentEnumerator(uint32_t fetch, size_t itemSize, std::vector<XCONTENT_DATA> inItems)
+        : fetch(fetch), itemSize(itemSize), items(std::move(inItems)), currentIndex(0)
     {
-
     }
 
     uint32_t Next(void* buffer) override
     {
-        if (position == end)
+        if (currentIndex >= items.size())
         {
             return -1;
         }
 
-        if (buffer == nullptr)
+        size_t count = std::min((size_t)fetch, items.size() - currentIndex);
+        if (count == 0)
         {
-            for (size_t i = 0; i < fetch; i++)
-            {
-                if (position == end)
-                {
-                    return i == 0 ? -1 : i;
-                }
+            return -1;
+        }
 
-                ++position;
+        if (buffer != nullptr)
+        {
+            uint8_t* dst = static_cast<uint8_t*>(buffer);
+            for (size_t i = 0; i < count; ++i)
+            {
+                memset(dst + i * itemSize, 0, itemSize);
+                memcpy(dst + i * itemSize, &items[currentIndex + i], std::min(itemSize, sizeof(XCONTENT_DATA)));
             }
         }
 
-        for (size_t i = 0; i < fetch; i++)
-        {
-            if (position == end)
-            {
-                return i == 0 ? -1 : i;
-            }
-
-            memcpy(buffer, &*position, size);
-
-            ++position;
-            buffer = (void*)((size_t)buffer + size);
-        }
-
-        return fetch;
+        currentIndex += count;
+        return static_cast<uint32_t>(count);
     }
 };
 
@@ -161,21 +149,27 @@ uint32_t XamNotifyCreateListener(uint64_t qwAreas)
 
     listener->areas = qwAreas;
 
-    return GetKernelHandle(listener);
+    // Pre-seed storage devices changed notification (11) so content discovery worker triggers immediately
+    {
+        std::lock_guard lock(s_notifyLock);
+        listener->notifications.push_back({ 11, 0 });
+    }
+
+    uint32_t handle = GetKernelHandle(listener);
+    printf("[XamNotifyCreateListener] Created listener handle 0x%X (areas=0x%llX, seeded notif 11)\n",
+           handle, (unsigned long long)qwAreas);
+
+    return handle;
 }
 
 void XamNotifyEnqueueEvent(uint32_t dwId, uint32_t dwParam)
 {
     std::lock_guard lock(s_notifyLock);
+    printf("[XamNotifyEnqueueEvent] Enqueueing dwId=%u (0x%X), dwParam=%u to %zu listeners\n",
+           dwId, dwId, dwParam, gListeners.size());
     for (const auto& listener : gListeners)
     {
-        if (((1 << MSG_AREA(dwId)) & listener->areas) == 0)
-            continue;
-
-        if (listener->notifCount < XamListener::MAX_NOTIFS)
-        {
-            listener->notifications[listener->notifCount++] = { dwId, dwParam };
-        }
+        listener->notifications.push_back({ dwId, dwParam });
     }
 }
 
@@ -191,12 +185,9 @@ bool XNotifyGetNext(uint32_t hNotification, uint32_t dwMsgFilter, be<uint32_t>* 
 
     auto& listener = *pListener;
 
-    if (listener.notifCount > XamListener::MAX_NOTIFS)
-        listener.notifCount = 0;
-
     if (dwMsgFilter)
     {
-        for (uint32_t i = 0; i < listener.notifCount; i++)
+        for (size_t i = 0; i < listener.notifications.size(); ++i)
         {
             if (listener.notifications[i].id == dwMsgFilter)
             {
@@ -206,28 +197,30 @@ bool XNotifyGetNext(uint32_t hNotification, uint32_t dwMsgFilter, be<uint32_t>* 
                 if (pParam)
                     *pParam = listener.notifications[i].param;
 
-                for (uint32_t j = i; j + 1 < listener.notifCount; j++)
-                    listener.notifications[j] = listener.notifications[j + 1];
-                listener.notifCount--;
+                printf("[XNotifyGetNext] Found matching filter dwMsgFilter=%u (param=%u) for handle 0x%X\n",
+                       dwMsgFilter, listener.notifications[i].param, hNotification);
 
+                listener.notifications.erase(listener.notifications.begin() + i);
                 return true;
             }
         }
     }
     else
     {
-        if (listener.notifCount == 0)
+        if (listener.notifications.empty())
             return false;
 
+        auto item = listener.notifications.front();
+        listener.notifications.erase(listener.notifications.begin());
+
         if (pdwId)
-            *pdwId = listener.notifications[0].id;
+            *pdwId = item.id;
 
         if (pParam)
-            *pParam = listener.notifications[0].param;
+            *pParam = item.param;
 
-        for (uint32_t j = 0; j + 1 < listener.notifCount; j++)
-            listener.notifications[j] = listener.notifications[j + 1];
-        listener.notifCount--;
+        printf("[XNotifyGetNext] Dequeued next notification dwId=%u (param=%u) for handle 0x%X\n",
+               item.id, item.param, hNotification);
 
         return true;
     }
@@ -302,12 +295,62 @@ uint32_t XamContentCreateEnumerator(uint32_t dwUserIndex, uint32_t DeviceID, uin
         return 0xFFFFFFFF;
     }
 
-    const auto& registry = gContentRegistry[dwContentType - 1];
-    const auto& values = registry | std::views::values;
-    auto* enumerator = CreateKernelObject<XamEnumerator<decltype(values.begin())>>(cItem, sizeof(_XCONTENT_DATA), values.begin(), values.end());
+    std::vector<XCONTENT_DATA> items;
+    if (dwContentType > 0 && dwContentType <= gContentRegistry.size())
+    {
+        const auto& registry = gContentRegistry[dwContentType - 1];
+        for (const auto& [hash, hostData] : registry)
+        {
+            items.push_back(hostData);
+        }
+    }
+
+    // For DLC content type (2), guarantee all 4 Disc 1 partitions are present in items
+    if (dwContentType == XCONTENTTYPE_DLC)
+    {
+        static const char* s_partNames[4] = {
+            "545408A700000000",
+            "545408A700000001",
+            "545408A700000002",
+            "545408A700000003"
+        };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            bool found = false;
+            for (const auto& item : items)
+            {
+                if (strncmp(item.szFileName, s_partNames[i], 16) == 0)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                XCONTENT_DATA partData{};
+                partData.DeviceID = 1; // HDD
+                partData.dwContentType = XCONTENTTYPE_DLC; // 2
+                strncpy(partData.szFileName, s_partNames[i], sizeof(partData.szFileName));
+                items.push_back(partData);
+                printf("[XamContentCreateEnumerator] Injected missing partition: %s (DeviceID=1, Type=2)\n", s_partNames[i]);
+            }
+        }
+    }
+
+    constexpr size_t kGuestXContentDataSize = 308; // Xenia & GTA V 308-byte XCONTENT_DATA (306 data + 2 padding)
+    printf("[XamContentCreateEnumerator] dwContentType=%u, total items=%zu, cItem=%u, itemSize=%zu\n",
+           dwContentType, items.size(), cItem, kGuestXContentDataSize);
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        printf("  Item[%zu]: DeviceID=%u, Type=%u, Name='%s'\n",
+               i, (uint32_t)items[i].DeviceID, (uint32_t)items[i].dwContentType, items[i].szFileName);
+    }
+
+    auto* enumerator = CreateKernelObject<XamContentEnumerator>(cItem, kGuestXContentDataSize, std::move(items));
 
     if (pcbBuffer)
-        *pcbBuffer = sizeof(_XCONTENT_DATA) * cItem;
+        *pcbBuffer = static_cast<uint32_t>(kGuestXContentDataSize * cItem);
 
     *phEnum = GetKernelHandle(enumerator);
 
@@ -355,11 +398,29 @@ uint32_t XamEnumerate(uint32_t hEnum, uint32_t dwFlags, void* pvBuffer, uint32_t
     const auto count = enumerator->Next(pvBuffer);
 
     if (count == -1)
+    {
+        if (pcItemsReturned)
+            *pcItemsReturned = 0;
+        if (pOverlapped)
+        {
+            pOverlapped->dwCompletionContext = GuestThread::GetCurrentThreadId();
+            pOverlapped->Error = ERROR_NO_MORE_FILES;
+            pOverlapped->Length = 0;
+        }
         return ERROR_NO_MORE_FILES;
+    }
 
     if (pcItemsReturned)
         *pcItemsReturned = count;
 
+    if (pOverlapped)
+    {
+        pOverlapped->dwCompletionContext = GuestThread::GetCurrentThreadId();
+        pOverlapped->Error = ERROR_SUCCESS;
+        pOverlapped->Length = count;
+    }
+
+    printf("[XamEnumerate] Successfully enumerated %u items into buffer %p\n", count, pvBuffer);
     return ERROR_SUCCESS;
 }
 
@@ -394,6 +455,16 @@ uint32_t XamContentCreateEx(uint32_t dwUserIndex, const char* szRootName, const 
     const auto& registry = gContentRegistry[pContentData->dwContentType - 1];
     const auto exists = registry.contains(StringHash(pContentData->szFileName));
     const auto mode = dwContentFlags & 0xF;
+
+    if (pdwLicenseMask)
+        *pdwLicenseMask = 0xFFFFFFFF;
+
+    if (pOverlapped)
+    {
+        pOverlapped->dwCompletionContext = GuestThread::GetCurrentThreadId();
+        pOverlapped->Error = ERROR_SUCCESS;
+        pOverlapped->Length = 0;
+    }
 
     if (mode == CREATE_ALWAYS)
     {

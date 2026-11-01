@@ -12708,6 +12708,59 @@ PPC_FUNC(sub_82577590)
     LOGF_INFO("[sub_82577590] State 1 sub_82577590 exit elapsed={}ms", ms);
 }
 
+extern "C" void __imp__sub_835100D0(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_835100D0)
+{
+    PPC_FUNC_PROLOGUE();
+    PPCRegister ctr{};
+    PPCCRRegister cr6{};
+    uint32_t ea{};
+    PPC_STORE_U32(ctx.r1.u32 + -8, ctx.r12.u32);
+    PPC_STORE_U64(ctx.r1.u32 + -24, ctx.r30.u64);
+    PPC_STORE_U64(ctx.r1.u32 + -16, ctx.r31.u64);
+    ea = -112 + ctx.r1.u32;
+    PPC_STORE_U32(ea, ctx.r1.u32);
+    ctx.r1.u32 = ea;
+
+    if (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 4) {
+        ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+        ctx.r31.u64 = ctx.r4.u64;
+        ctx.r30.u64 = ctx.r5.u64;
+        if (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 4) {
+            ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);
+            ctr.u64 = ctx.r10.u64;
+            if (ctr.u32 >= 0x82000000 && ctr.u32 < 0x83E00000) {
+                PPCFunc* target = PPC_LOOKUP_FUNC(base, ctr.u32);
+                if (target) target(ctx, base);
+            }
+        }
+    }
+
+    cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+    if (cr6.eq || ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 12) {
+        goto loc_8351011C;
+    }
+
+    ctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    ctx.r5.u64 = ctx.r30.u64;
+    ctx.r4.u64 = ctx.r31.u64;
+    if (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 12) {
+        ctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);
+        ctr.u64 = ctx.r10.u64;
+        if (ctr.u32 >= 0x82000000 && ctr.u32 < 0x83E00000) {
+            PPCFunc* target = PPC_LOOKUP_FUNC(base, ctr.u32);
+            if (target) target(ctx, base);
+        }
+    }
+
+loc_8351011C:
+    ctx.r1.s64 = ctx.r1.s64 + 112;
+    ctx.r12.u64 = PPC_LOAD_U32(ctx.r1.u32 + -8);
+    ctx.r30.u64 = PPC_LOAD_U64(ctx.r1.u32 + -24);
+    ctx.r31.u64 = PPC_LOAD_U64(ctx.r1.u32 + -16);
+    return;
+}
+
 PPC_EXTERN_FUNC(__savegprlr_28);
 PPC_EXTERN_FUNC(__restgprlr_28);
 PPC_EXTERN_FUNC(sub_824D5AA0);
