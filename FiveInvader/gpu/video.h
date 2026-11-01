@@ -31,6 +31,7 @@ struct Video
     static bool CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry);
     static void WaitOnSwapChain();
     static void Present();
+    static bool ExecutePM4Draw(uint32_t primitiveType, uint32_t indexCount);
     static void StartPipelinePrecompilation();
     static void WaitForGPU();
     static void ComputeViewportDimensions();

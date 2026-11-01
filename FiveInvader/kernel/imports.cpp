@@ -2911,6 +2911,18 @@ uint32_t NtClose(uint32_t handle)
 
     if (IsKernelObject(handle))
     {
+        if (IsValidKernelHandle(handle))
+        {
+            auto* object = GetKernelObject<KernelObject>(handle);
+            if (auto* thread = dynamic_cast<GuestThreadHandle*>(object);
+                thread && thread->IsCurrentThread())
+            {
+                thread->closePending.store(true);
+                LOGF_WARNING("[NtClose] Deferring close of current guest thread handle 0x{:08X}", handle);
+                return STATUS_SUCCESS;
+            }
+        }
+
         // If the handle was duplicated, just decrement the duplication count. Otherwise, delete the object.
         auto it = g_handleDuplicates.find(handle);
         const bool willDestroy = (it == g_handleDuplicates.end() || it->second == 0);
@@ -4973,7 +4985,24 @@ static uint32_t ExecutePM4Buffer(uint32_t* buffer, uint32_t dwordCount,
                 break;
             case PM4_DRAW_INDX:
             case PM4_DRAW_INDX_2:
-                LOGF_WARNING("[PM4] Draw packet reached executor but guest GPU state translation is not implemented");
+                if ((opcode == PM4_DRAW_INDX_2 && count >= 1) ||
+                    (opcode == PM4_DRAW_INDX && count >= 2))
+                {
+                    const uint32_t initiator = payload(opcode == PM4_DRAW_INDX_2 ? 0 : 1);
+                    const uint32_t primitiveType = initiator & 0x3Fu;
+                    const uint32_t sourceSelect = (initiator >> 6) & 0x3u;
+                    const uint32_t indexCount = (initiator >> 16) & 0x3FFFu;
+                    if (sourceSelect == 2)
+                    {
+                        const bool queued = Video::ExecutePM4Draw(primitiveType, indexCount);
+                        LOGF_INFO("[PM4] Auto-index draw executed primitive={} indices={} queued={}",
+                                  primitiveType, indexCount, queued);
+                    }
+                    else
+                    {
+                        LOGF_WARNING("[PM4] Draw packet source {} is not implemented", sourceSelect);
+                    }
+                }
                 break;
             default:
                 break;

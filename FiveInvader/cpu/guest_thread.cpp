@@ -129,6 +129,15 @@ static void* GuestThreadFunc(GuestThreadHandle* hThread)
     GuestThread::Start(hThread->params);
     // HACK(1)
     hThread->isFinished = true;
+    if (hThread->closePending.exchange(false))
+    {
+#ifdef USE_PTHREAD
+        pthread_detach(hThread->thread);
+#else
+        hThread->thread.detach();
+#endif
+        DestroyKernelObject(hThread);
+    }
     return nullptr;
 }
 
@@ -184,8 +193,23 @@ uint32_t GuestThreadHandle::GetThreadId() const
 #endif
 }
 
+bool GuestThreadHandle::IsCurrentThread() const
+{
+#ifdef USE_PTHREAD
+    return pthread_equal(thread, pthread_self()) != 0;
+#else
+    return thread.get_id() == std::this_thread::get_id();
+#endif
+}
+
 uint32_t GuestThreadHandle::Wait(uint32_t timeout)
 {
+    if (IsCurrentThread())
+    {
+        fprintf(stderr, "[GuestThreadHandle] Refusing self-wait on thread %u\n", GetThreadId());
+        return STATUS_TIMEOUT;
+    }
+
     if (timeout == INFINITE || isFinished.load()) // HACK(1): isFinished
     {
 #ifdef USE_PTHREAD

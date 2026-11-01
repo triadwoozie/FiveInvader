@@ -126,11 +126,13 @@ struct GuestThreadHandle : KernelObject
     #endif
     // HACK(1)
     std::atomic<bool> isFinished = false;
+    std::atomic<bool> closePending = false;
 
     GuestThreadHandle(const GuestThreadParams& params);
     ~GuestThreadHandle() override;
 
     uint32_t GetThreadId() const;
+    bool IsCurrentThread() const;
 
     uint32_t Wait(uint32_t timeout) override;
 };

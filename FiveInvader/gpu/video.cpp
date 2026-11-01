@@ -3358,61 +3358,6 @@ void Video::Present()
         g_renderQueue.enqueue(clearCmd);
     }
     
-    // AGGRESSIVE TEST: Force draw with cached shaders to verify pipeline
-    // This bypasses the game's render code entirely to prove shaders work
-    static bool s_testDrawLogged = false;
-    static GuestVertexDeclaration* s_testVertexDecl = nullptr;
-    
-    if (g_defaultVertexShader != nullptr && g_defaultPixelShader != nullptr && s_presentCount <= 200)
-    {
-        // Create a simple vertex declaration on first use
-        if (s_testVertexDecl == nullptr) {
-            // Simple vertex format: POSITION (float3) at offset 0
-            static GuestVertexElement testElements[] = {
-                { 0, 0, 0x2A23B9, 0, D3DDECLUSAGE_POSITION, 0, 0 },  // FLOAT3 position
-                { 255, 0, 0xFFFFFFFF, 0, 0, 0, 0 }  // D3DDECL_END
-            };
-            s_testVertexDecl = CreateVertexDeclarationWithoutAddRef(testElements);
-            LOGF_WARNING("Created test vertex declaration: {:p}", (void*)s_testVertexDecl);
-        }
-        
-        if (!s_testDrawLogged) {
-            LOGF_WARNING("FORCING TEST DRAW with cached shaders VS={:p} PS={:p} VDecl={:p}", 
-                        (void*)g_defaultVertexShader, (void*)g_defaultPixelShader, (void*)s_testVertexDecl);
-            s_testDrawLogged = true;
-        }
-        
-        // Bind vertex declaration
-        RenderCommand vdeclCmd;
-        vdeclCmd.type = RenderCommandType::SetVertexDeclaration;
-        vdeclCmd.setVertexDeclaration.vertexDeclaration = s_testVertexDecl;
-        g_renderQueue.enqueue(vdeclCmd);
-        
-        // Bind our cached shaders
-        RenderCommand vsCmd;
-        vsCmd.type = RenderCommandType::SetVertexShader;
-        vsCmd.setVertexShader.shader = g_defaultVertexShader;
-        g_renderQueue.enqueue(vsCmd);
-        
-        RenderCommand psCmd;
-        psCmd.type = RenderCommandType::SetPixelShader;
-        psCmd.setPixelShader.shader = g_defaultPixelShader;
-        g_renderQueue.enqueue(psCmd);
-        
-        // Force a simple test draw (just 3 vertices for a triangle)
-        // This tests if the rendering pipeline can actually execute draws
-        RenderCommand drawCmd;
-        drawCmd.type = RenderCommandType::DrawPrimitive;
-        drawCmd.drawPrimitive.primitiveType = 4; // Triangle list
-        drawCmd.drawPrimitive.startVertex = 0;
-        drawCmd.drawPrimitive.primitiveCount = 1; // 1 triangle
-        g_renderQueue.enqueue(drawCmd);
-        
-        if (s_presentCount == 1) {
-            LOGF_WARNING("TEST DRAW submitted: type={} primitiveCount={}", 4, 1);
-        }
-    }
-
     RenderCommand cmd;
     cmd.type = RenderCommandType::ExecutePendingStretchRectCommands;
     g_renderQueue.enqueue(cmd);
@@ -5420,12 +5365,62 @@ static void DrawPrimitive(GuestDevice* device, uint32_t primitiveType, uint32_t 
     queue.submit();
 }
 
+bool Video::ExecutePM4Draw(uint32_t primitiveType, uint32_t indexCount)
+{
+    uint32_t primitiveCount = 0;
+    switch (primitiveType)
+    {
+    case D3DPT_POINTLIST:
+        primitiveCount = indexCount;
+        break;
+    case D3DPT_LINELIST:
+        primitiveCount = indexCount / 2;
+        break;
+    case D3DPT_LINESTRIP:
+        primitiveCount = indexCount > 1 ? indexCount - 1 : 0;
+        break;
+    case D3DPT_TRIANGLELIST:
+        primitiveCount = indexCount / 3;
+        break;
+    case D3DPT_TRIANGLESTRIP:
+    case D3DPT_TRIANGLEFAN:
+        primitiveCount = indexCount > 2 ? indexCount - 2 : 0;
+        break;
+    case D3DPT_QUADLIST:
+        primitiveCount = indexCount / 4;
+        break;
+    default:
+        LOGF_WARNING("[PM4] Auto-index draw has unsupported primitive type {}", primitiveType);
+        return false;
+    }
+
+    if (primitiveCount == 0)
+        return true;
+
+    RenderCommand command;
+    command.type = RenderCommandType::DrawPrimitive;
+    command.drawPrimitive.primitiveType = primitiveType;
+    command.drawPrimitive.startVertex = 0;
+    command.drawPrimitive.primitiveCount = primitiveCount;
+    g_renderQueue.enqueue(command);
+    return true;
+}
+
 static void ProcDrawPrimitive(const RenderCommand& cmd)
 {
     static uint32_t s_procDrawCount = 0;
     ++s_procDrawCount;
     
     const auto& args = cmd.drawPrimitive;
+
+    if (g_pipelineState.vertexShader == nullptr || g_pipelineState.vertexDeclaration == nullptr)
+    {
+        if (s_procDrawCount <= 10)
+            LOGF_WARNING("[PM4] Dropping draw without vertex shader/declaration (VS={:p} VDecl={:p})",
+                         static_cast<void*>(g_pipelineState.vertexShader),
+                         static_cast<void*>(g_pipelineState.vertexDeclaration));
+        return;
+    }
     
     if (s_procDrawCount <= 10 || (s_procDrawCount % 1000) == 0) {
         LOGF_WARNING("ProcDrawPrimitive #{} type={} start={} count={} VS={:p} PS={:p} VDecl={:p}",
