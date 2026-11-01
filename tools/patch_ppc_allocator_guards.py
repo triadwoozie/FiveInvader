@@ -29,29 +29,154 @@ def patch_worker_list_updates(path: pathlib.Path) -> bool:
         return False
 
     content = path.read_text(encoding="utf-8")
-    old_text = "\t// lhzu r9,12(r10)\n\t// addi r11,r11,1"
-    new_text = (
-        "\t// lhzu r9,12(r10)\n"
-        "\tctx.r10.s64 = ctx.r10.s64 + 12;\n"
-        "\tctx.r9.u64 = PPC_LOAD_U16(ctx.r10.u32);\n"
-        "\t// addi r11,r11,1"
+    loop_patches = (
+        (
+            "sub_836B3A50",
+            "\t// lhzu r9,12(r10)\n\t// li r7,255",
+            "\t// lhzu r9,12(r10)\n"
+            "\tctx.r10.s64 = ctx.r10.s64 + 12;\n"
+            "\tctx.r9.u64 = PPC_LOAD_U16(ctx.r10.u32);\n"
+            "\t// li r7,255",
+            "goto loc_836B3B34;",
+        ),
+        (
+            "sub_836B3B40",
+            "\t// lhzu r9,12(r10)\n\t// addi r11,r11,1",
+            "\t// lhzu r9,12(r10)\n"
+            "\tctx.r10.s64 = ctx.r10.s64 + 12;\n"
+            "\tctx.r9.u64 = PPC_LOAD_U16(ctx.r10.u32);\n"
+            "\t// addi r11,r11,1",
+            "goto loc_836B3BA8;",
+        ),
     )
-    if old_text not in content:
-        if new_text in content:
-            print(f"Already patched worker-list updates: {path.name}")
+    changed = False
+    for function_name, old_text, new_text, guard_target in loop_patches:
+        start = content.find(f"PPC_FUNC_IMPL(__imp__{function_name})")
+        end = content.find("\n__attribute__((alias(", start + 1)
+        if start < 0 or end < 0:
+            print(f"Could not isolate generated function {function_name}")
             return False
-        print(f"Worker-list update pattern not found in: {path.name}")
+        function_text = content[start:end]
+
+        if old_text in function_text:
+            function_text = function_text.replace(old_text, new_text, 1)
+            changed = True
+
+        update_load = (
+            "\tctx.r10.s64 = ctx.r10.s64 + 12;\n"
+            "\tctx.r9.u64 = PPC_LOAD_U16(ctx.r10.u32);"
+        )
+        guarded_update_load = (
+            "\tctx.r10.s64 = ctx.r10.s64 + 12;\n"
+            f"\tif (ctx.r10.u64 > 0xFFFFFFFDull) {guard_target}\n"
+            "\tctx.r9.u64 = PPC_LOAD_U16(ctx.r10.u32);"
+        )
+        if guarded_update_load not in function_text:
+            old_guarded_update_load = (
+                "\tctx.r10.s64 = ctx.r10.s64 + 12;\n"
+                f"\tif (ctx.r10.u32 > 0xFFFFFFFDu) {guard_target}\n"
+                "\tctx.r9.u64 = PPC_LOAD_U16(ctx.r10.u32);"
+            )
+            if old_guarded_update_load in function_text:
+                function_text = function_text.replace(old_guarded_update_load, guarded_update_load, 1)
+                changed = True
+            elif update_load in function_text:
+                function_text = function_text.replace(update_load, guarded_update_load, 1)
+                changed = True
+            else:
+                print(f"Missing expected lhzu lowering in {function_name}")
+                return False
+
+        content = content[:start] + function_text + content[end:]
+
+    if changed:
+        path.write_text(content, encoding="utf-8")
+        print(f"Patched worker-list updates with bounds checks: {path.name}")
+    else:
+        print(f"Worker-list updates already patched: {path.name}")
+    return changed
+
+
+def patch_indirect_call_bounds(path: pathlib.Path) -> bool:
+    if not path.exists():
+        print(f"File not found: {path}")
         return False
 
-    content = content.replace(old_text, new_text)
+    content = path.read_text(encoding="utf-8")
+    old_macro = "#define PPC_CALL_INDIRECT_FUNC(x) (PPC_LOOKUP_FUNC(base, x))(ctx, base)"
+    new_macro = "#define PPC_CALL_INDIRECT_FUNC(x) PPCCallIndirectFunc(ctx, base, static_cast<uint32_t>(x))"
+    old_declaration = "typedef void PPCFunc(struct PPCContext& __restrict__ ctx, uint8_t* base);\n"
+    declaration = (
+        "typedef void PPCFunc(struct PPCContext& __restrict__ ctx, uint8_t* base);\n"
+        "struct PPCContext;\n"
+        "void PPCCallIndirectFunc(PPCContext& ctx, uint8_t* base, uint32_t target);\n"
+    )
+
+    changed = False
+    if new_macro not in content:
+        if old_macro not in content:
+            print(f"Indirect-call macro not found in: {path.name}")
+            return False
+        content = content.replace(old_macro, new_macro, 1)
+        changed = True
+
+    if "void PPCCallIndirectFunc(PPCContext& ctx, uint8_t* base, uint32_t target);" not in content:
+        if old_declaration not in content:
+            print(f"PPC function typedef not found in: {path.name}")
+            return False
+        content = content.replace(old_declaration, declaration, 1)
+        changed = True
+
+    if changed:
+        path.write_text(content, encoding="utf-8")
+        print(f"Patched indirect-call bounds checks: {path.name}")
+    else:
+        print(f"Indirect-call bounds checks already patched: {path.name}")
+    return changed
+
+
+def patch_failed_guest_allocation(path: pathlib.Path) -> bool:
+    if not path.exists():
+        print(f"File not found: {path}")
+        return False
+
+    content = path.read_text(encoding="utf-8")
+    start = content.find("PPC_FUNC_IMPL(__imp__sub_8354EF98)")
+    end = content.find("\n__attribute__((alias(", start + 1)
+    if start < 0 or end < 0:
+        print(f"Could not isolate generated function sub_8354EF98 in {path.name}")
+        return False
+
+    function_text = content[start:end]
+    old_text = (
+        "\t// beq cr6,0x8354f080\n"
+        "\tif (cr6.eq) goto loc_8354F080;\n"
+        "\t// lwz r4,12(r31)"
+    )
+    new_text = (
+        "\t// beq cr6,0x8354f080\n"
+        "\tif (cr6.eq || ctx.r3.u32 == 0xFFFFFFFFu) goto loc_8354F080;\n"
+        "\t// lwz r4,12(r31)"
+    )
+    if new_text in function_text:
+        print(f"Failed-allocation guard already patched: {path.name}")
+        return False
+    if old_text not in function_text:
+        print(f"Failed-allocation branch not found in: {path.name}")
+        return False
+
+    function_text = function_text.replace(old_text, new_text, 1)
+    content = content[:start] + function_text + content[end:]
     path.write_text(content, encoding="utf-8")
-    print(f"Patched worker-list updates: {path.name}")
+    print(f"Patched failed guest allocation handling: {path.name}")
     return True
 
 
 def main():
     ppc_dir = REPO_ROOT / "FiveInvaderLib" / "ppc"
     patch_worker_list_updates(ppc_dir / "ppc_recomp.337.cpp")
+    patch_indirect_call_bounds(ppc_dir / "ppc_context.h")
+    patch_failed_guest_allocation(ppc_dir / "ppc_recomp.316.cpp")
 
     # Patch 269: sub_8321D9F8
     target_269_old = """\t// lwzx r3,r10,r11

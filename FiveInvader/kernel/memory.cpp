@@ -56,6 +56,27 @@ void PPCHandleInvalidIndirectCall(PPCContext& ctx, uint8_t* base, uint32_t targe
     UnmappedIndirectHandler(ctx, base);
 }
 
+void PPCCallIndirectFunc(PPCContext& ctx, uint8_t* base, uint32_t target)
+{
+    if (target < PPC_CODE_BASE || target >= PPC_CODE_BASE + PPC_CODE_SIZE ||
+        (target & 3) != 0)
+    {
+        PPCHandleInvalidIndirectCall(ctx, base, target);
+        if (target == 0)
+            ctx.r3.u64 = 0;
+        return;
+    }
+
+    PPCFunc* function = PPC_LOOKUP_FUNC(base, target);
+    if (!function)
+    {
+        PPCHandleInvalidIndirectCall(ctx, base, target);
+        return;
+    }
+
+    function(ctx, base);
+}
+
 Memory::Memory()
 {
 #ifdef _WIN32

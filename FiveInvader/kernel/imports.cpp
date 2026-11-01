@@ -881,11 +881,19 @@ namespace
         if (it != g_rpfStreams.end())
             return it->second.get();
         
-        // Open the RPF file
-        std::filesystem::path rpfPath = GetGamePath() / "game" / (rpfName + ".rpf");
-        if (!std::filesystem::exists(rpfPath))
+        // Archives in the extracted disc image live at its root. Keep the
+        // legacy game/ layout as a fallback for older extracted installs.
+        const std::filesystem::path rootRpfPath = GetGamePath() / (rpfName + ".rpf");
+        const std::filesystem::path legacyRpfPath = GetGamePath() / "game" / (rpfName + ".rpf");
+        std::filesystem::path rpfPath;
+        if (std::filesystem::is_regular_file(rootRpfPath))
+            rpfPath = rootRpfPath;
+        else if (std::filesystem::is_regular_file(legacyRpfPath))
+            rpfPath = legacyRpfPath;
+        else
         {
-            LOGF_IMPL(Utility, "GetRpfStream", "RPF not found: {}", rpfPath.string());
+            LOGF_IMPL(Utility, "GetRpfStream", "RPF not found at '{}' or '{}'",
+                      rootRpfPath.string(), legacyRpfPath.string());
             return nullptr;
         }
         
@@ -908,25 +916,45 @@ namespace
             info->stream.seekg(0, std::ios::beg);
         }
         
-        // Parse RPF2 header
+        // Parse the archive header. RPF7 stores the TOC size in big-endian
+        // form, with bit 31 indicating encrypted TOC data.
         char hdr[20] = {};
         info->stream.read(hdr, sizeof(hdr));
         if (info->stream.gcount() >= 20)
         {
             bool isRpf2 = (hdr[0] == 'R' && hdr[1] == 'P' && hdr[2] == 'F' && hdr[3] == '2');
-            if (isRpf2)
+            bool isRpf3 = (hdr[0] == 'R' && hdr[1] == 'P' && hdr[2] == 'F' && hdr[3] == '3');
+            bool isRpf7 = (hdr[0] == 'R' && hdr[1] == 'P' && hdr[2] == 'F' && hdr[3] == '7');
+            if (isRpf2 || isRpf3 || isRpf7)
             {
                 auto le32 = [](const uint8_t* p) -> uint32_t {
                     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
                 };
-                info->tocSize = le32(reinterpret_cast<uint8_t*>(hdr + 4));
-                uint32_t encrypted = le32(reinterpret_cast<uint8_t*>(hdr + 16));
-                info->tocOffset = 0x800;
-                info->tocEncrypted = (encrypted != 0);
-                info->headerParsed = true;
-                
-                LOGF_IMPL(Utility, "GetRpfStream", "Opened {} - tocOffset=0x{:X} tocSize={} encrypted={}",
-                          rpfName, info->tocOffset, info->tocSize, info->tocEncrypted);
+                auto be32 = [](const uint8_t* p) -> uint32_t {
+                    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+                };
+                const uint32_t encodedTocSize = isRpf7
+                    ? be32(reinterpret_cast<const uint8_t*>(hdr + 8))
+                    : le32(reinterpret_cast<const uint8_t*>(hdr + 4));
+                info->tocSize = isRpf7 ? (encodedTocSize & 0x7FFFFFFFu) : encodedTocSize;
+                info->tocOffset = isRpf7 ? 0x10 : 0x800;
+                info->tocEncrypted = isRpf7
+                    ? (encodedTocSize & 0x80000000u) != 0
+                    : le32(reinterpret_cast<const uint8_t*>(hdr + 16)) != 0;
+
+                const uint64_t tocEnd = static_cast<uint64_t>(info->tocOffset) + info->tocSize;
+                if (info->tocSize != 0 && tocEnd <= info->fileSize)
+                {
+                    info->headerParsed = true;
+                    LOGF_IMPL(Utility, "GetRpfStream", "Opened {} - tocOffset=0x{:X} tocSize={} encrypted={}",
+                              rpfName, info->tocOffset, info->tocSize, info->tocEncrypted);
+                }
+                else
+                {
+                    LOGF_IMPL(Utility, "GetRpfStream", "Invalid {} TOC bounds: offset=0x{:X} size={} fileSize={}",
+                              rpfName, info->tocOffset, info->tocSize, info->fileSize);
+                }
             }
         }
         info->stream.clear();
@@ -1465,9 +1493,10 @@ namespace
                 return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
             };
 
-            uint32_t tocSize = isRpf7 ? be32(reinterpret_cast<uint8_t*>(hdr + 8)) : le32(reinterpret_cast<uint8_t*>(hdr + 4));
+            uint32_t encodedTocSize = isRpf7 ? be32(reinterpret_cast<uint8_t*>(hdr + 8)) : le32(reinterpret_cast<uint8_t*>(hdr + 4));
+            uint32_t tocSize = isRpf7 ? (encodedTocSize & 0x7FFFFFFFu) : encodedTocSize;
             uint32_t numEntries = isRpf7 ? be32(reinterpret_cast<uint8_t*>(hdr + 4)) : le32(reinterpret_cast<uint8_t*>(hdr + 8));
-            uint32_t encrypted = isRpf7 ? 0 : le32(reinterpret_cast<uint8_t*>(hdr + 16));
+            uint32_t encrypted = isRpf7 ? (encodedTocSize & 0x80000000u) : le32(reinterpret_cast<uint8_t*>(hdr + 16));
 
             // TOC starts at 0x10 for RPF7 or 0x800 for RPF2/3
             h->tocOffset = isRpf7 ? 0x10 : 0x800;
@@ -13656,6 +13685,12 @@ PPC_FUNC(sub_8248EAE0)
     PPC_FUNC_PROLOGUE();
     PPCCRRegister cr6{};
     PPCRegister temp{};
+    if (ctx.r4.u32 < 0x10000u || ctx.r4.u32 > 0xFFFFFFDCu)
+    {
+        LOGF_WARNING("[sub_8248EAE0] Skipping unlink with invalid node pointer 0x{:08X}", ctx.r4.u32);
+        ctx.r3.u64 = 0;
+        return;
+    }
     // lwz r11,0(r4)
     ctx.r11.u64 = PPC_LOAD_U32(ctx.r4.u32 + 0);
     // lwz r8,20(r4)
