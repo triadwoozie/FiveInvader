@@ -4828,6 +4828,15 @@ static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIn
                     break;
                 case PM4_EVENT_WRITE_SHD:
                 case PM4_EVENT_WRITE_EXT: {
+                    if (scanCount == 0 && count >= 3 && pos + 3 < maxScan) {
+                        const uint32_t initiator = ByteSwap(buffer[pos + 1]);
+                        const uint32_t address = ByteSwap(buffer[pos + 2]);
+                        const uint32_t value = ByteSwap(buffer[pos + 3]);
+                        LOGF_WARNING(
+                            "[PM4-IB] event-write opcode=0x{:02X} initiator=0x{:08X} address=0x{:08X} value=0x{:08X} callback=0x{:08X}",
+                            opcode, initiator, address, value,
+                            g_gpuRingBuffer.interruptCallback);
+                    }
                     if (accountPackets) g_gpuRingBuffer.pm4OtherCount++;
                     break;
                 }
@@ -5046,6 +5055,8 @@ static std::thread g_vblankThread;
 
 void FireVBlankCallback() {
     if (g_gpuRingBuffer.interruptCallback != 0) {
+        static std::atomic<uint32_t> s_callbackCount{0};
+        const uint32_t callbackCount = ++s_callbackCount;
         static std::unique_ptr<GuestThreadContext> s_vblankContext;
         if (!s_vblankContext) {
             s_vblankContext = std::make_unique<GuestThreadContext>(5);
@@ -5055,11 +5066,22 @@ void FireVBlankCallback() {
         PPCContext ctx = s_vblankContext->ppcContext;
         ctx.r3.u32 = 1;  // Interrupt reason 1 = VBlank / vertical blank (expected by sub_836B1768)
         ctx.r4.u32 = g_gpuRingBuffer.interruptUserData;  // Context/userData
+        const uint32_t source = ctx.r3.u32;
         SetPPCContext(ctx);
         
         auto* callbackFunc = g_memory.FindFunction(g_gpuRingBuffer.interruptCallback);
         if (callbackFunc) {
             callbackFunc(ctx, g_memory.base);
+            if (callbackCount <= 5) {
+                LOGF_INFO("[VBlank] callback #{} addr=0x{:08X} source={} userData=0x{:08X} ret=0x{:08X}",
+                          callbackCount, g_gpuRingBuffer.interruptCallback,
+                          source, g_gpuRingBuffer.interruptUserData,
+                          static_cast<uint32_t>(ctx.r3.u32));
+            }
+        } else if (callbackCount <= 5) {
+            LOGF_WARNING("[VBlank] callback #{} unmapped addr=0x{:08X} userData=0x{:08X}",
+                         callbackCount, g_gpuRingBuffer.interruptCallback,
+                         g_gpuRingBuffer.interruptUserData);
         }
         
         // VBlank callback complete - game code handles render loop naturally
@@ -5331,10 +5353,11 @@ uint32_t KeWaitForSingleObject(XDISPATCHER_HEADER* Object, uint32_t WaitReason, 
     uint32_t callerLR = GET_CALLER_LR();
     ScopedWaitTracker waitTracker("KeWaitForSingleObject", Object ? (uint32_t)((uint8_t*)Object - g_memory.base) : 0, timeout, callerLR);
     if (s_keWaitCount++ < 50 || s_keWaitCount % 200 == 0) {
-        LOGF_INFO("[TRACE] KeWaitForSingleObject: #{} obj=0x{:08X} type={} timeout={}ms caller=0x{:08X} sp=0x{:08X} tls=0x{:08X} stack={:08X},{:08X},{:08X},{:08X}",
+        LOGF_INFO("[TRACE] KeWaitForSingleObject: #{} obj=0x{:08X} type={} signalState={} timeout={}ms caller=0x{:08X} sp=0x{:08X} tls=0x{:08X} stack={:08X},{:08X},{:08X},{:08X}",
                   s_keWaitCount.load(),
                   Object ? (uint32_t)((uint8_t*)Object - g_memory.base) : 0,
-                  Object ? Object->Type : -1, timeout, callerLR,
+                  Object ? Object->Type : -1,
+                  Object ? static_cast<int32_t>(Object->SignalState) : -1, timeout, callerLR,
                   ppcContext ? ppcContext->r1.u32 : 0u, ppcContext ? ppcContext->r13.u32 : 0u,
                   stackTrace[0], stackTrace[1], stackTrace[2], stackTrace[3]);
     }
