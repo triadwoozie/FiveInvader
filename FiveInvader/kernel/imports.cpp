@@ -247,6 +247,7 @@ inline bool IsKnownSpinWait(uint32_t funcAddr) {
 // Forward declarations - actual tracking functions defined after Semaphore struct
 static std::mutex g_semaphoreTrackMutex;
 static std::unordered_set<uint32_t> g_blockingSemaphoreAddrs;  // Guest addresses of blocking semaphores
+static std::unordered_set<uint32_t> g_mutantHandles;  // Kernel handles of mutants (for auto-signal fallback)
 static std::atomic<bool> g_initComplete{false};
 static std::atomic<int> g_semaphoreWaitCount{0};
 
@@ -259,6 +260,11 @@ void TrackBlockingSemaphoreAddr(uint32_t addr) {
 bool IsBlockingSemaphore(uint32_t addr) {
     std::lock_guard<std::mutex> lock(g_semaphoreTrackMutex);
     return g_blockingSemaphoreAddrs.count(addr) > 0;
+}
+
+bool IsMutantHandle(uint32_t handle) {
+    std::lock_guard<std::mutex> lock(g_semaphoreTrackMutex);
+    return g_mutantHandles.count(handle) > 0;
 }
 
 bool IsInitComplete() {
@@ -391,12 +397,6 @@ void PumpSdlEventsIfNeeded()
             {
                 std::_Exit(0);
             }
-        }
-
-        if (g_vdSwapCounter.load(std::memory_order_relaxed) > 0 ||
-            g_pm4PacketCounter.load(std::memory_order_relaxed) > 0)
-        {
-            GameWindow::ShowAndRaise();
         }
 
         static auto s_lastTitleUpdate = std::chrono::steady_clock::now();
@@ -6594,12 +6594,20 @@ uint32_t NtCreateTimer(be<uint32_t>* timerHandle, uint32_t desiredAccess, void* 
 
 uint32_t NtCreateMutant(be<uint32_t>* mutantHandle, uint32_t desiredAccess, void* objectAttributes, uint32_t initialOwner)
 {
-    Event* mutantEvt = CreateKernelObject<Event>(false, !initialOwner);
+    // Mutants (mutexes) in the Xbox 360 kernel are recursive mutexes with
+    // ownership tracking. Since our recompilation doesn't track thread
+    // ownership, we create the mutant as an auto-reset event that starts
+    // signaled (free). This allows any thread to acquire it immediately.
+    // When initialOwner is true (non-zero), the creating thread "owns" the
+    // mutex, but since we don't implement real ownership, we still start
+    // signaled so worker threads don't deadlock waiting for a release that
+    // never happens in the recompiled code path.
+    Event* mutantEvt = CreateKernelObject<Event>(false, true);  // auto-reset, signaled
     uint32_t h = GetKernelHandle(mutantEvt);
     if (mutantHandle) {
         *mutantHandle = h;
     }
-    LOGF_INFO("[TRACE] NtCreateMutant: handle=0x{:08X} initialOwner={}", h, initialOwner);
+    LOGF_INFO("[TRACE] NtCreateMutant: handle=0x{:08X} initialOwner={} (forced signaled)", h, initialOwner);
     return 0;
 }
 

@@ -3277,6 +3277,7 @@ void Video::WaitOnSwapChain()
 static bool g_shouldPrecompilePipelines;
 static std::atomic<bool> g_executedCommandList;
 std::atomic<uint64_t> g_frameCounter{0};
+static std::atomic<uint64_t> g_guestDrawCommandCount{0};
 static std::mutex s_presentMutex;
 
 void Video::Present() 
@@ -3286,12 +3287,6 @@ void Video::Present()
         return;
 
     extern std::atomic<uint64_t> g_vdSwapCounter;
-    extern std::atomic<uint64_t> g_pm4PacketCounter;
-    if (g_vdSwapCounter.load(std::memory_order_relaxed) > 0 ||
-        g_pm4PacketCounter.load(std::memory_order_relaxed) > 0)
-    {
-        GameWindow::ShowAndRaise();
-    }
 
     if (!g_swapChain || !g_backBuffer || !g_device)
         return;
@@ -3348,7 +3343,6 @@ void Video::Present()
     // ProcClear has strict safety checks to prevent Metal crashes
     // Only clear fallback purple heartbeat if the guest hasn't started swapping or submitting PM4 draw packets.
     // Once guest begins rendering, do not overwrite the guest framebuffer!
-    extern std::atomic<uint64_t> g_vdSwapCounter;
     extern std::atomic<uint64_t> g_pm4PacketCounter;
     if (g_vdSwapCounter.load(std::memory_order_relaxed) == 0 && g_pm4PacketCounter.load(std::memory_order_relaxed) == 0)
     {
@@ -3452,6 +3446,9 @@ void Video::Present()
         if (g_swapChainValid)
         {
             g_frameCounter.fetch_add(1, std::memory_order_relaxed);
+            if (g_vdSwapCounter.load(std::memory_order_relaxed) > 0 &&
+                g_guestDrawCommandCount.load(std::memory_order_relaxed) > 0)
+                GameWindow::ShowAndRaise();
         }
     }
 
@@ -5443,6 +5440,8 @@ static void ProcDrawPrimitive(const RenderCommand& cmd)
 
     auto& commandList = g_commandLists[g_frame];
     commandList->drawInstanced(args.primitiveCount, 1, args.startVertex, 0);
+    if (args.primitiveCount > 0)
+        g_guestDrawCommandCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 static void DrawIndexedPrimitive(GuestDevice* device, uint32_t primitiveType, int32_t baseVertexIndex, uint32_t minVertexIndex,
@@ -5475,8 +5474,9 @@ static void ProcDrawIndexedPrimitive(const RenderCommand& cmd)
 
     SetPrimitiveType(args.primitiveType);
     FlushRenderStateForRenderThread();
-
     g_commandLists[g_frame]->drawIndexedInstanced(args.primCount, 1, args.startIndex, args.baseVertexIndex, 0);
+    if (args.primCount > 0)
+        g_guestDrawCommandCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 static void DrawPrimitiveUP(GuestDevice* device, uint32_t primitiveType, uint32_t primitiveCount, void* vertexStreamZeroData, uint32_t vertexStreamZeroStride)
@@ -5531,6 +5531,8 @@ static void ProcDrawPrimitiveUP(const RenderCommand& cmd)
         g_commandLists[g_frame]->drawIndexedInstanced(indexCount, 1, 0, 0, 0);
     else
         g_commandLists[g_frame]->drawInstanced(args.primitiveCount, 1, 0, 0);
+    if (args.primitiveCount > 0)
+        g_guestDrawCommandCount.fetch_add(1, std::memory_order_relaxed);
 }
 
 static const char* ConvertDeclUsage(uint32_t usage)
