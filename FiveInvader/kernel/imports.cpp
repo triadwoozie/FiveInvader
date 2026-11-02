@@ -12812,16 +12812,6 @@ PPC_FUNC(sub_8323C238)
 PPC_FUNC(sub_82918D28)
 {
     PPC_FUNC_PROLOGUE();
-    uint32_t poolMgr = PPC_LOAD_U32(0x83BFBE8C);
-    if (poolMgr == 0)
-    {
-        LOG_WARNING("[sub_82918D28] Global pool manager at 0x83BFBE8C is NULL! Calling sub_83210CF0...");
-        uint32_t savedR1 = ctx.r1.u32;
-        sub_83210CF0(ctx, base);
-        ctx.r1.u32 = savedR1;
-        poolMgr = PPC_LOAD_U32(0x83BFBE8C);
-        LOGF_WARNING("[sub_82918D28] After sub_83210CF0: 0x83BFBE8C = 0x{:08X}", poolMgr);
-    }
     sub_828FC6D8(ctx, base);
     sub_828FCA78(ctx, base);
 }

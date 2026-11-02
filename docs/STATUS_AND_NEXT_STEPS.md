@@ -15,6 +15,10 @@
 4. **Heap Double-Free Guarding & Physical Allocation Tracking**:
    - Added active physical allocation tracking `s_activePhysAllocations` in `heap.cpp` to prevent double-free corruptions in `o1heap`.
 
+5. **Worker Stream Reader & Array Bounds Safeguards (`sub_831E2DB8`, `sub_8321D020`)**:
+   - Fixed stream buffer underflow in `ppc_recomp.265.cpp:loc_831E2F1C` where unread byte count <= 0 caused signed comparison underflow to `0xFFFFFFFF` in `sub_823CFAF0`.
+   - Added array pointer validation in `ppc_recomp.269.cpp:sub_8321D020` guarding against invalid offsets (`r10 < 0x10000 || r10 >= PPC_MEMORY_SIZE - 4`), preventing SIGSEGV in worker threads during resource loading. Codified in `tools/patch_ppc_xml_switch.py`.
+
 ## Next Steps
 
 1. Verify `gameconfig.xml` loader (`sub_8344D068`) cleanly returns.
