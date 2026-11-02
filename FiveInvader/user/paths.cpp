@@ -3,6 +3,7 @@
 
 std::filesystem::path g_executableRoot = os::process::GetExecutableRoot();
 std::filesystem::path g_userPath = BuildUserPath();
+std::filesystem::path g_streamPath;
 
 bool CheckPortable()
 {
@@ -12,6 +13,16 @@ bool CheckPortable()
 void SetUserPath(const std::filesystem::path& path)
 {
     g_userPath = path;
+}
+
+void SetStreamPath(const std::filesystem::path& path)
+{
+    g_streamPath = path;
+}
+
+const std::filesystem::path& GetStreamPath()
+{
+    return g_streamPath;
 }
 
 std::filesystem::path BuildUserPath()

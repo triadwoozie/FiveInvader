@@ -6,6 +6,7 @@
 #include <kernel/function.h>
 #include <mod/mod_loader.h>
 #include <os/logger.h>
+#include <app.h>
 #include <user/config.h>
 #include <user/paths.h>
 #include <stdafx.h>
@@ -407,7 +408,8 @@ std::filesystem::path FileSystem::ResolvePath(const std::string_view& path, bool
         return std::filesystem::path{};
     }
     
-    LOGF_IMPL(Utility, "Game", "Loading file: \"{}\"", path);
+    if (App::s_logVfs)
+        LOGF_IMPL(Utility, "Game", "Loading file: \"{}\"", path);
     
     // Static path to extracted folder (computed once)
     // Note: Game files are in "game" subdirectory, or directly in GetGamePath()
@@ -710,6 +712,35 @@ std::filesystem::path FileSystem::ResolvePath(const std::string_view& path, bool
     std::filesystem::path resolvedPath = std::u8string_view((const char8_t*)builtPath.c_str());
     if (std::filesystem::exists(resolvedPath))
         return resolvedPath;
+
+    if (!GetStreamPath().empty())
+    {
+        std::string relativePath;
+        const size_t driveSeparator = path.find(":\\");
+        if (driveSeparator != std::string_view::npos)
+            relativePath.assign(path.substr(driveSeparator + 2));
+        else
+            relativePath.assign(path);
+        std::replace(relativePath.begin(), relativePath.end(), '\\', '/');
+        while (!relativePath.empty() && relativePath.front() == '/')
+            relativePath.erase(relativePath.begin());
+
+        const std::filesystem::path relative(relativePath);
+        const bool escapesRoot = relative.is_absolute() ||
+            std::any_of(relative.begin(), relative.end(), [](const auto& component) {
+                return component == "..";
+            });
+        if (!escapesRoot)
+        {
+            const auto streamCandidate = (GetStreamPath() / relative).lexically_normal();
+            if (std::filesystem::exists(streamCandidate))
+            {
+                if (App::s_logVfs)
+                    LOGF_IMPL(Utility, "Game", "Resolved from stream directory: {}", streamCandidate.string());
+                return streamCandidate;
+            }
+        }
+    }
 
     // Path cache fallback (built from game/ and RPF DUMP/ at startup).
     {

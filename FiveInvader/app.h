@@ -12,6 +12,8 @@ public:
     static inline bool s_isLoading;
     static inline bool s_isSaving;
     static inline bool s_isSaveDataCorrupt;
+    static inline bool s_verboseAlloc;
+    static inline bool s_logVfs;
 
     static inline GTA5::CGame* s_pApp;
 
@@ -24,4 +26,3 @@ public:
     static void Restart(std::vector<std::string> restartArgs = {});
     static void Exit();
 };
-

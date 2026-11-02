@@ -38,6 +38,7 @@
 #include <user/paths.h>
 #include <os/logger.h>
 #include <user/achievement_manager.h>
+#include <app.h>
 
 #include "io/file_system.h"
 #include "vfs.h"
@@ -196,6 +197,7 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x8257A2A8, &::sub_8257A2A8);
     PatchFuncMapping(0x825C9768, &::sub_825C9768);
     PatchFuncMapping(0x836B2AB0, &::sub_836B2AB0);
+    PatchFuncMapping(0x836B4378, &::sub_836B4378);
     PatchFuncMapping(0x82332868, &::sub_82332868);
     PatchFuncMapping(0x83217D38, &::sub_83217D38);
     PatchFuncMapping(0x8226B3B8, &::sub_8226B3B8);
@@ -212,6 +214,7 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x83521D38, &::sub_83521D38);
     PatchFuncMapping(0x836B1768, &::sub_836B1768);
     PatchFuncMapping(0x83536A60, &::sub_83536A60);
+    PatchFuncMapping(0x8363FCB0, &::sub_8363FCB0);
     PatchFuncMapping(0x823CFAF0, &::sub_823CFAF0);
     
     printf("[PATCH] Sync primitive patching complete.\n");
@@ -2496,7 +2499,8 @@ uint32_t NtOpenFile(
     g_ntFileHandles.emplace(handleValue, h);
 
     *FileHandle = handleValue;
-    LOGF_INFO("[TRACE] NtOpenFile: '{}' -> handle=0x{:08X}", guestPath, handleValue);
+    if (App::s_logVfs)
+        LOGF_INFO("[TRACE] NtOpenFile: '{}' -> handle=0x{:08X}", guestPath, handleValue);
     if (IoStatusBlock)
     {
         IoStatusBlock->Status = STATUS_SUCCESS;
@@ -2590,8 +2594,9 @@ uint32_t NtCreateFile
                     g_ntDirHandles.emplace(handleValue, hDir);
                     
                     *FileHandle = handleValue;
-                    LOGF_IMPL(Utility, "NtCreateFile", "[VFS] Directory: '{}' -> {} (handle=0x{:08X})", 
-                        guestPath, vfsResolved.string(), handleValue);
+                    if (App::s_logVfs)
+                        LOGF_IMPL(Utility, "NtCreateFile", "[VFS] Directory: '{}' -> {} (handle=0x{:08X})",
+                            guestPath, vfsResolved.string(), handleValue);
                     
                     if (IoStatusBlock)
                     {
@@ -2617,8 +2622,9 @@ uint32_t NtCreateFile
                         g_ntFileHandles.emplace(handleValue, hFile);
                         
                         *FileHandle = handleValue;
-                        LOGF_IMPL(Utility, "NtCreateFile", "[VFS] File: '{}' -> {} (handle=0x{:08X})", 
-                            guestPath, vfsResolved.string(), handleValue);
+                        if (App::s_logVfs)
+                            LOGF_IMPL(Utility, "NtCreateFile", "[VFS] File: '{}' -> {} (handle=0x{:08X})",
+                                guestPath, vfsResolved.string(), handleValue);
                         
                         if (IoStatusBlock)
                         {
@@ -2636,7 +2642,8 @@ uint32_t NtCreateFile
     std::filesystem::path resolved = ResolveGuestPathBestEffort(guestPath);
 
     // Debug: Log resolved path for troubleshooting
-    LOGF_IMPL(Utility, "NtCreateFile", "Guest: '{}' -> Resolved: '{}' DesiredAccess=0x{:08X}", guestPath, resolved.string(), DesiredAccess);
+    if (App::s_logVfs)
+        LOGF_IMPL(Utility, "NtCreateFile", "Guest: '{}' -> Resolved: '{}' DesiredAccess=0x{:08X}", guestPath, resolved.string(), DesiredAccess);
 
     // Check if this is a direct .rpf file open (e.g., "game:\common.rpf")
     {
@@ -2644,7 +2651,8 @@ uint32_t NtCreateFile
         std::transform(pathLower.begin(), pathLower.end(), pathLower.begin(), ::tolower);
         if (pathLower.find(".rpf") != std::string::npos)
         {
-            LOGF_IMPL(Utility, "NtCreateFile", "RPF file access detected: '{}'", guestPath);
+            if (App::s_logVfs)
+                LOGF_IMPL(Utility, "NtCreateFile", "RPF file access detected: '{}'", guestPath);
         }
     }
 
@@ -2663,7 +2671,8 @@ uint32_t NtCreateFile
         std::error_code ec;
         bool exists = std::filesystem::exists(resolved, ec);
         bool isDir = exists && std::filesystem::is_directory(resolved, ec);
-        LOGF_IMPL(Utility, "NtCreateFile", "exists={} isDir={} ec={}", exists, isDir, ec ? ec.message() : "none");
+        if (App::s_logVfs)
+            LOGF_IMPL(Utility, "NtCreateFile", "exists={} isDir={} ec={}", exists, isDir, ec ? ec.message() : "none");
         
         if (exists && isDir && !ec)
         {
@@ -2726,7 +2735,8 @@ uint32_t NtCreateFile
                     g_ntDirHandles.emplace(handleValue, hDir);
 
                     *FileHandle = handleValue;
-                    LOGF_IMPL(Utility, "NtCreateFile", "game:\\ root -> directory handle 0x{:08X} for {}", handleValue, resolved.string());
+                    if (App::s_logVfs)
+                        LOGF_IMPL(Utility, "NtCreateFile", "game:\\ root -> directory handle 0x{:08X} for {}", handleValue, resolved.string());
                     
                     if (IoStatusBlock)
                     {
@@ -2746,8 +2756,9 @@ uint32_t NtCreateFile
                 {
                     static int s_shaderBypassCount = 0;
                     if (++s_shaderBypassCount <= 5) {
-                        LOGF_IMPL(Utility, "NtCreateFile", "SHADER BYPASS #{}: '{}' - using embedded cache (1132 pre-compiled shaders)", 
-                                  s_shaderBypassCount, guestPath);
+                        if (App::s_logVfs)
+                            LOGF_IMPL(Utility, "NtCreateFile", "SHADER BYPASS #{}: '{}' - using embedded cache (1132 pre-compiled shaders)",
+                                      s_shaderBypassCount, guestPath);
                     }
                     
                     // Return "not found" - forces game to use embedded shader cache
@@ -2770,8 +2781,9 @@ uint32_t NtCreateFile
                     g_ntDirHandles.emplace(handleValue, hDir);
 
                     *FileHandle = handleValue;
-                    LOGF_IMPL(Utility, "NtCreateFile", "RPF path -> extracted dir: {} (handle=0x{:08X})", 
-                              extractedPath.string(), handleValue);
+                    if (App::s_logVfs)
+                        LOGF_IMPL(Utility, "NtCreateFile", "RPF path -> extracted dir: {} (handle=0x{:08X})",
+                                  extractedPath.string(), handleValue);
                     
                     if (IoStatusBlock)
                     {
@@ -2790,7 +2802,8 @@ uint32_t NtCreateFile
                 g_ntVirtFileHandles.emplace(handleValue, hVirt);
 
                 *FileHandle = handleValue;
-                LOGF_IMPL(Utility, "NtCreateFile", "RPF mount '{}' -> virtual empty RPF (handle=0x{:08X})", guestPath, handleValue);
+                if (App::s_logVfs)
+                    LOGF_IMPL(Utility, "NtCreateFile", "RPF mount '{}' -> virtual empty RPF (handle=0x{:08X})", guestPath, handleValue);
                 
                 if (IoStatusBlock)
                 {
@@ -2809,7 +2822,8 @@ uint32_t NtCreateFile
                 g_ntDirHandles.emplace(handleValue, hDir);
 
                 *FileHandle = handleValue;
-                LOGF_IMPL(Utility, "NtCreateFile", "Created directory handle 0x{:08X} for {}", handleValue, resolved.string());
+                if (App::s_logVfs)
+                    LOGF_IMPL(Utility, "NtCreateFile", "Created directory handle 0x{:08X} for {}", handleValue, resolved.string());
             }
             if (IoStatusBlock)
             {
@@ -2850,7 +2864,8 @@ uint32_t NtCreateFile
          guestPathLower.find("\\cache\\") != std::string::npos);
     if (optionalMissingRead)
     {
-        LOGF_IMPL(Utility, "NtCreateFile", "Optional read-only file missing: '{}'", guestPath);
+        if (App::s_logVfs)
+            LOGF_IMPL(Utility, "NtCreateFile", "Optional read-only file missing: '{}'", guestPath);
         if (IoStatusBlock)
         {
             IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
@@ -2877,7 +2892,8 @@ uint32_t NtCreateFile
             // Open existing only - fail if not exists
             if (!fileExists)
             {
-                LOGF_IMPL(Utility, "NtCreateFile", "FILE_OPEN failed - file does not exist: '{}'", resolved.string());
+                if (App::s_logVfs)
+                    LOGF_IMPL(Utility, "NtCreateFile", "FILE_OPEN failed - file does not exist: '{}'", resolved.string());
                 if (IoStatusBlock)
                 {
                     IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
@@ -2892,7 +2908,8 @@ uint32_t NtCreateFile
             // Create new - fail if exists
             if (fileExists)
             {
-                LOGF_IMPL(Utility, "NtCreateFile", "FILE_CREATE failed - file already exists: '{}'", resolved.string());
+                if (App::s_logVfs)
+                    LOGF_IMPL(Utility, "NtCreateFile", "FILE_CREATE failed - file already exists: '{}'", resolved.string());
                 if (IoStatusBlock)
                 {
                     IoStatusBlock->Status = STATUS_OBJECT_NAME_COLLISION;
@@ -2915,7 +2932,8 @@ uint32_t NtCreateFile
             // Open and truncate - fail if not exists
             if (!fileExists)
             {
-                LOGF_IMPL(Utility, "NtCreateFile", "FILE_OVERWRITE failed - file does not exist: '{}'", resolved.string());
+                if (App::s_logVfs)
+                    LOGF_IMPL(Utility, "NtCreateFile", "FILE_OVERWRITE failed - file does not exist: '{}'", resolved.string());
                 if (IoStatusBlock)
                 {
                     IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
@@ -2956,7 +2974,8 @@ uint32_t NtCreateFile
             }
             else
             {
-                LOGF_IMPL(Utility, "NtCreateFile", "Created parent directories for: '{}'", resolved.string());
+                if (App::s_logVfs)
+                    LOGF_IMPL(Utility, "NtCreateFile", "Created parent directories for: '{}'", resolved.string());
             }
         }
     }
@@ -2973,8 +2992,9 @@ uint32_t NtCreateFile
     if (!stream.is_open())
     {
         const uint32_t status = ErrnoToNtStatus(errno);
-        LOGF_IMPL(Utility, "NtCreateFile", "FAILED to open '{}' -> '{}': errno={} status=0x{:08X} (disp={})", 
-                  guestPath, resolved.string(), errno, status, CreateDisposition);
+        if (App::s_logVfs)
+            LOGF_IMPL(Utility, "NtCreateFile", "FAILED to open '{}' -> '{}': errno={} status=0x{:08X} (disp={})",
+                      guestPath, resolved.string(), errno, status, CreateDisposition);
         if (IoStatusBlock)
         {
             IoStatusBlock->Status = status;
@@ -2992,7 +3012,8 @@ uint32_t NtCreateFile
     g_ntFileHandles.emplace(handleValue, h);
 
     *FileHandle = handleValue;
-    LOGF_INFO("[TRACE] NtCreateFile: '{}' (disp={}) -> handle=0x{:08X}", guestPath, CreateDisposition, handleValue);
+    if (App::s_logVfs)
+        LOGF_INFO("[TRACE] NtCreateFile: '{}' (disp={}) -> handle=0x{:08X}", guestPath, CreateDisposition, handleValue);
     if (IoStatusBlock)
     {
         IoStatusBlock->Status = STATUS_SUCCESS;
@@ -3081,8 +3102,9 @@ uint32_t NtSetInformationFile(
     uint32_t Length,
     uint32_t FileInformationClass)
 {
-    LOGF_INFO("[TRACE] NtSetInformationFile: handle=0x{:08X} class={} len={}", 
-              FileHandle, FileInformationClass, Length);
+    if (App::s_logVfs)
+        LOGF_INFO("[TRACE] NtSetInformationFile: handle=0x{:08X} class={} len={}",
+                  FileHandle, FileInformationClass, Length);
 
     if (FileHandle == GUEST_INVALID_HANDLE_VALUE || !IsKernelObject(FileHandle))
         return STATUS_INVALID_HANDLE;
@@ -3101,7 +3123,8 @@ uint32_t NtSetInformationFile(
             uint64_t newPos = ByteSwap(*reinterpret_cast<uint64_t*>(FileInformation));
             hFile->stream.clear();
             hFile->stream.seekg(newPos, std::ios::beg);
-            LOGF_INFO("[TRACE] NtSetInformationFile: Seek handle=0x{:08X} to pos={}", FileHandle, newPos);
+            if (App::s_logVfs)
+                LOGF_INFO("[TRACE] NtSetInformationFile: Seek handle=0x{:08X} to pos={}", FileHandle, newPos);
         }
     }
 
@@ -4215,9 +4238,9 @@ uint32_t NtReadFile(
     ++s_readCount;
     
     const uint64_t offset = ByteOffset ? static_cast<uint64_t>(ByteOffset->get()) : 0ull;
-    if (s_readCount <= 50 || s_readCount % 500 == 0)
+    if (App::s_logVfs && (s_readCount <= 20 || s_readCount % 500 == 0))
     {
-        LOGF_INFO("[TRACE] NtReadFile: #{} handle=0x{:08X} len=0x{:X} offset=0x{:X} event=0x{:08X}", 
+        LOGF_INFO("[TRACE] NtReadFile: #{} handle=0x{:08X} len=0x{:X} offset=0x{:X} event=0x{:08X}",
                   s_readCount, FileHandle, Length, offset, Event);
     }
     
@@ -7998,17 +8021,23 @@ static void StorageDevice_ReadFile(PPCContext& ctx, uint8_t* base) {
     }
     
     // COMPREHENSIVE LOGGING: Log ALL vtable[27] calls
-    printf("[VTABLE27] #%d path='%s' device=0x%08X output=0x%08X LR=0x%08X\n",
-           s_count, pathBuf, devicePtr, outputAddr, GET_CTX_LR(ctx));
-    fflush(stdout);
+    if (App::s_logVfs)
+    {
+        printf("[VTABLE27] #%d path='%s' device=0x%08X output=0x%08X LR=0x%08X\n",
+               s_count, pathBuf, devicePtr, outputAddr, GET_CTX_LR(ctx));
+        fflush(stdout);
+    }
     
     // Resolve path via VFS
     std::string guestPath(pathBuf);
     auto hostPath = VFS::Resolve(guestPath);
     
     if (!VFS::Exists(guestPath)) {
-        printf("[VTABLE27] #%d -> NOT FOUND\n", s_count);
-        fflush(stdout);
+        if (App::s_logVfs)
+        {
+            printf("[VTABLE27] #%d -> NOT FOUND\n", s_count);
+            fflush(stdout);
+        }
         // Write 0 to output pointer
         if (outputAddr != 0) {
             PPC_STORE_U32(outputAddr, 0);
@@ -8020,8 +8049,11 @@ static void StorageDevice_ReadFile(PPCContext& ctx, uint8_t* base) {
     // Get file size
     uint64_t fileSize = VFS::GetFileSize(guestPath);
     
-    printf("[VTABLE27] #%d -> FOUND size=%llu bytes, returning token=7\n", s_count, (unsigned long long)fileSize);
-    fflush(stdout);
+    if (App::s_logVfs)
+    {
+        printf("[VTABLE27] #%d -> FOUND size=%llu bytes, returning token=7\n", s_count, (unsigned long long)fileSize);
+        fflush(stdout);
+    }
     
     if (outputAddr != 0) {
         PPC_STORE_U32(outputAddr, static_cast<uint32_t>(fileSize));
@@ -9378,7 +9410,7 @@ PPC_FUNC(sub_82D925B8) {
 	ctx.r28.s64 = ctx.r11.s64 + 20196;
 
 	static uint32_t s_callCount = 0;
-	bool shouldLog = (++s_callCount <= 3);
+	bool shouldLog = App::s_verboseAlloc && (++s_callCount <= 3);
 	if (shouldLog) {
 		LOGF_INFO("[TRACE sub_82D925B8] Start 8-iteration category hash: r3=0x{:08X} r4=0x{:08X}",
 		          ctx.r3.u32, ctx.r4.u32);
@@ -9815,8 +9847,9 @@ loc_82380B08:
             cCount = (4096 - 32) / cSize;
             if (cCount == 0) cCount = 1;
             PPC_STORE_U16(ctx.r31.u32 + 6, cCount);
-            LOGF_INFO("[sub_82380A50] Initialized SBA bucket 0x{:08X} (offset={}) -> chunkSize={} chunkCount={}",
-                      ctx.r31.u32, offset, cSize, cCount);
+            if (App::s_verboseAlloc)
+                LOGF_INFO("[sub_82380A50] Initialized SBA bucket 0x{:08X} (offset={}) -> chunkSize={} chunkCount={}",
+                          ctx.r31.u32, offset, cSize, cCount);
         }
     }
     ctx.r7.s64 = 0;
@@ -9841,8 +9874,8 @@ loc_82380B08:
         uint16_t cSize = PPC_LOAD_U16(ctx.r31.u32 + 4);
         uint16_t cCount = static_cast<uint16_t>(ctx.r3.u16);
         static std::atomic<int> s_allocCalls{0};
-        if (s_allocCalls++ < 20) {
-            LOGF_INFO("[TRACE sub_82380A50] bucket=0x{:08X} chunkSize={} chunkCount={} page=0x{:08X}", 
+        if (App::s_verboseAlloc && s_allocCalls++ < 20) {
+            LOGF_INFO("[TRACE sub_82380A50] bucket=0x{:08X} chunkSize={} chunkCount={} page=0x{:08X}",
                       ctx.r31.u32, cSize, cCount, ctx.r11.u32);
         }
     }
@@ -9946,9 +9979,34 @@ PPC_FUNC(sub_831977F8)
 
 extern "C" void __imp__sub_8255DC20(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__sub_8255DC88(PPCContext& ctx, uint8_t* base);
+extern "C" void __imp__sub_836B4378(PPCContext& ctx, uint8_t* base);
+extern "C" void __imp__sub_8363FCB0(PPCContext& ctx, uint8_t* base);
 
 static std::mutex s_fallbackAllocMutex;
 static std::unordered_set<uint32_t> s_fallbackAllocAddrs;
+
+PPC_FUNC(sub_8363FCB0)
+{
+    const uint32_t allocator = ctx.r3.u32;
+    const uint32_t size = ctx.r5.u32;
+    if (allocator < 0x10000u || allocator > PPC_MEMORY_SIZE - sizeof(uint32_t) ||
+        size > 0x7FFFFFFFu)
+    {
+        static std::atomic<uint32_t> s_invalidAllocatorCount{0};
+        const uint32_t count = ++s_invalidAllocatorCount;
+        if (count <= 32)
+        {
+            LOGF_WARNING("[MEM] Rejected invalid allocator receiver #{} object=0x{:08X} "
+                         "flags=0x{:08X} size=0x{:08X} lr=0x{:08X}",
+                         count, allocator, ctx.r4.u32, size,
+                         static_cast<uint32_t>(ctx.lr));
+        }
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    __imp__sub_8363FCB0(ctx, base);
+}
 
 PPC_FUNC(sub_8255DC20)
 {
@@ -9958,6 +10016,16 @@ PPC_FUNC(sub_8255DC20)
     uint32_t size = ctx.r3.u32;
     uint32_t alignment = ctx.r4.u32 ? ctx.r4.u32 : 16;
     if (alignment < 16) alignment = 16;
+
+    if (size > 0x7FFFFFFFu)
+    {
+        LOGF_WARNING("[MEM] Rejected invalid allocation size=0x{:08X} align=0x{:08X} "
+                     "lr=0x{:08X} r13=0x{:08X} r1=0x{:08X}",
+                     size, alignment, static_cast<uint32_t>(ctx.lr),
+                     ctx.r13.u32, ctx.r1.u32);
+        ctx.r3.u64 = 0;
+        return;
+    }
 
     // Check if the thread has a valid allocator vtable in TLS
     uint32_t threadCtx = (ctx.r13.u32 != 0) ? PPC_LOAD_U32(ctx.r13.u32 + 0) : 0;
@@ -9969,7 +10037,7 @@ PPC_FUNC(sub_8255DC20)
     uint32_t vtable = (allocator != 0) ? PPC_LOAD_U32(allocator + 0) : 0;
     uint32_t allocFn = (vtable != 0) ? PPC_LOAD_U32(vtable + 8) : 0;
 
-    if (s_allocCount <= 20 || (s_allocCount % 500 == 0))
+    if (App::s_verboseAlloc && (s_allocCount <= 20 || (s_allocCount % 500 == 0)))
     {
         LOGF_INFO("[ALLOC] sub_8255DC20 #{} size={} align={} threadCtx=0x{:08X} alloc=0x{:08X} allocFn=0x{:08X}",
                   s_allocCount, size, alignment, threadCtx, allocator, allocFn);
@@ -9999,7 +10067,7 @@ PPC_FUNC(sub_8255DC20)
             s_fallbackAllocAddrs.insert(guestAddr);
         }
         ctx.r3.u32 = guestAddr;
-        if (s_allocCount <= 30 || (s_allocCount % 500 == 0) || size > 500000)
+        if (App::s_verboseAlloc && (s_allocCount <= 30 || (s_allocCount % 500 == 0) || size > 500000))
         {
             LOGF_INFO("[ALLOC] sub_8255DC20 #{} size={} align={} -> 0x{:08X} (fallback)", 
                       s_allocCount, size, alignment, guestAddr);
@@ -10010,6 +10078,54 @@ PPC_FUNC(sub_8255DC20)
         ctx.r3.u32 = 0;
         LOGF_ERROR("[ALLOC] sub_8255DC20 #{} FAILED for size={}", s_allocCount, size);
     }
+}
+
+PPC_FUNC(sub_836B4378)
+{
+    const uint32_t object = ctx.r3.u32;
+    const uint32_t output = ctx.r5.u32;
+    if (object < 0x40000000u || object > PPC_MEMORY_SIZE - 884)
+    {
+        static std::atomic<uint32_t> s_invalidStreamObjectCount{0};
+        const uint32_t count = ++s_invalidStreamObjectCount;
+        if (count <= 8)
+        {
+            LOGF_WARNING("[MEM] Rejected invalid stream object #{} object=0x{:08X} "
+                         "destination=0x{:08X} lr=0x{:08X}",
+                         count, object, ctx.r4.u32, static_cast<uint32_t>(ctx.lr));
+        }
+        if (ctx.r4.u32 == 0 && output >= 0x10000 &&
+            output <= PPC_MEMORY_SIZE - sizeof(uint32_t))
+        {
+            PPC_STORE_U32(output, 0);
+        }
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    const uint32_t streamLength = PPC_LOAD_U32(object + 876);
+    const uint32_t streamOffset = PPC_LOAD_U32(object + 880);
+    const uint64_t remaining = static_cast<uint64_t>(streamLength) + streamOffset;
+    if (streamLength > 0x7FFFFFFFu || remaining > 0x7FFFFFFFu)
+    {
+        static std::atomic<uint32_t> s_invalidStreamCount{0};
+        const uint32_t count = ++s_invalidStreamCount;
+        LOGF_WARNING("[MEM] Rejected invalid stream range #{} object=0x{:08X} "
+                     "length=0x{:08X} offset=0x{:08X} remaining=0x{:08X} lr=0x{:08X}",
+                     count, object, streamLength, streamOffset,
+                     static_cast<uint32_t>(remaining), static_cast<uint32_t>(ctx.lr));
+        PPC_STORE_U32(object + 876, 0);
+        PPC_STORE_U32(object + 880, 0);
+        if (ctx.r4.u32 == 0 && output >= 0x10000 &&
+            output <= PPC_MEMORY_SIZE - sizeof(uint32_t))
+        {
+            PPC_STORE_U32(output, 0);
+        }
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    __imp__sub_836B4378(ctx, base);
 }
 
 PPC_FUNC(sub_8255DC88)
@@ -10066,7 +10182,7 @@ PPC_FUNC(sub_8255DC88)
     uint32_t freeFn = (vtable != 0) ? PPC_LOAD_U32(vtable + 16) : 0;
 
     static uint32_t s_freeCount = 0;
-    if (++s_freeCount <= 20 || (s_freeCount % 500 == 0))
+    if (App::s_verboseAlloc && (++s_freeCount <= 20 || (s_freeCount % 500 == 0)))
     {
         LOGF_INFO("[FREE] sub_8255DC88 #{} ptr=0x{:08X} threadCtx=0x{:08X} alloc=0x{:08X} vtable=0x{:08X} freeFn=0x{:08X}",
                   s_freeCount, guestAddr, threadCtx, allocator, vtable, freeFn);
@@ -10384,13 +10500,6 @@ PPC_FUNC(sub_823CFAF0)
 extern "C" void __imp__sub_831C1B10(PPCContext& ctx, uint8_t* base);
 PPC_FUNC(sub_831C1B10)
 {
-    static uint32_t s_count = 0;
-    if (++s_count <= 20 || s_count % 500 == 0)
-    {
-        void* caller = __builtin_return_address(0);
-        LOGF_INFO("[sub_831C1B10] #{} r3=0x{:08X} r4=0x{:08X} r5={} caller={}",
-                  s_count, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, caller);
-    }
     __imp__sub_831C1B10(ctx, base);
 }
 
@@ -10406,8 +10515,9 @@ PPC_FUNC(sub_831E3240)
     uint32_t device = PPC_LOAD_U32(stream + 0);
     uint32_t handle = PPC_LOAD_U32(stream + 4);
 
-    LOGF_INFO("[TRACE] sub_831E3240 (fiStream::Close): stream=0x{:08X} device=0x{:08X} handle=0x{:08X}",
-              stream, device, handle);
+    if (App::s_logVfs)
+        LOGF_INFO("[TRACE] sub_831E3240 (fiStream::Close): stream=0x{:08X} device=0x{:08X} handle=0x{:08X}",
+                  stream, device, handle);
 
     if (device != 0 && device < PPC_MEMORY_SIZE)
     {
@@ -10415,14 +10525,16 @@ PPC_FUNC(sub_831E3240)
         if (vtable >= PPC_CODE_BASE && vtable < PPC_MEMORY_SIZE)
         {
             uint32_t closeFn = PPC_LOAD_U32(vtable + 48);
-            LOGF_INFO("[TRACE] sub_831E3240: device=0x{:08X} vtable=0x{:08X} closeFn=0x{:08X}",
-                      device, vtable, closeFn);
+            if (App::s_logVfs)
+                LOGF_INFO("[TRACE] sub_831E3240: device=0x{:08X} vtable=0x{:08X} closeFn=0x{:08X}",
+                          device, vtable, closeFn);
             if (closeFn >= PPC_CODE_BASE && closeFn < PPC_CODE_BASE + PPC_CODE_SIZE)
             {
                 ctx.r3.u64 = device;
                 ctx.r4.u64 = handle;
                 PPC_CALL_INDIRECT_FUNC(closeFn);
-                LOGF_INFO("[TRACE] sub_831E3240: closeFn returned.");
+                if (App::s_logVfs)
+                    LOGF_INFO("[TRACE] sub_831E3240: closeFn returned.");
             }
             else
             {
@@ -10436,7 +10548,8 @@ PPC_FUNC(sub_831E3240)
     PPC_STORE_U32(stream + 4, 0xFFFFFFFF);
     PPC_STORE_U32(stream + 0, 0);
     ctx.r3.s64 = 0;
-    LOGF_INFO("[TRACE] sub_831E3240 done.");
+    if (App::s_logVfs)
+        LOGF_INFO("[TRACE] sub_831E3240 done.");
 }
 
 // =============================================================================
@@ -13008,6 +13121,8 @@ PPC_FUNC(sub_83480F88)
     PPCRegister ctr{};
     PPCCRRegister cr6{};
     uint32_t ea{};
+    static std::atomic<uint32_t> s_barrierTrace{0};
+    const uint32_t traceId = ++s_barrierTrace;
     __savegprlr_24(ctx, base);
     ea = -160 + ctx.r1.u32;
     PPC_STORE_U32(ea, ctx.r1.u32);
@@ -13017,6 +13132,27 @@ PPC_FUNC(sub_83480F88)
 
     uint32_t r3_obj = PPC_LOAD_U32(ctx.r31.u32 + 30324); // 0x83CB7674
     ctx.r3.u64 = r3_obj;
+    if (traceId <= 12) {
+        const auto readObjectU32 = [object = ctx.r27.u32, &base](uint32_t offset) {
+            return object >= 0x10000 &&
+                    object <= PPC_MEMORY_SIZE - offset - sizeof(uint32_t)
+                ? PPC_LOAD_U32(object + offset)
+                : 0;
+        };
+        const uint32_t queueObj = readObjectU32(4);
+        const uint32_t globalCounter = PPC_LOAD_U32(0x83837FF0);
+        LOGF_WARNING(
+            "[83480F88] entry #{} obj=0x{:08X} queue=0x{:08X} sems={:08X},{:08X},{:08X},{:08X} "
+            "flag105={} counter=0x{:08X} queueFields={:08X},{:08X},{:08X},{:08X}",
+            traceId, ctx.r27.u32, queueObj,
+            readObjectU32(20), readObjectU32(24), readObjectU32(28), readObjectU32(32),
+            ctx.r27.u32 < PPC_MEMORY_SIZE - 105 ? PPC_LOAD_U8(ctx.r27.u32 + 105) : 0,
+            globalCounter,
+            queueObj != 0 && queueObj < PPC_MEMORY_SIZE - 12 ? PPC_LOAD_U32(queueObj + 4) : 0,
+            queueObj != 0 && queueObj < PPC_MEMORY_SIZE - 12 ? PPC_LOAD_U32(queueObj + 8) : 0,
+            queueObj != 0 && queueObj < PPC_MEMORY_SIZE - 12 ? PPC_LOAD_U32(queueObj + 12) : 0,
+            queueObj != 0 && queueObj < PPC_MEMORY_SIZE - 12 ? PPC_LOAD_U32(queueObj + 16) : 0);
+    }
 
     uint32_t r11_val = 0;
     if (r3_obj >= 0x10000 && r3_obj < PPC_MEMORY_SIZE) {
@@ -13110,6 +13246,10 @@ loc_83480FE0:
     ctx.r4.s64 = 1;
     if (ctx.r27.u32 >= 0x10000 && ctx.r27.u32 < PPC_MEMORY_SIZE) {
         ctx.r3.u64 = PPC_LOAD_U32(ctx.r27.u32 + 28);
+        if (traceId <= 12) {
+            LOGF_WARNING("[83480F88] barrier #{} release28=0x{:08X} wait32=0x{:08X}",
+                         traceId, ctx.r3.u32, PPC_LOAD_U32(ctx.r27.u32 + 32));
+        }
         sub_8239CB60(ctx, base);
         uint8_t flag = PPC_LOAD_U8(ctx.r27.u32 + 105);
         if (flag != 0) {

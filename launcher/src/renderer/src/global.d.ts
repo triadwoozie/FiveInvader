@@ -8,13 +8,20 @@ interface GameInspection {
 
 interface LaunchSettings {
   gameDir: string;
+  streamDir?: string;
   configPath?: string;
   language: string;
   resolution: string;
-  vsync: boolean;
+  vsyncMode: string;
   fullscreen: boolean;
   fps: number;
   enableMangoHud: boolean;
+  enableVulkanValidation: boolean;
+  verboseAlloc: boolean;
+  logVfs: boolean;
+  windowGate: string;
+  timeoutSeconds: number;
+  saveRunLog: boolean;
 }
 
 interface ControllerSettings {
@@ -30,6 +37,7 @@ interface Window {
   fiveinvader: {
     defaults: () => Promise<{ gameDir: string; enginePath: string; running: boolean }>;
     chooseGameDir: () => Promise<string | null>;
+    chooseStreamDir: () => Promise<string | null>;
     chooseConfig: () => Promise<string | null>;
     readConfig: (configPath: string) => Promise<string>;
     writeConfig: (configPath: string, contents: string) => Promise<boolean>;

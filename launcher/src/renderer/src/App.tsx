@@ -30,7 +30,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type TabId = "launch" | "graphics" | "controller" | "system" | "logs";
 type Language = "en" | "ja" | "de" | "fr" | "es" | "it";
-type SettingKey = "resolution" | "fps" | "language" | "vsync" | "fullscreen" | "gameDir" | "configPath";
+type SettingKey = "resolution" | "fps" | "language" | "vsync" | "fullscreen" | "gameDir" | "configPath" | "streamDir";
 
 const languageNames: Record<Language, string> = {
   en: "English",
@@ -42,20 +42,20 @@ const languageNames: Record<Language, string> = {
 };
 const descriptions: Record<SettingKey, string> = {
   resolution: "Sets the render window size passed to the engine as --res WIDTHxHEIGHT.",
-  fps: "Frame pacing target. Select Unlimited to pass --fps 0.",
+  fps: "Frame pacing target. Select Uncapped to pass --fps 0.",
   language: "Selects the engine language using --lang.",
-  vsync: "Synchronizes frame presentation to your display using --vsync 0|1.",
+  vsync: "Selects FIFO, Mailbox (currently falls back to FIFO), or Immediate presentation with --vsync-mode.",
   fullscreen: "Starts in fullscreen or windowed mode using --fullscreen 0|1.",
   gameDir: "Directory containing default.xex and extracted game archives. Passed as --game-dir.",
   configPath: "Optional TOML settings file. When selected, the launcher passes --config.",
+  streamDir: "Optional secondary loose-file root. Passed as --stream-dir and searched after the game directory.",
 };
 const initialHelp = "SELECT A SETTING TO VIEW ITS DESCRIPTION AND ENGINE FLAG.";
 const engineBuild = "e6cd339";
 const performanceProfiles = [
   { value: "xbox360", label: "Xbox 360 Authentic (Default)", resolution: "1280x720", fps: "30", vsyncCadence: "FIFO", footer: "XBOX 360 AUTHENTIC" },
-  { value: "pc1080", label: "PC Standard 1080p", resolution: "1920x1080", fps: "60", vsyncCadence: "Mailbox", footer: "1080P 60FPS" },
-  { value: "high1440", label: "High Refresh 1440p", resolution: "2560x1440", fps: "120", vsyncCadence: "Mailbox", footer: "1440P 120FPS" },
-  { value: "ultra4k", label: "Unlocked 4K Ultra", resolution: "3840x2160", fps: "0", vsyncCadence: "Immediate", footer: "4K UNLOCKED" },
+  { value: "pc1080", label: "PC Standard 1080p", resolution: "1920x1080", fps: "60", vsyncCadence: "FIFO", footer: "1080P 60FPS" },
+  { value: "high1440", label: "High Resolution 1440p", resolution: "2560x1440", fps: "0", vsyncCadence: "Immediate", footer: "1440P UNCAPPED" },
 ] as const;
 const defaultBindings: Record<string, string> = {
   a: "Button 0",
@@ -177,18 +177,20 @@ function App() {
     }
   });
   const [tab, setTab] = useState<TabId>("launch");
+  const [profileReady, setProfileReady] = useState(false);
   const [gameDir, setGameDir] = useState("");
+  const [streamDir, setStreamDir] = useState("");
   const [enginePath, setEnginePath] = useState("");
   const [configPath, setConfigPath] = useState("");
   const [resolution, setResolution] = useState(() => {
     const saved = savedDashboardProfile.resolution;
-    return typeof saved === "string" && ["1280x720", "1920x1080", "2560x1440", "3840x2160"].includes(saved)
+    return typeof saved === "string" && ["1280x720", "1920x1080", "2560x1440"].includes(saved)
       ? saved
       : "1280x720";
   });
   const [fps, setFps] = useState(() => {
     const saved = savedDashboardProfile.fps;
-    return typeof saved === "string" && ["0", "30", "60", "120"].includes(saved) ? saved : "30";
+    return typeof saved === "string" && ["0", "30", "60"].includes(saved) ? saved : "30";
   });
   const [language, setLanguage] = useState<Language>("en");
   const [vsync, setVsync] = useState(() => savedDashboardProfile.vsync !== false);
@@ -200,16 +202,23 @@ function App() {
   const [fullscreen, setFullscreen] = useState(
     () => typeof savedDashboardProfile.fullscreen === "boolean" ? savedDashboardProfile.fullscreen : false,
   );
-  const [quickPrefs, setQuickPrefs] = useState(() => {
-    const defaults = { gamepadHooks: true, telemetryHud: true, headless: false };
-    return {
-      gamepadHooks: typeof savedDashboardProfile.gamepadHooks === "boolean" ? savedDashboardProfile.gamepadHooks : defaults.gamepadHooks,
-      telemetryHud: typeof savedDashboardProfile.telemetryHud === "boolean" ? savedDashboardProfile.telemetryHud : defaults.telemetryHud,
-      headless: typeof savedDashboardProfile.headless === "boolean" ? savedDashboardProfile.headless : defaults.headless,
-    };
-  });
   const [enableMangoHud, setEnableMangoHud] = useState(
     () => typeof savedDashboardProfile.enableMangoHud === "boolean" ? savedDashboardProfile.enableMangoHud : false,
+  );
+  const [enableVulkanValidation, setEnableVulkanValidation] = useState(
+    () => savedDashboardProfile.enableVulkanValidation === true,
+  );
+  const [verboseAlloc, setVerboseAlloc] = useState(() => savedDashboardProfile.verboseAlloc === true);
+  const [logVfs, setLogVfs] = useState(() => savedDashboardProfile.logVfs === true);
+  const [saveRunLog, setSaveRunLog] = useState(() => savedDashboardProfile.saveRunLog === true);
+  const [windowGate, setWindowGate] = useState(() =>
+    savedDashboardProfile.windowGate === "immediate" ? "immediate" : "render",
+  );
+  const [timeoutSeconds, setTimeoutSeconds] = useState(() =>
+    typeof savedDashboardProfile.timeoutSeconds === "string"
+      && ["0", "20", "30", "60"].includes(savedDashboardProfile.timeoutSeconds)
+      ? savedDashboardProfile.timeoutSeconds
+      : "0",
   );
   const [inspection, setInspection] = useState<GameInspection | null>(null);
   const [inspectionError, setInspectionError] = useState("");
@@ -239,19 +248,29 @@ function App() {
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    if (!profileReady) return;
     window.localStorage.setItem("fiveinvader-dashboard-profile", JSON.stringify({
-      ...quickPrefs,
       enableMangoHud,
+      enableVulkanValidation,
+      verboseAlloc,
+      logVfs,
+      saveRunLog,
+      gameDir,
+      streamDir,
+      configPath,
+      windowGate,
+      timeoutSeconds,
       resolution,
       fps,
       vsync,
       vsyncCadence,
       fullscreen,
     }));
-  }, [enableMangoHud, fps, fullscreen, quickPrefs, resolution, vsync, vsyncCadence]);
+  }, [configPath, enableMangoHud, enableVulkanValidation, fps, fullscreen, gameDir, logVfs, profileReady,
+    resolution, saveRunLog, streamDir, timeoutSeconds, verboseAlloc, vsync, vsyncCadence, windowGate]);
 
   const fpsValue = Number(fps);
-  const resolutionBadge = resolution === "3840x2160" ? "4K" : `${resolution.split("x")[1] ?? "720"}P`;
+  const resolutionBadge = `${resolution.split("x")[1] ?? "720"}P`;
   const activeProfile = performanceProfiles.find((profile) =>
     profile.resolution === resolution && profile.fps === fps && profile.vsyncCadence === vsyncCadence,
   );
@@ -266,18 +285,32 @@ function App() {
   }
   const command = useMemo(() => {
     if (!gameDir) return "Awaiting game directory…";
-    return [
+    const environment = [
       ...(enableMangoHud ? ["MANGOHUD=1"] : []),
-      quote(enginePath || "./FiveInvader"),
+      ...(enableVulkanValidation ? ["VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation"] : []),
+      ...(saveRunLog ? ["FIVEINVADER_SAVE_RUN_LOG=1"] : []),
+    ];
+    const args = [
       "--game-dir", quote(gameDir),
+      ...(streamDir ? ["--stream-dir", quote(streamDir)] : []),
       ...(configPath ? ["--config", quote(configPath)] : []),
       "--lang", language,
       "--res", resolution,
-      "--vsync", vsync ? "1" : "0",
+      "--vsync-mode", vsyncCadence.toLowerCase(),
+      "--window-gate", windowGate,
       "--fullscreen", fullscreen ? "1" : "0",
       "--fps", String(fpsValue),
+      ...(verboseAlloc ? ["--verbose-alloc"] : []),
+      ...(logVfs ? ["--log-vfs"] : []),
+    ];
+    return [
+      ...environment,
+      ...(timeoutSeconds !== "0" ? ["timeout -s SIGTERM", `${timeoutSeconds}s`] : []),
+      quote(enginePath || "./FiveInvader"),
+      ...args,
     ].join(" ");
-  }, [configPath, enableMangoHud, enginePath, fpsValue, fullscreen, gameDir, language, resolution, vsync]);
+  }, [configPath, enableMangoHud, enableVulkanValidation, enginePath, fpsValue, fullscreen, gameDir,
+    language, logVfs, resolution, saveRunLog, streamDir, timeoutSeconds, verboseAlloc, vsyncCadence, windowGate]);
 
   useEffect(() => {
     let active = true;
@@ -296,10 +329,16 @@ function App() {
     });
     void window.fiveinvader.defaults().then((defaults) => {
       if (!active) return;
-      setGameDir(defaults.gameDir);
+      const selectedGameDir = typeof savedDashboardProfile.gameDir === "string"
+        ? savedDashboardProfile.gameDir
+        : defaults.gameDir;
+      setGameDir(selectedGameDir);
+      setStreamDir(typeof savedDashboardProfile.streamDir === "string" ? savedDashboardProfile.streamDir : "");
+      setConfigPath(typeof savedDashboardProfile.configPath === "string" ? savedDashboardProfile.configPath : "");
       setEnginePath(defaults.enginePath);
       setRunning(defaults.running);
-      return window.fiveinvader.inspectGame(defaults.gameDir)
+      setProfileReady(true);
+      return window.fiveinvader.inspectGame(selectedGameDir)
         .then((result) => active && setInspection(result))
         .catch((error: Error) => active && setInspectionError(error.message));
     }).catch((error: Error) => active && setLaunchError(error.message));
@@ -418,13 +457,20 @@ function App() {
 
   const settings: LaunchSettings = {
     gameDir,
+    ...(streamDir ? { streamDir } : {}),
     ...(configPath ? { configPath } : {}),
     language,
     resolution,
-    vsync,
+    vsyncMode: vsyncCadence.toLowerCase(),
     fullscreen,
     fps: fpsValue,
     enableMangoHud,
+    enableVulkanValidation,
+    verboseAlloc,
+    logVfs,
+    windowGate,
+    timeoutSeconds: Number(timeoutSeconds),
+    saveRunLog,
   };
 
   async function inspect(pathValue = gameDir) {
@@ -442,6 +488,11 @@ function App() {
   async function chooseGameDir() {
     const chosen = await window.fiveinvader.chooseGameDir();
     if (chosen) await inspect(chosen);
+  }
+
+  async function chooseStreamDir() {
+    const chosen = await window.fiveinvader.chooseStreamDir();
+    if (chosen) setStreamDir(chosen);
   }
 
   async function chooseConfig() {
@@ -548,7 +599,7 @@ function App() {
         <div className="strobe-field" />
         <header className="top-chrome">
           <div className="brand-lockup" aria-label="FiveInvader">
-            <img src="/Untitled.png" alt="FiveInvader" />
+            <img src="./Untitled.png" alt="FiveInvader" />
           </div>
           <Tabs.List className="menu-tabs" aria-label="Launcher sections">
             {tabs.map((item) => (
@@ -626,6 +677,19 @@ function App() {
                         />
                       </label>
                       <label className="quick-config-field">
+                        <span>FRAME RATE LIMIT</span>
+                        <SelectControl
+                          label="Frame rate limit"
+                          value={fps}
+                          onChange={setFps}
+                          options={[
+                            { value: "30", label: "30 FPS" },
+                            { value: "60", label: "60 FPS" },
+                            { value: "0", label: "Uncapped" },
+                          ]}
+                        />
+                      </label>
+                      <label className="quick-config-field">
                         <span>RENDER TARGET RESOLUTION</span>
                         <SelectControl
                           label="Render target resolution"
@@ -635,7 +699,6 @@ function App() {
                             { value: "1280x720", label: "720p (1280x720)" },
                             { value: "1920x1080", label: "1080p (Native) - 1920x1080" },
                             { value: "2560x1440", label: "1440p (2560x1440)" },
-                            { value: "3840x2160", label: "4K (3840x2160)" },
                           ]}
                         />
                       </label>
@@ -650,29 +713,39 @@ function App() {
                             setVsync(value !== "Immediate");
                           }}
                           options={[
-                            { value: "Mailbox", label: "Mailbox (Low-latency)" },
-                            { value: "FIFO", label: "FIFO (Strict VSync)" },
+                            { value: "FIFO", label: "FIFO Strict" },
+                            { value: "Mailbox", label: "Mailbox (FIFO fallback)" },
                             { value: "Immediate", label: "Immediate (Unlocked)" },
                           ]}
                         />
                       </label>
 
-                      <div className="quick-config-toggle">
-                        <span>NATIVE GAMEPAD HOOKS</span>
-                        <Toggle
-                          label="Native gamepad hooks"
-                          checked={quickPrefs.gamepadHooks}
-                          onCheckedChange={(gamepadHooks) => setQuickPrefs((prefs) => ({ ...prefs, gamepadHooks }))}
+                      <label className="quick-config-field">
+                        <span>WINDOW VISIBILITY GATE</span>
+                        <SelectControl
+                          label="Window visibility gate"
+                          value={windowGate}
+                          onChange={setWindowGate}
+                          options={[
+                            { value: "render", label: "Wait for VdSwap / PM4" },
+                            { value: "immediate", label: "Show immediately" },
+                          ]}
                         />
-                      </div>
-                      <div className="quick-config-toggle">
-                        <span>ON-SCREEN TELEMETRY HUD</span>
-                        <Toggle
-                          label="On-screen telemetry HUD"
-                          checked={quickPrefs.telemetryHud}
-                          onCheckedChange={(telemetryHud) => setQuickPrefs((prefs) => ({ ...prefs, telemetryHud }))}
+                      </label>
+                      <label className="quick-config-field">
+                        <span>TEST RUN TIMEOUT</span>
+                        <SelectControl
+                          label="Test run timeout"
+                          value={timeoutSeconds}
+                          onChange={setTimeoutSeconds}
+                          options={[
+                            { value: "0", label: "None" },
+                            { value: "20", label: "20 seconds" },
+                            { value: "30", label: "30 seconds" },
+                            { value: "60", label: "60 seconds" },
+                          ]}
                         />
-                      </div>
+                      </label>
                       <div className="quick-config-toggle quick-config-toggle-description">
                         <div>
                           <span>MANGOHUD PERFORMANCE OVERLAY</span>
@@ -684,13 +757,28 @@ function App() {
                           onCheckedChange={setEnableMangoHud}
                         />
                       </div>
-                      <div className="quick-config-toggle">
-                        <span>HEADLESS EXECUTION (CI/TESTS)</span>
+                      <div className="quick-config-toggle quick-config-toggle-description">
+                        <div>
+                          <span>VULKAN VALIDATION LAYER</span>
+                          <small>VK_LAYER_KHRONOS_validation</small>
+                        </div>
                         <Toggle
-                          label="Headless execution"
-                          checked={quickPrefs.headless}
-                          onCheckedChange={(headless) => setQuickPrefs((prefs) => ({ ...prefs, headless }))}
+                          label="Vulkan validation layer"
+                          checked={enableVulkanValidation}
+                          onCheckedChange={setEnableVulkanValidation}
                         />
+                      </div>
+                      <div className="quick-config-toggle">
+                        <span>ALLOCATOR GUARD TELEMETRY</span>
+                        <Toggle label="Allocator telemetry" checked={verboseAlloc} onCheckedChange={setVerboseAlloc} />
+                      </div>
+                      <div className="quick-config-toggle">
+                        <span>VFS PATH TELEMETRY</span>
+                        <Toggle label="VFS telemetry" checked={logVfs} onCheckedChange={setLogVfs} />
+                      </div>
+                      <div className="quick-config-toggle">
+                        <span>SAVE RUN LOG TO FILE</span>
+                        <Toggle label="Save run log to file" checked={saveRunLog} onCheckedChange={setSaveRunLog} />
                       </div>
                     </div>
                   </div>
@@ -715,12 +803,12 @@ function App() {
                   <div className="setting-row" {...rowProps("resolution")}>
                     <div className="setting-label"><Maximize2 size={15} /><div><b>Resolution</b><small>RENDER WINDOW SIZE</small></div></div>
                     <SelectControl label="Resolution" value={resolution} onChange={setResolution}
-                      options={["1280x720", "1920x1080", "2560x1440", "3840x2160"].map((value) => ({ value, label: value }))} />
+                      options={["1280x720", "1920x1080", "2560x1440"].map((value) => ({ value, label: value }))} />
                   </div>
                   <div className="setting-row" {...rowProps("fps")}>
                     <div className="setting-label"><Radio size={15} /><div><b>Frame Rate Limit</b><small>FRAME PACING TARGET</small></div></div>
                     <SelectControl label="Frame rate limit" value={fps} onChange={setFps}
-                      options={[{ value: "30", label: "30 FPS" }, { value: "60", label: "60 FPS" }, { value: "120", label: "120 FPS" }, { value: "0", label: "UNLIMITED" }]} />
+                      options={[{ value: "30", label: "30 FPS" }, { value: "60", label: "60 FPS" }, { value: "0", label: "Uncapped" }]} />
                   </div>
                   <div className="setting-row" {...rowProps("vsync")}>
                     <div className="setting-label"><Square size={15} /><div><b>Vertical Sync</b><small>DISPLAY SYNCHRONIZATION</small></div></div>
@@ -848,8 +936,27 @@ function App() {
                   <div className="table-caption">LOCAL INSTALLATION <span>FILESYSTEM</span></div>
                   <div className="setting-row path-row" {...rowProps("gameDir")}>
                     <div className="setting-label"><HardDrive size={15} /><div><b>Game Directory</b><small>EXTRACTED DISC 2 ROOT</small></div></div>
-                    <div className="path-value" title={gameDir}>{gameDir}</div>
+                    <input
+                      className="path-value path-input"
+                      aria-label="Game directory path"
+                      value={gameDir}
+                      onChange={(event) => {
+                        setGameDir(event.target.value);
+                        setInspection(null);
+                      }}
+                    />
                     <button className="icon-action" onClick={() => void chooseGameDir()} aria-label="Browse game directory"><FolderOpen size={16} /></button>
+                  </div>
+                  <div className="setting-row path-row" {...rowProps("streamDir")}>
+                    <div className="setting-label"><HardDrive size={15} /><div><b>Secondary Stream Directory</b><small>OPTIONAL DISC 1 / LOOSE FILE ROOT</small></div></div>
+                    <input
+                      className={`path-value path-input ${!streamDir ? "muted" : ""}`}
+                      aria-label="Secondary stream directory path"
+                      placeholder="NOT SET"
+                      value={streamDir}
+                      onChange={(event) => setStreamDir(event.target.value)}
+                    />
+                    <button className="icon-action" onClick={() => void chooseStreamDir()} aria-label="Browse secondary stream directory"><FolderOpen size={16} /></button>
                   </div>
                   <div className="setting-row path-row" {...rowProps("configPath")}>
                     <div className="setting-label"><FileCode2 size={15} /><div><b>Custom Config</b><small>OPTIONAL TOML OVERRIDE</small></div></div>
@@ -861,7 +968,7 @@ function App() {
                     <button className="outline-action" onClick={() => void openConfigEditor()}><FileCode2 size={14} /> EDIT CONFIG.TOML</button>
                   </div>
                   {inspectionError && <p className="error-line"><AlertTriangle size={13} /> {inspectionError}</p>}
-                  <div className="path-footnote">The game directory must contain <code>default.xex</code>. RPF files are enumerated, not modified.</div>
+                  <div className="path-footnote">The game directory must contain <code>default.xex</code>. The optional stream directory is searched only after the primary game root.</div>
                 </div>
                 <aside className="side-readout settings-summary system-summary">
                   <div className="readout-title"><span>INSTALLATION STATUS</span><span className={`live-dot ${inspection?.defaultXexPresent ? "" : "dot-red"}`} /></div>

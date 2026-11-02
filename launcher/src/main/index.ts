@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { access, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { createWriteStream, type WriteStream } from "node:fs";
+import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,8 +12,11 @@ const defaultGameDir = path.resolve(workspaceRoot, "rom_data/extracted_disc2");
 const defaultEnginePath = path.resolve(workspaceRoot, "FiveInvader/build/FiveInvader/FiveInvader");
 const controllerSettingsPath = path.join(app.getPath("userData"), "controller-settings.json");
 const languages = new Set(["en", "ja", "de", "fr", "es", "it"]);
-const resolutions = new Set(["1280x720", "1920x1080", "2560x1440", "3840x2160"]);
-const fpsLimits = new Set([0, 30, 60, 120]);
+const resolutions = new Set(["1280x720", "1920x1080", "2560x1440"]);
+const fpsLimits = new Set([0, 30, 60]);
+const vsyncModes = new Set(["fifo", "mailbox", "immediate"]);
+const windowGates = new Set(["render", "immediate"]);
+const runTimeouts = new Set([0, 20, 30, 60]);
 const defaultControllerSettings = {
   bindings: {} as Record<string, string>,
   leftDeadzone: 12,
@@ -23,6 +27,8 @@ const defaultControllerSettings = {
 };
 let mainWindow: BrowserWindow | null = null;
 let engineProcess: ChildProcessWithoutNullStreams | null = null;
+let engineTimeout: NodeJS.Timeout | null = null;
+let runLog: WriteStream | null = null;
 
 function isControllerSettings(value: unknown): value is typeof defaultControllerSettings {
   if (!value || typeof value !== "object") return false;
@@ -80,6 +86,13 @@ app.whenReady().then(() => {
     const result = await dialog.showOpenDialog(mainWindow!, {
       title: "Select extracted Disc 2 directory",
       properties: ["openDirectory"],
+    });
+    ipcMain.handle("launcher:choose-stream-dir", async () => {
+      const result = await dialog.showOpenDialog(mainWindow!, {
+        title: "Select optional secondary streaming directory",
+        properties: ["openDirectory"],
+      });
+      return result.canceled ? null : result.filePaths[0];
     });
     return result.canceled ? null : result.filePaths[0];
   });
@@ -156,24 +169,37 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("engine:launch", async (_event, settings: {
     gameDir: string;
+    streamDir?: string;
     configPath?: string;
     language: string;
     resolution: string;
-    vsync: boolean;
+    vsyncMode: string;
     fullscreen: boolean;
     fps: number;
     enableMangoHud: boolean;
+    enableVulkanValidation: boolean;
+    verboseAlloc: boolean;
+    logVfs: boolean;
+    windowGate: string;
+    timeoutSeconds: number;
+    saveRunLog: boolean;
   }) => {
     if (engineProcess) throw new Error("FiveInvader is already running.");
     if (!settings || !path.isAbsolute(settings.gameDir) || !languages.has(settings.language)) {
       throw new Error("Invalid launcher settings.");
     }
-    if (!resolutions.has(settings.resolution) || !fpsLimits.has(settings.fps)) {
+    if (!resolutions.has(settings.resolution) || !fpsLimits.has(settings.fps)
+      || !vsyncModes.has(settings.vsyncMode) || !windowGates.has(settings.windowGate)
+      || !runTimeouts.has(settings.timeoutSeconds)) {
       throw new Error("Invalid resolution or FPS target.");
     }
-    if (typeof settings.vsync !== "boolean" || typeof settings.fullscreen !== "boolean"
-      || typeof settings.enableMangoHud !== "boolean") {
+    if (typeof settings.fullscreen !== "boolean" || typeof settings.enableMangoHud !== "boolean"
+      || typeof settings.enableVulkanValidation !== "boolean" || typeof settings.verboseAlloc !== "boolean"
+      || typeof settings.logVfs !== "boolean" || typeof settings.saveRunLog !== "boolean") {
       throw new Error("Invalid display settings.");
+    }
+    if (settings.streamDir && !path.isAbsolute(settings.streamDir)) {
+      throw new Error("The streaming directory must be an absolute path.");
     }
     if (settings.configPath && !path.isAbsolute(settings.configPath)) {
       throw new Error("The config path must be absolute.");
@@ -181,38 +207,88 @@ app.whenReady().then(() => {
     const enginePath = process.env.FIVEINVADER_ENGINE_PATH || defaultEnginePath;
     await access(enginePath, constants.X_OK);
     await access(path.join(settings.gameDir, "default.xex"), constants.R_OK);
+    if (settings.streamDir) {
+      const streamInfo = await stat(settings.streamDir);
+      if (!streamInfo.isDirectory()) throw new Error("The streaming path must be a directory.");
+    }
     if (settings.configPath) await access(settings.configPath, constants.R_OK);
 
     const args = [
       "--game-dir", settings.gameDir,
+      ...(settings.streamDir ? ["--stream-dir", settings.streamDir] : []),
       ...(settings.configPath ? ["--config", settings.configPath] : []),
       "--lang", settings.language,
       "--res", settings.resolution,
-      "--vsync", settings.vsync ? "1" : "0",
+      "--vsync-mode", settings.vsyncMode,
+      "--window-gate", settings.windowGate,
       "--fullscreen", settings.fullscreen ? "1" : "0",
       "--fps", String(settings.fps),
+      ...(settings.verboseAlloc ? ["--verbose-alloc"] : []),
+      ...(settings.logVfs ? ["--log-vfs"] : []),
     ];
-    const command = [...(settings.enableMangoHud ? ["MANGOHUD=1"] : []), enginePath, ...args];
+    const command = [
+      ...(settings.enableMangoHud ? ["MANGOHUD=1"] : []),
+      ...(settings.enableVulkanValidation ? ["VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation"] : []),
+      ...(settings.saveRunLog ? ["FIVEINVADER_SAVE_RUN_LOG=1"] : []),
+      enginePath,
+      ...args,
+    ];
     send("engine:status", { running: true, command });
+    const childEnv = { ...process.env };
+    if (settings.enableMangoHud) childEnv.MANGOHUD = "1";
+    else delete childEnv.MANGOHUD;
+    if (settings.enableVulkanValidation) childEnv.VK_INSTANCE_LAYERS = "VK_LAYER_KHRONOS_validation";
+    else delete childEnv.VK_INSTANCE_LAYERS;
+    if (settings.saveRunLog) childEnv.FIVEINVADER_SAVE_RUN_LOG = "1";
+    else delete childEnv.FIVEINVADER_SAVE_RUN_LOG;
+
+    if (settings.saveRunLog) {
+      const logDirectory = app.getPath("logs");
+      await mkdir(logDirectory, { recursive: true });
+      const stamp = new Date().toISOString().replaceAll(":", "-");
+      const logPath = path.join(logDirectory, `fiveinvader-${stamp}.log`);
+      runLog = createWriteStream(logPath, { flags: "a" });
+      runLog.on("error", (error) => {
+        send("engine:output", "stderr", `Unable to save run log: ${error.message}\n`);
+        runLog = null;
+      });
+      send("engine:output", "stdout", `Saving engine output to ${logPath}\n`);
+    }
     const child = spawn(enginePath, args, {
       cwd: path.dirname(enginePath),
-      env: {
-        ...process.env,
-        ...(settings.enableMangoHud ? { MANGOHUD: "1" } : {}),
-      },
+      env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
     });
     child.stdin.end();
     engineProcess = child;
-    child.stdout.on("data", (chunk: Buffer) => send("engine:output", "stdout", chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => send("engine:output", "stderr", chunk.toString()));
+    const forwardOutput = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      const text = chunk.toString();
+      send("engine:output", stream, text);
+      runLog?.write(`[${new Date().toISOString()}] [${stream}] ${text}`);
+    };
+    child.stdout.on("data", (chunk: Buffer) => forwardOutput("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => forwardOutput("stderr", chunk));
+    if (settings.timeoutSeconds > 0) {
+      engineTimeout = setTimeout(() => {
+        send("engine:output", "stderr", `Launcher timeout reached (${settings.timeoutSeconds}s); stopping engine.\n`);
+        child.kill("SIGTERM");
+      }, settings.timeoutSeconds * 1000);
+    }
     child.on("error", (error) => {
       send("engine:output", "stderr", `Failed to start engine: ${error.message}\n`);
+      if (engineTimeout) clearTimeout(engineTimeout);
+      engineTimeout = null;
+      runLog?.end();
+      runLog = null;
       engineProcess = null;
       send("engine:status", { running: false, code: null });
     });
     child.on("close", (code, signal) => {
+      if (engineTimeout) clearTimeout(engineTimeout);
+      engineTimeout = null;
+      runLog?.end();
+      runLog = null;
       engineProcess = null;
       send("engine:status", { running: false, code, signal });
     });
@@ -235,5 +311,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  if (engineTimeout) clearTimeout(engineTimeout);
   engineProcess?.kill("SIGTERM");
 });

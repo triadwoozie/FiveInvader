@@ -223,9 +223,8 @@ void GameWindow::Init(const char* sdlVideoDriver)
         GameWindow::ResetDimensions();
 
     s_pWindow = SDL_CreateWindow("Grand Theft Auto V", s_x, s_y, s_width, s_height, GetWindowFlags());
-    // Started hidden in background until guest engine issues its first draw/VdSwap call
-    // SDL_ShowWindow(s_pWindow);
-    // SDL_RaiseWindow(s_pWindow);
+    if (s_showOnInit)
+        ShowAndRaise();
 
     if (IsFullscreen())
         SDL_ShowCursor(SDL_DISABLE);

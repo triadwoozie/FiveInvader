@@ -139,6 +139,8 @@ void KiSystemStartup()
     const std::string gamePath = (const char*)gameRoot.u8string().c_str();
 
     BuildPathCache(gamePath);
+    if (!GetStreamPath().empty())
+        BuildPathCache(GetStreamPath().string());
 
     // Also cache extracted assets living under "RPF DUMP" (nested RPFS, audio packs, etc.).
     // This improves hit rate when the title requests files that are not present in game/.
@@ -186,7 +188,6 @@ void KiSystemStartup()
             saveFileExists = !ec;
         }
     }
-
     if (saveFileExists)
     {
         std::u8string savePathU8 = saveFilePath.parent_path().u8string();
@@ -414,6 +415,8 @@ int main(int argc, char *argv[])
     int cliVsync = -1;
     int cliFullscreen = -1;
     int cliFps = -1;
+    std::string cliVsyncMode;
+    std::string cliWindowGate;
 
     for (uint32_t i = 1; i < argc; i++)
     {
@@ -448,6 +451,13 @@ int main(int argc, char *argv[])
             {
                 cliConfigPath = argv[++i];
             }
+        }
+        else if (strcmp(argv[i], "--stream-dir") == 0)
+        {
+            if ((i + 1) < argc)
+                SetStreamPath(argv[++i]);
+            else
+                LOGN_WARNING("No argument was specified for --stream-dir. Option will be ignored.");
         }
         else if (strcmp(argv[i], "--lang") == 0 || strcmp(argv[i], "--language") == 0)
         {
@@ -502,6 +512,24 @@ int main(int argc, char *argv[])
         else if (strcmp(argv[i], "--no-vsync") == 0)
         {
             cliVsync = 0;
+        }
+        else if (strcmp(argv[i], "--vsync-mode") == 0)
+        {
+            if ((i + 1) < argc)
+                cliVsyncMode = argv[++i];
+        }
+        else if (strcmp(argv[i], "--window-gate") == 0)
+        {
+            if ((i + 1) < argc)
+                cliWindowGate = argv[++i];
+        }
+        else if (strcmp(argv[i], "--verbose-alloc") == 0)
+        {
+            App::s_verboseAlloc = true;
+        }
+        else if (strcmp(argv[i], "--log-vfs") == 0)
+        {
+            App::s_logVfs = true;
         }
         else if (strcmp(argv[i], "--fullscreen") == 0)
         {
@@ -567,6 +595,27 @@ int main(int argc, char *argv[])
     {
         Config::VSync = (cliVsync == 1);
     }
+    if (!cliVsyncMode.empty())
+    {
+        if (cliVsyncMode == "fifo" || cliVsyncMode == "mailbox")
+        {
+            Config::VSync = true;
+            if (cliVsyncMode == "mailbox")
+                LOGN_WARNING("Mailbox VSync is not exposed by the current render backend; using FIFO.");
+        }
+        else if (cliVsyncMode == "immediate")
+        {
+            Config::VSync = false;
+        }
+        else
+        {
+            LOGF_WARNING("Invalid --vsync-mode '{}'. Expected fifo, mailbox, or immediate.", cliVsyncMode);
+        }
+    }
+
+    GameWindow::s_showOnInit = (cliWindowGate == "immediate");
+    if (!cliWindowGate.empty() && cliWindowGate != "immediate" && cliWindowGate != "render")
+        LOGF_WARNING("Invalid --window-gate '{}'. Expected immediate or render.", cliWindowGate);
 
     if (cliFullscreen != -1)
     {

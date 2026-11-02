@@ -27,6 +27,7 @@ public:
     static inline bool s_isFocused;
     static inline bool s_isFullscreenCursorVisible;
     static inline bool s_isChangingDisplay;
+    static inline bool s_showOnInit;
 
     static SDL_Surface* GetIconSurface(void* pIconBmp, size_t iconSize);
     static void SetIcon(void* pIconBmp, size_t iconSize);

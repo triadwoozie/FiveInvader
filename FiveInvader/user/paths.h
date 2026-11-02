@@ -15,6 +15,8 @@ bool CheckPortable();
 std::filesystem::path BuildUserPath();
 const std::filesystem::path& GetUserPath();
 void SetUserPath(const std::filesystem::path& path);
+void SetStreamPath(const std::filesystem::path& path);
+const std::filesystem::path& GetStreamPath();
 
 inline std::filesystem::path GetGamePath()
 {

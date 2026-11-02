@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from "electron";
 const api = {
   defaults: () => ipcRenderer.invoke("launcher:defaults"),
   chooseGameDir: () => ipcRenderer.invoke("launcher:choose-game-dir"),
+  chooseStreamDir: () => ipcRenderer.invoke("launcher:choose-stream-dir"),
   chooseConfig: () => ipcRenderer.invoke("launcher:choose-config"),
   readConfig: (configPath: string) => ipcRenderer.invoke("launcher:read-config", configPath),
   writeConfig: (configPath: string, contents: string) =>
@@ -16,10 +17,17 @@ const api = {
     configPath?: string;
     language: string;
     resolution: string;
-    vsync: boolean;
+    streamDir?: string;
+    vsyncMode: string;
     fullscreen: boolean;
     fps: number;
     enableMangoHud: boolean;
+    enableVulkanValidation: boolean;
+    verboseAlloc: boolean;
+    logVfs: boolean;
+    windowGate: string;
+    timeoutSeconds: number;
+    saveRunLog: boolean;
   }) => ipcRenderer.invoke("engine:launch", settings),
   stop: () => ipcRenderer.invoke("engine:stop"),
   windowAction: (action: "minimize" | "close") => ipcRenderer.invoke("launcher:window-action", action),
