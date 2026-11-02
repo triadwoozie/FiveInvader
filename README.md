@@ -53,6 +53,7 @@ By pre-translating PowerPC Xenon machine code into native C++ using `XenonRecomp
 │                                                        │
 └────────────────────────────────────────────────────────┘
 
+
 ```
 
 ---
@@ -70,16 +71,20 @@ By pre-translating PowerPC Xenon machine code into native C++ using `XenonRecomp
 * **PCR/TLS Subsystem Mapping**: Resolved worker thread null pointer dereferences across `TLS + 116` (dictionary/string allocator), `TLS + 120` (scoped `sysMemAllocator`), and `TLS + 132` (fallback) by mapping all spawned threads to fallback allocator `0x83887168`.
 * **Small Block Allocator (SBA) Loop Resolution**: Addressed a critical runaway loop between `sub_83194A08` and `sub_8248EAE0` that produced over 3.4 million allocation/deallocation attempts in 20 seconds. Handled the `0xFFFE` (65534) sentinel return on exhausted/uninitialized SBA buckets and patched circular doubly-linked-list unlinking in `imports.cpp`.
 * **Heap Free / Cycle Detection (`sub_8255DC88`)**: Mitigated circular pointer traversals in secondary heap teardowns, allowing the engine to successfully transition out of heap initialization loops.
+* **Guest Memory Bounds & Copy Guarding (`sub_823CFAF0`)**: Mitigated runaway buffer transfers where uninitialized or negative error return values (`-1` / `0xFFFFFFFF`) triggered heap exhaustion or segfaults at the 4 GB guest boundary (`0x200000000`). Bounded memory copy operations directly through a strong runtime override `PPC_FUNC(sub_823CFAF0)` registered via `PatchFuncMapping` without mutating recompiled PPC translation units.
+* **Oversized & Invalid Allocation Guards**: Reject runaway allocator calls (including `0xFEFFFFFF` / ~4.2 GB sizes caused by unsigned underflow from negative status codes) and guard invalid low-address resource streaming pointers (`< 0x40000000`) within `sub_83215B40` to maintain heap integrity.
 
 ### 3. Indirect Dispatch Guarding & Jump Table Restoration
 
 * **PPC Indirect Function Call Guards**: Xenon indirect branch dispatch (`bctrl` via `ctr.u32`) was triggering segmentation faults at host addresses (e.g., `0xd739ac3` in `sub_8351A9E8`) due to unmapped pointers wrapping outside `PPC_CODE_BASE`. Implemented strict bounds checking across object pointers and vtable targets in `imports.cpp`.
 * **String Formatting Switch-Table Interception**: PowerPC switch tables in CRT string formatting routines (`vsnprintf` / `sub_8362B5E0` targeting `0x8362BAB4`) were routing into `UnmappedIndirectHandler`. Added explicit symbol mappings and guarded forward wrappers for jump table targets (`sub_829855F8`, `sub_82985550`, `sub_831E2DB8`, `sub_831E3240`, `sub_829856D0`).
-* **State Transition Dispatch**: Recovered the worker semaphore handoff in `sub_82577590`; the worker barrier now completes and the runtime reaches `VdSwap: 1`. The overall RAGE state machine is still in State 1, so State 2 initialization and title rendering remain open.
+* **XML Parser & Worker Jump-Table Recovery**: Reconstructed missing switch jump-table cases and mid-function branch-target labels via `tools/patch_ppc_xml_switch.py`, including XML dispatch `0x831CB4A8`, worker variant `0x8321D35C`, target range `0x83223EDC`–`0x83223EFC`, and `0x8362BE00`.
+* **State Transition Dispatch**: Recovered the worker semaphore handoff in `sub_82577590`; the worker barrier now completes and the latest runtime reaches `VdSwap: 1`. The overall RAGE state machine remains in State 1; State 2 initialization and title rendering are still open.
 
 ### 4. RPF7 Virtual File System (VFS) & Asset Parsing
 
 * **Archive Extraction & Ingestion**: Supported big-endian RPF7 (`0x52504637`) archive mounting and TOC traversal for `xbox360a.rpf`, `xbox360b.rpf`, and `common.rpf`.
+* **Loose-File VFS & Shader Resolution**: Implemented loose-file virtual filesystem routing for extracted Disc 2 assets, resolving primary game configurations (`gameconfig.xml`, `installpartitions.meta`, `standard_scripted.meta`) and native compiled shader packages (`im.fxc`, `rage_bink.fxc`) directly from the extracted `fxl_final_final/` trees.
 * **Radix Trie & XML Ingestion**: Native switch implementations bypassed MSVC CRT jump-table crashes in XML token parsing (`sub_831CB460`, `sub_831CC260`), enabling end-to-end ingestion of `installpartitions.meta` and `standard_scripted.meta`.
 
 ### 5. Allocator, Stream Reader & Dispatch Stabilization
@@ -119,26 +124,27 @@ FiveInvader includes a native companion launcher matching modern recompilation d
 [✓] Step 1: Toolchain, Linker & Base Binary Setup (100%)
 [✓] Step 2: Memory Arena, Allocators & CRT Entry (100%)
 [✓] Step 3: Threading Model, Sync Primitives & ABI (100%)
-[✓] Step 4: Base VFS, Radix-Trie & XML Metadata Ingestion (100%)
+[✓] Step 4: Base VFS, Loose Shaders & XML Metadata Ingestion (100%)
 [✓] Step 5: SBA Buddy Allocator & Heap Cycle Resolution (100%)
-[✓] Step 6: Indirect Dispatch Guarding & State 1 Worker Barrier Recovery (100%)
-[▶] Step 7: State 1 -> State 2 Worker Barrier & grcDevice Initial Hand-off (In Progress)
+[✓] Step 6: Indirect Dispatch Guarding & Jump-Table Restorations (100%)
+[▶] Step 7: Async Worker Semaphore Barrier & State 2 Hand-off (In Progress)
 [ ] Step 8: Full PM4 Command Packet Interpretation & Draw Loop
 [ ] Step 9: Title Screen & Legal Splash Presentation
 [ ] Step 10: Android / AArch64 Cross-Compilation & Port (Roadmapped)
+
 
 ```
 
 | Subsystem | Progress | Status | Notes |
 | --- | --- | --- | --- |
 | **Toolchain & Link** | **100%** | Stable | Compiles cleanly to a 554 MB native binary via Ninja/Clang. |
-| **Memory & Allocators** | **100%** | Stable | SBA buddy loops patched; TLS slots 116, 120, 132 mapped; heap cleanup loops passed. |
-| **Threading & Sync** | **95%** | Active | 64-thread pool operational; boot worker handshake (`0xC6053170`) fail-open hooked. |
-| **Variadic ABI & Dispatches** | **100%** | Stable | Native `GuestVaList` active; libc jump tables and indirect `bctrl` guarded. |
-| **VFS & Metadata** | **100%** | Stable | `installpartitions.meta`, `standard_scripted.meta`, and RPF7 TOCs verified. |
+| **Memory & Allocators** | **100%** | Stable | SBA buddy loops patched; TLS slots 116, 120, 132 mapped; copy overflow and oversized allocations guarded. |
+| **Threading & Sync** | **95%** | Active | Tracing async completion handoff on worker semaphores (`0xC21C0CF0`–`0xC21C0E70`). |
+| **Variadic ABI & Dispatches** | **100%** | Stable | Native `GuestVaList` active; libc jump tables, XML switch tables, and worker `bctr` targets mapped. |
+| **VFS & Metadata** | **100%** | Stable | Configurations, compiled shaders, metadata, and RPF7 TOCs verified. |
 | **RAGE State Machine** | **80%** | Active | Worker barrier completes; latest observed state remains State 1. |
-| **GPU Ring Buffer & GFX** | **50%** | Active | `ME_INIT` parsed; window presentation gated to active `VdSwap` / PM4 frames. |
-| **Companion Launcher** | **95%** | Stable | Persisted game/stream paths, display/window options, debug toggles, timeout and log capture wired. |
+| **GPU Ring Buffer & GFX** | **50%** | Active | `ME_INIT` parsed; latest recorded `Frames: 2 | VdSwap: 1 | PM4: 24`. |
+| **Companion Launcher** | **95%** | Stable | Persisted paths, display/window options, debug toggles, timeouts, run logs, and screenshots documented. |
 | **Android / AArch64 Port** | **0%** | Roadmapped | Planned post-desktop stabilization via Android NDK & mobile Vulkan. |
 
 ---
@@ -162,6 +168,7 @@ Build with low process and I/O scheduling priorities:
 ```bash
 nice -n 19 ionice -c 3 ninja -C build -j 3 -l 4.0 FiveInvader
 
+
 ```
 
 ### Running Test Traces
@@ -169,8 +176,9 @@ nice -n 19 ionice -c 3 ninja -C build -j 3 -l 4.0 FiveInvader
 Run with a process timeout and pass the extracted game directory:
 
 ```bash
-timeout -s SIGKILL 20s nice -n 19 ionice -c 3 ./build/FiveInvader/FiveInvader \
+timeout -s SIGKILL 30s nice -n 19 ionice -c 3 ./build/FiveInvader/FiveInvader \
   --game-dir /path/to/extracted_disc2
+
 
 ```
 
@@ -181,5 +189,6 @@ cd launcher
 npm install
 npm run build
 npm start
+
 
 ```
