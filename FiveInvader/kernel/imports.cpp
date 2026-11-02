@@ -163,6 +163,8 @@ void sub_83521D38(PPCContext& ctx, uint8_t* base);
 void sub_836B1768(PPCContext& ctx, uint8_t* base);
 void sub_83536A60(PPCContext& ctx, uint8_t* base);
 void sub_823CFAF0(PPCContext& ctx, uint8_t* base);
+void sub_83622DF0(PPCContext& ctx, uint8_t* base);
+void sub_82EF3FA0(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -216,6 +218,14 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x83536A60, &::sub_83536A60);
     PatchFuncMapping(0x8363FCB0, &::sub_8363FCB0);
     PatchFuncMapping(0x823CFAF0, &::sub_823CFAF0);
+    PatchFuncMapping(0x83622DF0, &::sub_83622DF0);
+    PatchFuncMapping(0x82EF3FA0, &::sub_82EF3FA0);
+    PatchFuncMapping(0x82577590, &::sub_82577590);
+    PatchFuncMapping(0x8299AB58, &::sub_8299AB58);
+    PatchFuncMapping(0x8345BC98, &::sub_8345BC98);
+    PatchFuncMapping(0x829E3CA8, &::sub_829E3CA8);
+    PatchFuncMapping(0x8298B940, &::sub_8298B940);
+    PatchFuncMapping(0x829C4C00, &::sub_829C4C00);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -5504,6 +5514,11 @@ static std::thread g_vblankThread;
 
 void FireVBlankCallback() {
     if (g_gpuRingBuffer.interruptCallback != 0) {
+        static std::mutex s_vblankMutex;
+        std::unique_lock<std::mutex> lock(s_vblankMutex, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            return; // Another thread is already firing VBlank callback
+        }
         static std::atomic<uint32_t> s_callbackCount{0};
         const uint32_t callbackCount = ++s_callbackCount;
         static std::unique_ptr<GuestThreadContext> s_vblankContext;
@@ -5769,12 +5784,18 @@ void KeUnlockL2()
 
 bool KeSetEvent(XKEVENT* pEvent, uint32_t Increment, bool Wait)
 {
+    if (!pEvent) {
+        LOGF_WARNING("[TRACE] KeSetEvent: null pEvent!");
+        return false;
+    }
     // SONIC APPROACH: Direct kernel object signal - no SyncTable
     static std::atomic<int> s_setEventCount{0};
     if (s_setEventCount++ < 30) {
         LOGF_INFO("[TRACE] KeSetEvent: event=0x{:08X}", (uint32_t)((uint8_t*)pEvent - g_memory.base));
     }
-    bool result = QueryKernelObject<Event>(*pEvent)->Set();
+    Event* evt = QueryKernelObject<Event>(*pEvent);
+    if (!evt) return false;
+    bool result = evt->Set();
 
     ++g_keSetEventGeneration;
     g_keSetEventGeneration.notify_all();
@@ -5784,7 +5805,10 @@ bool KeSetEvent(XKEVENT* pEvent, uint32_t Increment, bool Wait)
 
 bool KeResetEvent(XKEVENT* pEvent)
 {
-    return QueryKernelObject<Event>(*pEvent)->Reset();
+    if (!pEvent) return false;
+    Event* evt = QueryKernelObject<Event>(*pEvent);
+    if (!evt) return false;
+    return evt->Reset();
 }
 
 // Track recent async reads for correlation with waits
@@ -6193,6 +6217,10 @@ uint32_t MmQueryAllocationSize(uint32_t guestAddress)
 
 uint32_t NtClearEvent(Event* handle, uint32_t* previousState)
 {
+    if (!handle) {
+        LOGF_WARNING("[TRACE] NtClearEvent: null or invalid event handle");
+        return 0xC0000008; // STATUS_INVALID_HANDLE
+    }
     handle->Reset();
     return 0;
 }
@@ -6218,6 +6246,10 @@ uint32_t NtResumeThread(uint32_t threadHandle, be<uint32_t>* suspendCount)
 
 uint32_t NtSetEvent(Event* handle, uint32_t* previousState)
 {
+    if (!handle) {
+        LOGF_WARNING("[TRACE] NtSetEvent: null or invalid event handle");
+        return 0xC0000008; // STATUS_INVALID_HANDLE
+    }
     handle->Set();
     return 0;
 }
@@ -10037,22 +10069,34 @@ PPC_FUNC(sub_8255DC20)
     uint32_t vtable = (allocator != 0) ? PPC_LOAD_U32(allocator + 0) : 0;
     uint32_t allocFn = (vtable != 0) ? PPC_LOAD_U32(vtable + 8) : 0;
 
-    if (App::s_verboseAlloc && (s_allocCount <= 20 || (s_allocCount % 500 == 0)))
+    if (s_allocCount == 1)
     {
-        LOGF_INFO("[ALLOC] sub_8255DC20 #{} size={} align={} threadCtx=0x{:08X} alloc=0x{:08X} allocFn=0x{:08X}",
-                  s_allocCount, size, alignment, threadCtx, allocator, allocFn);
+        for (int i = 0; i < 10; ++i)
+        {
+            LOGF_INFO("[ALLOC] 0x83887168[{}] = 0x{:08X}", i, PPC_LOAD_U32(0x83887168 + i * 4));
+        }
     }
 
     if (allocFn >= PPC_CODE_BASE && allocFn < (PPC_CODE_BASE + PPC_CODE_SIZE))
     {
-        ctx.r3.u64 = allocator;
-        ctx.r4.u64 = size;
-        ctx.r5.u64 = alignment;
-        ctx.r6.u64 = 0;
-        PPC_CALL_INDIRECT_FUNC(allocFn);
-        if (ctx.r3.u32 != 0)
+        uint32_t numLayers = (allocator == 0x83887168) ? PPC_LOAD_U32(allocator + 36) : 1;
+        if (numLayers == 0 || numLayers > 8) numLayers = 1;
+        for (uint32_t layer = 0; layer < numLayers; ++layer)
         {
-            return;
+            ctx.r3.u64 = allocator;
+            ctx.r4.u64 = size;
+            ctx.r5.u64 = alignment;
+            ctx.r6.u64 = layer;
+            PPC_CALL_INDIRECT_FUNC(allocFn);
+            if (ctx.r3.u32 != 0)
+            {
+                if (s_allocCount <= 10)
+                {
+                    LOGF_INFO("[ALLOC_RET] allocFn=0x{:08X} layer={} returned 0x{:08X} for size={}",
+                              allocFn, layer, ctx.r3.u32, size);
+                }
+                return;
+            }
         }
     }
 
@@ -10196,19 +10240,11 @@ PPC_FUNC(sub_8255DC88)
         return;
     }
 
-    // Direct guest physical heap free (for allocations in physicalHeap >= 0xA0000000)
-    if (guestAddr >= 0xA0000000 && (guestAddr % 16) == 0)
-    {
-        void* hostPtr = g_memory.Translate(guestAddr);
-        if (hostPtr)
-        {
-            g_userHeap.Free(hostPtr);
-        }
-    }
-    else
-    {
-        LOGF_WARNING("[FREE] sub_8255DC88 skipping unmanaged/unaligned free ptr=0x{:08X}", guestAddr);
-    }
+    // Do NOT free unmanaged guest addresses in physicalHeap (> 0xA0000000) directly with g_userHeap.Free.
+    // If it was allocated by our fallback allocator, it was already handled above via s_fallbackAllocAddrs.
+    // Calling g_userHeap.Free on guest internal allocations corrupts o1heap metadata.
+    LOGF_WARNING("[FREE] sub_8255DC88 skipping unmanaged free ptr=0x{:08X} allocator=0x{:08X} vtable=0x{:08X} freeFn=0x{:08X}",
+                 guestAddr, allocator, vtable, freeFn);
 }
 
 // =============================================================================
@@ -10495,6 +10531,81 @@ PPC_FUNC(sub_823CFAF0)
     }
 
     std::memmove(base + dst, base + src, size);
+}
+
+PPC_FUNC(sub_83622DF0)
+{
+    const uint32_t dst = ctx.r3.u32;
+    const uint8_t val = static_cast<uint8_t>(ctx.r4.u32);
+    const uint32_t size = ctx.r5.u32;
+
+    if (size == 0)
+        return;
+
+    if (size >= 0x10000000u || dst < 0x10000 || static_cast<uint64_t>(dst) + size > PPC_MEMORY_SIZE)
+    {
+        static std::atomic<uint32_t> s_rejectedMemsetCount{0};
+        if (s_rejectedMemsetCount.fetch_add(1, std::memory_order_relaxed) < 32)
+        {
+            LOGF_WARNING("[MEMSET] sub_83622DF0 rejected invalid memset dst=0x{:08X} val=0x{:02X} size=0x{:08X} lr=0x{:08X}",
+                         dst, val, size, static_cast<uint32_t>(ctx.lr));
+        }
+        return;
+    }
+
+    std::memset(base + dst, val, size);
+}
+
+PPC_FUNC(sub_82EF3FA0)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r4.u32 < 0x10000 ||
+        ctx.r3.u32 >= PPC_MEMORY_SIZE - 8 || ctx.r4.u32 >= PPC_MEMORY_SIZE - 4)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    uint16_t numBuckets = PPC_LOAD_U16(ctx.r3.u32 + 4);
+    if (numBuckets == 0)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    uint32_t key = PPC_LOAD_U32(ctx.r4.u32 + 0);
+    uint32_t bucketsArray = PPC_LOAD_U32(ctx.r3.u32 + 0);
+    if (bucketsArray < 0x10000 || bucketsArray >= PPC_MEMORY_SIZE - numBuckets * 4)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    uint32_t bucketIndex = key % numBuckets;
+    uint32_t node = PPC_LOAD_U32(bucketsArray + bucketIndex * 4);
+    
+    int depth = 0;
+    while (node >= 0x10000 && node < PPC_MEMORY_SIZE - 12)
+    {
+        uint32_t nodeKey = PPC_LOAD_U32(node + 0);
+        if (key == nodeKey)
+        {
+            ctx.r3.u64 = node + 4;
+            return;
+        }
+        if (++depth > 256)
+        {
+            static int s_cycleWarn = 0;
+            if (s_cycleWarn++ < 10)
+            {
+                LOGF_WARNING("[sub_82EF3FA0] atMap::Find cycle detected! map=0x{:08X} key=0x{:08X} bucket={}",
+                             ctx.r3.u32, key, bucketIndex);
+            }
+            break;
+        }
+        node = PPC_LOAD_U32(node + 8);
+    }
+
+    ctx.r3.u64 = 0;
 }
 
 extern "C" void __imp__sub_831C1B10(PPCContext& ctx, uint8_t* base);
@@ -13346,20 +13457,344 @@ PPC_FUNC(sub_825777D0)
     LOGF_INFO("[sub_825777D0] State 1 handler exit #{} ret={}", c, (int32_t)ctx.r3.s32);
 }
 
-extern "C" void __imp__sub_82577590(PPCContext& ctx, uint8_t* base);
-extern "C" void S1ProgressLog(const char* function, uint32_t guestR3)
+PPC_EXTERN_FUNC(sub_82F3A5B8);
+PPC_EXTERN_FUNC(sub_828FD100);
+PPC_EXTERN_FUNC(sub_82918D28);
+PPC_EXTERN_FUNC(sub_825FE880);
+PPC_EXTERN_FUNC(sub_8255DC58);
+PPC_EXTERN_FUNC(sub_8343D470);
+PPC_EXTERN_FUNC(sub_829E21D8);
+PPC_EXTERN_FUNC(sub_83447AD0);
+PPC_EXTERN_FUNC(sub_8299AB58);
+PPC_EXTERN_FUNC(sub_829DB848);
+PPC_EXTERN_FUNC(sub_829E3CA8);
+PPC_EXTERN_FUNC(sub_829B4B60);
+PPC_EXTERN_FUNC(sub_8298B940);
+PPC_EXTERN_FUNC(sub_829A8968);
+PPC_EXTERN_FUNC(sub_825AD950);
+PPC_EXTERN_FUNC(sub_825B7C70);
+PPC_EXTERN_FUNC(sub_829A5DA8);
+PPC_EXTERN_FUNC(sub_834ECCE0);
+PPC_EXTERN_FUNC(sub_82FDD930);
+PPC_EXTERN_FUNC(sub_829561F0);
+PPC_EXTERN_FUNC(sub_825BCBF8);
+PPC_EXTERN_FUNC(sub_82574530);
+PPC_EXTERN_FUNC(sub_829D3250);
+PPC_EXTERN_FUNC(sub_8222ED58);
+PPC_EXTERN_FUNC(sub_829847D0);
+PPC_EXTERN_FUNC(sub_82525480);
+PPC_EXTERN_FUNC(sub_825D17B8);
+PPC_EXTERN_FUNC(sub_825C09C0);
+PPC_EXTERN_FUNC(sub_82EF52B0);
+PPC_EXTERN_FUNC(sub_82EF6B38);
+
+extern "C" void __imp__sub_8299AB58(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8299AB58)
 {
-    LOGF_WARNING("[S1-PROGRESS] {} r3=0x{:08X}", function, guestR3);
+    LOGF_WARNING("[sub_8299AB58] enter r3=0x{:08X}", ctx.r3.u32);
+    auto t0 = std::chrono::steady_clock::now();
+    __imp__sub_8299AB58(ctx, base);
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    LOGF_WARNING("[sub_8299AB58] exit elapsed={}ms", ms);
+}
+
+extern "C" void __imp__sub_8345BC98(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8345BC98)
+{
+    LOGF_WARNING("[sub_8345BC98] enter r3=0x{:08X}", ctx.r3.u32);
+    __imp__sub_8345BC98(ctx, base);
+    LOGF_WARNING("[sub_8345BC98] exit");
+}
+
+extern "C" void __imp__sub_829E3CA8(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_829E3CA8)
+{
+    static std::atomic<int> s_callCount{0};
+    int count = ++s_callCount;
+    if (count <= 20) {
+        LOGF_WARNING("[sub_829E3CA8] #{} enter r3=0x{:08X} r4=0x{:08X} r5=0x{:08X}", count, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32);
+    }
+    __imp__sub_829E3CA8(ctx, base);
+    if (count <= 20) {
+        LOGF_WARNING("[sub_829E3CA8] #{} exit", count);
+    }
+}
+
+extern "C" void __imp__sub_8298B940(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8298B940)
+{
+    LOGF_WARNING("[sub_8298B940] enter");
+    __imp__sub_8298B940(ctx, base);
+    LOGF_WARNING("[sub_8298B940] exit");
+}
+
+extern "C" void __imp__sub_829C4C00(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_829C4C00)
+{
+    LOGF_WARNING("[sub_829C4C00] enter r3=0x{:08X}", ctx.r3.u32);
+    __imp__sub_829C4C00(ctx, base);
+    LOGF_WARNING("[sub_829C4C00] exit");
 }
 
 PPC_FUNC(sub_82577590)
 {
-    LOGF_INFO("[sub_82577590] State 1 sub_82577590 enter obj=0x{:08X}", ctx.r3.u32);
-    auto t0 = std::chrono::steady_clock::now();
-    __imp__sub_82577590(ctx, base);
-    auto t1 = std::chrono::steady_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    LOGF_INFO("[sub_82577590] State 1 sub_82577590 exit elapsed={}ms", ms);
+	PPC_FUNC_PROLOGUE();
+	PPCCRRegister cr6{};
+	uint32_t ea{};
+	LOGF_INFO("[sub_82577590] State 1 sub_82577590 enter obj=0x{:08X}", ctx.r3.u32);
+	auto t0 = std::chrono::steady_clock::now();
+
+	ctx.r12.u64 = ctx.lr;
+	PPC_STORE_U32(ctx.r1.u32 + -8, ctx.r12.u32);
+	PPC_STORE_U64(ctx.r1.u32 + -24, ctx.r30.u64);
+	PPC_STORE_U64(ctx.r1.u32 + -16, ctx.r31.u64);
+	ea = -160 + ctx.r1.u32;
+	PPC_STORE_U32(ea, ctx.r1.u32);
+	ctx.r1.u32 = ea;
+
+	ctx.r11.s64 = -2085683200;
+	ctx.r4.s64 = 1;
+	ctx.r3.s64 = ctx.r11.s64 + -18376;
+	ctx.lr = 0x825775B4;
+	LOGF_INFO("[sub_82577590] Step 1: sub_82F3A5B8");
+	sub_82F3A5B8(ctx, base);
+
+	ctx.lr = 0x825775B8;
+	LOGF_INFO("[sub_82577590] Step 2: sub_828FD100");
+	sub_828FD100(ctx, base);
+
+	ctx.lr = 0x825775BC;
+	LOGF_INFO("[sub_82577590] Step 3: sub_82918D28");
+	sub_82918D28(ctx, base);
+
+	ctx.r4.s64 = 0;
+	ctx.r3.s64 = 1;
+	ctx.lr = 0x825775C8;
+	LOGF_INFO("[sub_82577590] Step 4: sub_825FE880");
+	sub_825FE880(ctx, base);
+
+	ctx.r3.s64 = 4;
+	ctx.lr = 0x825775D0;
+	LOGF_INFO("[sub_82577590] Step 5: sub_8255DC58");
+	sub_8255DC58(ctx, base);
+	cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+	if (!cr6.eq) {
+		ctx.r11.s64 = -2113863680;
+		ctx.r10.s64 = ctx.r11.s64 + 7516;
+		PPC_STORE_U32(ctx.r3.u32 + 0, ctx.r10.u32);
+	} else {
+		ctx.r3.s64 = 0;
+	}
+
+	ctx.lr = 0x825775F0;
+	LOGF_INFO("[sub_82577590] Step 6: sub_8343D470");
+	sub_8343D470(ctx, base);
+
+	ctx.r31.s64 = -2088173568;
+	ctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 11648);
+	cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+	if (cr6.eq) {
+		ctx.r3.s64 = 216;
+		ctx.lr = 0x82577608;
+		sub_8255DC58(ctx, base);
+		ctx.r30.u64 = ctx.r3.u64;
+		cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+		if (!cr6.eq) {
+			ctx.lr = 0x82577618;
+			sub_829E21D8(ctx, base);
+			PPC_STORE_U32(ctx.r31.u32 + 11648, ctx.r30.u32);
+		} else {
+			PPC_STORE_U32(ctx.r31.u32 + 11648, 0);
+		}
+	}
+
+	ctx.lr = 0x8257762C;
+	LOGF_INFO("[sub_82577590] Step 7: sub_83447AD0");
+	sub_83447AD0(ctx, base);
+
+	ctx.r3.s64 = 1;
+	ctx.lr = 0x82577634;
+	LOGF_INFO("[sub_82577590] Step 8: sub_8299AB58");
+	sub_8299AB58(ctx, base);
+
+	ctx.r3.s64 = 1;
+	ctx.lr = 0x8257763C;
+	LOGF_INFO("[sub_82577590] Step 9: sub_829DB848");
+	sub_829DB848(ctx, base);
+
+	ctx.r11.s64 = -2113863680;
+	ctx.r5.s64 = 1;
+	ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 11648);
+	ctx.r4.s64 = ctx.r11.s64 + 12472;
+	ctx.lr = 0x82577650;
+	LOGF_INFO("[sub_82577590] Step 10: sub_829E3CA8");
+	sub_829E3CA8(ctx, base);
+
+	ctx.r3.s64 = 1;
+	ctx.lr = 0x82577658;
+	LOGF_INFO("[sub_82577590] Step 11: sub_829B4B60");
+	sub_829B4B60(ctx, base);
+
+	ctx.lr = 0x8257765C;
+	LOGF_INFO("[sub_82577590] Step 12: sub_8298B940");
+	sub_8298B940(ctx, base);
+
+	ctx.lr = 0x82577660;
+	LOGF_INFO("[sub_82577590] Step 13: sub_829A8968");
+	sub_829A8968(ctx, base);
+
+	ctx.r10.s64 = -2113863680;
+	ctx.r3.s64 = ctx.r10.s64 + 12432;
+	ctx.lr = 0x8257766C;
+	LOGF_INFO("[sub_82577590] Step 14: sub_825AD950");
+	sub_825AD950(ctx, base);
+
+	ctx.lr = 0x82577670;
+	LOGF_INFO("[sub_82577590] Step 15: sub_825B7C70");
+	sub_825B7C70(ctx, base);
+
+	ctx.r9.s64 = -2113863680;
+	ctx.r5.s64 = 1;
+	ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 11648);
+	ctx.r4.s64 = ctx.r9.s64 + 12408;
+	ctx.lr = 0x82577684;
+	LOGF_INFO("[sub_82577590] Step 16: sub_829E3CA8");
+	sub_829E3CA8(ctx, base);
+
+	ctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 11648);
+	ctx.lr = 0x8257768C;
+	LOGF_INFO("[sub_82577590] Step 17: sub_829A5DA8");
+	sub_829A5DA8(ctx, base);
+
+	ctx.r3.s64 = 0;
+	ctx.lr = 0x82577694;
+	LOGF_INFO("[sub_82577590] Step 18: sub_834ECCE0");
+	sub_834ECCE0(ctx, base);
+
+	ctx.r3.s64 = 1;
+	ctx.lr = 0x8257769C;
+	LOGF_INFO("[sub_82577590] Step 19: sub_82FDD930");
+	sub_82FDD930(ctx, base);
+
+	ctx.r3.s64 = 1;
+	ctx.lr = 0x825776A4;
+	LOGF_INFO("[sub_82577590] Step 20: sub_829561F0");
+	sub_829561F0(ctx, base);
+
+	ctx.lr = 0x825776A8;
+	LOGF_INFO("[sub_82577590] Step 21: sub_825BCBF8");
+	sub_825BCBF8(ctx, base);
+
+	ctx.r31.s64 = -2088239104;
+	ctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 28576);
+	cr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);
+	if (cr6.eq) {
+		ctx.r3.s64 = 248;
+		ctx.lr = 0x825776C0;
+		sub_8255DC58(ctx, base);
+		ctx.r30.u64 = ctx.r3.u64;
+		cr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);
+		if (!cr6.eq) {
+			ctx.lr = 0x825776D0;
+			sub_82574530(ctx, base);
+			ctx.r11.s64 = -2113863680;
+			ctx.r3.u64 = ctx.r30.u64;
+			ctx.r10.s64 = ctx.r11.s64 + 10600;
+			PPC_STORE_U32(ctx.r30.u32 + 0, ctx.r10.u32);
+			PPC_STORE_U32(ctx.r31.u32 + 28576, ctx.r3.u32);
+		} else {
+			PPC_STORE_U32(ctx.r31.u32 + 28576, 0);
+		}
+		ctx.lr = 0x825776F0;
+		LOGF_INFO("[sub_82577590] Step 22: sub_829D3250");
+		sub_829D3250(ctx, base);
+	}
+
+	ctx.r11.s64 = -2108293120;
+	ctx.r7.s64 = 0;
+	ctx.r6.s64 = 0;
+	ctx.r5.s64 = ctx.r11.s64 + 32392;
+	ctx.r4.s64 = 0;
+	ctx.r3.s64 = ctx.r1.s64 + 96;
+	ctx.lr = 0x8257770C;
+	LOGF_INFO("[sub_82577590] Step 23: sub_8222ED58");
+	sub_8222ED58(ctx, base);
+
+	ctx.r10.s64 = -2105933824;
+	ctx.r9.s64 = ctx.r1.s64 + 96;
+	ctx.r8.s64 = ctx.r10.s64 + -27072;
+	ctx.r10.s64 = -2108293120;
+	PPC_STORE_U32(ctx.r1.u32 + 108, ctx.r8.u32);
+	ctx.r11.s64 = ctx.r1.s64 + 112;
+	ctx.r5.s64 = ctx.r10.s64 + 32320;
+	ctx.r7.s64 = 0;
+	ctx.r6.s64 = 0;
+	ctx.r4.s64 = 0;
+	ctx.r3.s64 = ctx.r1.s64 + 80;
+	ctx.r8.u64 = PPC_LOAD_U32(ctx.r9.u32 + 4);
+	ctx.r10.u64 = PPC_LOAD_U32(ctx.r9.u32 + 8);
+	ctx.r31.u64 = PPC_LOAD_U32(ctx.r9.u32 + 12);
+	ctx.r9.u64 = PPC_LOAD_U32(ctx.r9.u32 + 0);
+	PPC_STORE_U32(ctx.r11.u32 + 0, ctx.r9.u32);
+	PPC_STORE_U32(ctx.r11.u32 + 4, ctx.r8.u32);
+	PPC_STORE_U32(ctx.r11.u32 + 8, ctx.r10.u32);
+	PPC_STORE_U32(ctx.r11.u32 + 12, ctx.r31.u32);
+	ctx.lr = 0x8257775C;
+	LOGF_INFO("[sub_82577590] Step 24: sub_8222ED58");
+	sub_8222ED58(ctx, base);
+
+	ctx.r8.s64 = -2105933824;
+	ctx.r5.u64 = PPC_LOAD_U64(ctx.r1.u32 + 112);
+	ctx.r6.u64 = PPC_LOAD_U64(ctx.r1.u32 + 120);
+	ctx.r7.s64 = ctx.r8.s64 + -27072;
+	ctx.r3.u64 = PPC_LOAD_U64(ctx.r1.u32 + 80);
+	PPC_STORE_U32(ctx.r1.u32 + 92, ctx.r7.u32);
+	ctx.r4.u64 = PPC_LOAD_U64(ctx.r1.u32 + 88);
+	ctx.lr = 0x8257777C;
+	LOGF_INFO("[sub_82577590] Step 25: sub_829847D0");
+	sub_829847D0(ctx, base);
+
+	ctx.r6.s64 = -2088173568;
+	ctx.r4.s64 = 1;
+	ctx.r3.u64 = PPC_LOAD_U32(ctx.r6.u32 + 23808);
+	ctx.lr = 0x8257778C;
+	LOGF_INFO("[sub_82577590] Step 26: sub_82525480");
+	sub_82525480(ctx, base);
+
+	ctx.lr = 0x82577790;
+	LOGF_INFO("[sub_82577590] Step 27: sub_825D17B8");
+	sub_825D17B8(ctx, base);
+
+	ctx.r3.s64 = 1;
+	ctx.lr = 0x82577798;
+	LOGF_INFO("[sub_82577590] Step 28: sub_825C09C0");
+	sub_825C09C0(ctx, base);
+
+	ctx.lr = 0x8257779C;
+	LOGF_INFO("[sub_82577590] Step 29: sub_82EF52B0");
+	sub_82EF52B0(ctx, base);
+
+	ctx.r5.s64 = -2088697856;
+	ctx.r4.s64 = 0;
+	ctx.r3.s64 = ctx.r5.s64 + 3528;
+	ctx.lr = 0x825777AC;
+	LOGF_INFO("[sub_82577590] Step 30: sub_82EF6B38");
+	sub_82EF6B38(ctx, base);
+
+	ctx.r4.s64 = -2088566784;
+	ctx.r11.s64 = 4;
+	PPC_STORE_U32(ctx.r4.u32 + 31264, ctx.r11.u32);
+
+	ctx.r1.s64 = ctx.r1.s64 + 160;
+	ctx.r12.u64 = PPC_LOAD_U32(ctx.r1.u32 + -8);
+	ctx.lr = ctx.r12.u64;
+	ctx.r30.u64 = PPC_LOAD_U64(ctx.r1.u32 + -24);
+	ctx.r31.u64 = PPC_LOAD_U64(ctx.r1.u32 + -16);
+
+	auto t1 = std::chrono::steady_clock::now();
+	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+	LOGF_INFO("[sub_82577590] State 1 sub_82577590 exit elapsed={}ms", ms);
 }
 
 extern "C" void __imp__sub_835100D0(PPCContext& ctx, uint8_t* base);

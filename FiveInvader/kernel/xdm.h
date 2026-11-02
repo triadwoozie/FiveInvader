@@ -198,11 +198,45 @@ inline T* GetInvalidKernelObject()
 
 extern Mutex g_kernelLock;
 
+#ifndef _WIN32
+#include <link.h>
+#endif
+
 inline bool IsValidHostVtable(void* obj) {
-    if (!obj) return false;
+    if (!obj || ((uintptr_t)obj & 7) != 0) return false;
+#ifndef _WIN32
+    struct HostBounds {
+        uintptr_t start = 0;
+        uintptr_t end = 0;
+        HostBounds() {
+            dl_iterate_phdr([](struct dl_phdr_info* info, size_t size, void* data) -> int {
+                if (info->dlpi_name == nullptr || info->dlpi_name[0] == '\0') {
+                    auto* b = reinterpret_cast<HostBounds*>(data);
+                    uintptr_t min_addr = UINTPTR_MAX;
+                    uintptr_t max_addr = 0;
+                    for (int i = 0; i < info->dlpi_phnum; i++) {
+                        if (info->dlpi_phdr[i].p_type == PT_LOAD) {
+                            uintptr_t seg_start = info->dlpi_addr + info->dlpi_phdr[i].p_vaddr;
+                            uintptr_t seg_end = seg_start + info->dlpi_phdr[i].p_memsz;
+                            if (seg_start < min_addr) min_addr = seg_start;
+                            if (seg_end > max_addr) max_addr = seg_end;
+                        }
+                    }
+                    b->start = min_addr;
+                    b->end = max_addr;
+                    return 1;
+                }
+                return 0;
+            }, this);
+        }
+    };
+    static const HostBounds s_bounds;
     uintptr_t vptr = *(uintptr_t*)obj;
-    // Host C++ vtables for FiveInvader kernel objects reside in .data.rel.ro (0x0F000000 - 0x10000000)
-    return (vptr >= 0x0E000000 && vptr < 0x11000000 && (vptr & 7) == 0);
+    return (vptr >= s_bounds.start && vptr < s_bounds.end && (vptr & 7) == 0);
+#else
+    uintptr_t vptr = *(uintptr_t*)obj;
+    return (vptr >= 0x00400000 && (vptr & 7) == 0);
+#endif
 }
 
 template<typename T>

@@ -188,6 +188,7 @@ def main():
 \t// mtctr r8
 \tctr.u64 = ctx.r8.u64;
 \t// bctrl 
+\tctx.lr = 0x8321DAC4;
 \tPPC_CALL_INDIRECT_FUNC(ctr.u32);
 \t// mr r29,r3
 \tctx.r29.u64 = ctx.r3.u64;
@@ -200,6 +201,7 @@ def main():
 \tctx.r9.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);
 \tctx.r8.u64 = PPC_LOAD_U32(ctx.r9.u32 + 8);
 \tctr.u64 = ctx.r8.u64;
+\tctx.lr = 0x8321DAC4;
 \tif (ctr.u32 >= 0x82000000 && ctr.u32 < 0x84000000) {
 \t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);
 \t}

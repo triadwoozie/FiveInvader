@@ -876,7 +876,47 @@ def main() -> int:
     )
     patch_allocator_free_list_guard(ppc_dir / "ppc_recomp.330.cpp")
     patch_allocator_large_free_list_guard(ppc_dir / "ppc_recomp.330.cpp")
+    patch_xml_unlink_loop_guard(ppc_dir / "ppc_recomp.263.cpp")
     return 0
+
+def patch_xml_unlink_loop_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "loc_831D0C60:\n"
+        "\t// lwz r11,0(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// addi r11,r11,20\n"
+        "\tctx.r11.s64 = ctx.r11.s64 + 20;\n"
+        "\t// lwz r10,0(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplw cr6,r10,r31\n"
+        "\tcr6.compare<uint32_t>(ctx.r10.u32, ctx.r31.u32, ctx.xer);\n"
+        "\t// bne cr6,0x831d0c60\n"
+        "\tif (!cr6.eq) goto loc_831D0C60;"
+    )
+    new = (
+        "loc_831D0C60:\n"
+        "\t// lwz r11,0(r11)\n"
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 4) goto loc_831D0C7C;\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 24) goto loc_831D0C7C;\n"
+        "\t// addi r11,r11,20\n"
+        "\tctx.r11.s64 = ctx.r11.s64 + 20;\n"
+        "\t// lwz r10,0(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\tif (ctx.r10.u32 == 0) goto loc_831D0C7C;\n"
+        "\t// cmplw cr6,r10,r31\n"
+        "\tcr6.compare<uint32_t>(ctx.r10.u32, ctx.r31.u32, ctx.xer);\n"
+        "\t// bne cr6,0x831d0c60\n"
+        "\tif (!cr6.eq) goto loc_831D0C60;"
+    )
+    if old in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched xml unlink loop guard in {path}")
+        return True
+    return False
 
 if __name__ == "__main__":
     raise SystemExit(main())

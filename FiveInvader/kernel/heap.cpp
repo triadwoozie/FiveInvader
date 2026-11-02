@@ -69,15 +69,38 @@ void* Heap::AllocPhysical(size_t size, size_t alignment)
     *((void**)aligned - 1) = ptr;
     *((size_t*)aligned - 2) = size + O1HEAP_ALIGNMENT;
 
+    static int s_allocPhysCount = 0;
+    if (++s_allocPhysCount <= 30 || s_allocPhysCount % 1000 == 0)
+    {
+        std::fprintf(stderr, "[Heap::AllocPhysical] #%d caller=%p size=0x%zx align=0x%zx -> ptr=%p aligned=%p\n",
+                     s_allocPhysCount, __builtin_return_address(0), size, alignment, ptr, (void*)aligned);
+    }
+
     return (void*)aligned;
 }
 
 void Heap::Free(void* ptr)
 {
+    if (!ptr) return;
     if (ptr >= physicalHeap)
     {
         std::lock_guard lock(physicalMutex);
-        o1heapFree(physicalHeap, *((void**)ptr - 1));
+        void* realPtr = *((void**)ptr - 1);
+        *((void**)ptr - 1) = nullptr; // Clear realPtr to guard against any double-free
+        static int s_freePhysCount = 0;
+        if (++s_freePhysCount <= 30 || s_freePhysCount % 100 == 0)
+        {
+            std::fprintf(stderr, "[Heap::Free physical] #%d caller=%p userPtr=%p realPtr=%p\n",
+                         s_freePhysCount, __builtin_return_address(0), ptr, realPtr);
+        }
+        if (realPtr < physicalHeap || (uintptr_t)realPtr >= (uintptr_t)physicalHeap + (0x100000000ULL - RESERVED_END) ||
+            ((uintptr_t)realPtr & (O1HEAP_ALIGNMENT - 1)) != 0)
+        {
+            std::fprintf(stderr, "[Heap::Free physical] CORRUPTED/INVALID/DOUBLE-FREE realPtr=%p for userPtr=%p, SKIPPING free!\n",
+                         realPtr, ptr);
+            return;
+        }
+        o1heapFree(physicalHeap, realPtr);
     }
     else
     {
