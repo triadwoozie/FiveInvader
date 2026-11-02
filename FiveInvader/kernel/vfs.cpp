@@ -2,6 +2,7 @@
 #include <os/logger.h>
 #include <algorithm>
 #include <cctype>
+#include <string_view>
 
 namespace VFS
 {
@@ -84,25 +85,46 @@ namespace VFS
     
     std::string StripDrivePrefix(const std::string& guestPath)
     {
-        std::string result = guestPath;
-        
-        // Find and remove drive prefix (e.g., "game:", "d:", "c:")
-        size_t colonPos = result.find(':');
-        if (colonPos != std::string::npos)
-        {
-            result = result.substr(colonPos + 1);
-        }
+        std::string result = NormalizePath(guestPath);
         
         // Remove leading slashes
         while (!result.empty() && (result.front() == '/' || result.front() == '\\'))
         {
             result.erase(0, 1);
         }
+
+        for (const std::string_view devicePrefix : {
+                 "device/cdrom0/",
+                 "device/harddisk0/partition0/",
+                 "device/harddisk0/partition1/"})
+        {
+            if (result.rfind(devicePrefix, 0) == 0)
+            {
+                result.erase(0, devicePrefix.size());
+                break;
+            }
+        }
+
+        // Strip named guest roots while retaining their intended extracted root.
+        const size_t colonPos = result.find(':');
+        if (colonPos != std::string::npos)
+        {
+            std::string root = result.substr(0, colonPos);
+            std::string suffix = result.substr(colonPos + 1);
+            while (!suffix.empty() && suffix.front() == '/')
+                suffix.erase(0, 1);
+
+            if (root == "common")
+                result = suffix.empty() ? "common" : "common/" + suffix;
+            else
+                result = suffix;
+        }
+
+        while (!result.empty() && result.front() == '/')
+            result.erase(0, 1);
         
         // Normalize slashes for devkit check
         std::string lower = result;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-        std::replace(lower.begin(), lower.end(), '\\', '/');
 
         if (lower.rfind("gta5/build/dev/", 0) == 0)
         {
@@ -147,6 +169,17 @@ namespace VFS
                 printf("[VFS] FOUND exact file: '%s' -> '%s'\n", guestPath.c_str(), directFile.string().c_str());
                 fflush(stdout);
                 return directFile;
+            }
+        }
+
+        // Prefer a case-insensitive exact match before applying compatibility mappings.
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            auto it = g_fileIndex.find(stripped);
+            if (it != g_fileIndex.end())
+            {
+                g_stats.cacheHits++;
+                return it->second;
             }
         }
         
@@ -206,10 +239,23 @@ namespace VFS
             return directPath;
         }
         
-        // Try file index lookup (case-insensitive)
+        // Try the alternate XML metadata extension used by extracted loose assets.
+        const std::filesystem::path requestedPath(stripped);
+        std::string extension = requestedPath.extension().string();
+        if (extension == ".meta" || extension == ".xml")
         {
+            std::string alternate = stripped.substr(0, stripped.size() - extension.size());
+            alternate += extension == ".meta" ? ".xml" : ".meta";
+
+            std::filesystem::path alternatePath = g_extractedRoot / alternate;
+            if (std::filesystem::is_regular_file(alternatePath, ec))
+            {
+                g_stats.cacheHits++;
+                return alternatePath;
+            }
+
             std::lock_guard<std::mutex> lock(g_mutex);
-            auto it = g_fileIndex.find(stripped);
+            auto it = g_fileIndex.find(alternate);
             if (it != g_fileIndex.end())
             {
                 g_stats.cacheHits++;
@@ -306,6 +352,7 @@ namespace VFS
         // These map special Xbox 360 paths to their extracted locations
         
         // Shader paths - "fxl_final\" is inside common.rpf
+        g_pathMappings.push_back({"fxl_final_final", "common/shaders/fxl_final_final"});
         g_pathMappings.push_back({"fxl_final", "common/shaders/fxl_final"});
         g_pathMappings.push_back({"shaders/fxl_final", "common/shaders/fxl_final"});
         
@@ -316,7 +363,6 @@ namespace VFS
         
         // Common paths
         g_pathMappings.push_back({"common/", "common/"});
-        g_pathMappings.push_back({"data/", "common/data/"});
         g_pathMappings.push_back({"text/", "common/text/"});
         
         // Platform-specific paths (platform: → xbox360/)
@@ -328,7 +374,7 @@ namespace VFS
         // Subdirectory mappings (more specific paths)
         g_pathMappings.push_back({"textures", "xbox360/textures"});
         g_pathMappings.push_back({"models", "xbox360/models"});
-        g_pathMappings.push_back({"anim", "xbox360/anim"});
+        g_pathMappings.push_back({"anim", "anim"});
     }
     
     void RebuildIndex()

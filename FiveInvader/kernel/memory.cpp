@@ -18,8 +18,14 @@ static void UnmappedIndirectHandler(PPCContext& ctx, uint8_t* base)
 {
     static std::atomic<int> s_unmappedCount{0};
     if (s_unmappedCount++ < 25) {
-        LOGF_ERROR("[PPC Indirect] Called UNMAPPED indirect function! target(r12)=0x{:08X} r1=0x{:08X}",
-                   ctx.r12.u32, ctx.r1.u32);
+        LOGF_ERROR(
+            "[PPC Indirect] Called UNMAPPED indirect function! target=0x{:08X} lr=0x{:08X} "
+            "ctr=0x{:08X} r0=0x{:08X} r1=0x{:08X} r3=0x{:08X} r4=0x{:08X} "
+            "r5=0x{:08X} r6=0x{:08X} r7=0x{:08X} r8=0x{:08X} r9=0x{:08X} "
+            "r10=0x{:08X} r11=0x{:08X}",
+            ctx.r12.u32, ctx.lr, ctx.r12.u32, ctx.r0.u32, ctx.r1.u32,
+            ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32,
+            ctx.r8.u32, ctx.r9.u32, ctx.r10.u32, ctx.r11.u32);
 
         // Walk guest stack frames
         uint32_t sp = ctx.r1.u32;
@@ -106,11 +112,9 @@ Memory::Memory()
     // Do not install a null-page guard in that case.
 #endif
 
-    // Pre-populate the indirect function lookup table with an unmapped handler
-    // so any unmapped indirect call emits an actionable error instead of a null crash.
+    // Leave unmapped function entries null so PPCCallIndirectFunc can preserve
+    // the actual guest target when routing them through its diagnostic handler.
     PPCFunc** table = (PPCFunc**)(base + PPC_IMAGE_BASE + PPC_IMAGE_SIZE);
-    constexpr size_t kFuncTableEntries = PPC_CODE_SIZE / 4;
-    std::fill_n(table, kFuncTableEntries, &UnmappedIndirectHandler);
 
     for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
     {

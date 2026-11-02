@@ -25,50 +25,6 @@ def patch_file(path: pathlib.Path) -> bool:
         print(f"File {path} is already patched.")
         return False
 
-    # Check markers
-    if "// lis r12,-31971" not in lines[11414] or "// li r26,0" not in lines[11461]:
-        print(f"Warning: Markers not matching expected line numbers in {path}")
-        return False
-
-    insertions = [
-        # sub_831CC260 labels (0-based indices)
-        (15362 - 1, "loc_831CCFB0:\n"),
-        (15266 - 1, "loc_831CCF24:\n"),
-        (15153 - 1, "loc_831CCE80:\n"),
-        (15061 - 1, "loc_831CCDF8:\n"),
-        (15041 - 1, "loc_831CCDD4:\n"),
-        (15021 - 1, "loc_831CCDB0:\n"),
-        (15001 - 1, "loc_831CCD8C:\n"),
-        (14981 - 1, "loc_831CCD68:\n"),
-        (14961 - 1, "loc_831CCD44:\n"),
-        (14941 - 1, "loc_831CCD20:\n"),
-        (14923 - 1, "loc_831CCD00:\n"),
-        (14903 - 1, "loc_831CCCDC:\n"),
-        (14885 - 1, "loc_831CCCBC:\n"),
-        (14863 - 1, "loc_831CCC94:\n"),
-
-        # sub_831CB460 labels (0-based indices)
-        (13300 - 1, "loc_831CC1A0:\n"),
-        (13204 - 1, "loc_831CC114:\n"),
-        (13091 - 1, "loc_831CC070:\n"),
-        (12999 - 1, "loc_831CBFE8:\n"),
-        (12979 - 1, "loc_831CBFC4:\n"),
-        (12959 - 1, "loc_831CBFA0:\n"),
-        (12939 - 1, "loc_831CBF7C:\n"),
-        (12919 - 1, "loc_831CBF58:\n"),
-        (12899 - 1, "loc_831CBF34:\n"),
-        (12879 - 1, "loc_831CBF10:\n"),
-        (12861 - 1, "loc_831CBEF0:\n"),
-        (12841 - 1, "loc_831CBECC:\n"),
-        (12823 - 1, "loc_831CBEAC:\n"),
-        (12801 - 1, "loc_831CBE84:\n"),
-    ]
-
-    for idx, label_line in insertions:
-        lines.insert(idx, label_line)
-
-    text = "".join(lines)
-
     old_switch_1 = """\t// lis r12,-31971
 \tctx.r12.s64 = -2095251456;
 \t// rlwinm r0,r6,2,0,29
@@ -79,7 +35,7 @@ def patch_file(path: pathlib.Path) -> bool:
 \tctx.r0.u64 = PPC_LOAD_U32(ctx.r12.u32 + ctx.r0.u32);
 \t// mtctr r0
 \tctr.u64 = ctx.r0.u64;
-\t// bctr 
+\t// bctr
 \tPPC_CALL_INDIRECT_FUNC(ctr.u32);
 \treturn;
 \t// lwz r24,-19220(r28)
@@ -149,7 +105,7 @@ loc_831CB4EC:"""
 \tctx.r0.u64 = PPC_LOAD_U32(ctx.r12.u32 + ctx.r0.u32);
 \t// mtctr r0
 \tctr.u64 = ctx.r0.u64;
-\t// bctr 
+\t// bctr
 \tPPC_CALL_INDIRECT_FUNC(ctr.u32);
 \treturn;
 \t// lwz r24,-15636(r28)
@@ -213,6 +169,76 @@ loc_831CC2EC:"""
         print("Error: switch blocks not found in text.")
         return False
 
+    target_labels = [
+        ("sub_831CB460", 0x831CB460, 0x831CBE84, "loc_831CBE84"),
+        ("sub_831CB460", 0x831CB460, 0x831CBEAC, "loc_831CBEAC"),
+        ("sub_831CB460", 0x831CB460, 0x831CC24C, "loc_831CC24C"),
+        ("sub_831CB460", 0x831CB460, 0x831CBECC, "loc_831CBECC"),
+        ("sub_831CB460", 0x831CB460, 0x831CBEF0, "loc_831CBEF0"),
+        ("sub_831CB460", 0x831CB460, 0x831CBF10, "loc_831CBF10"),
+        ("sub_831CB460", 0x831CB460, 0x831CBF34, "loc_831CBF34"),
+        ("sub_831CB460", 0x831CB460, 0x831CBF58, "loc_831CBF58"),
+        ("sub_831CB460", 0x831CB460, 0x831CBF7C, "loc_831CBF7C"),
+        ("sub_831CB460", 0x831CB460, 0x831CBFA0, "loc_831CBFA0"),
+        ("sub_831CB460", 0x831CB460, 0x831CBFC4, "loc_831CBFC4"),
+        ("sub_831CB460", 0x831CB460, 0x831CBFE8, "loc_831CBFE8"),
+        ("sub_831CB460", 0x831CB460, 0x831CC070, "loc_831CC070"),
+        ("sub_831CB460", 0x831CB460, 0x831CC114, "loc_831CC114"),
+        ("sub_831CB460", 0x831CB460, 0x831CC1A0, "loc_831CC1A0"),
+        ("sub_831CC260", 0x831CC260, 0x831CCC94, "loc_831CCC94"),
+        ("sub_831CC260", 0x831CC260, 0x831CCCBC, "loc_831CCCBC"),
+        ("sub_831CC260", 0x831CC260, 0x831CD05C, "loc_831CD05C"),
+        ("sub_831CC260", 0x831CC260, 0x831CCCDC, "loc_831CCCDC"),
+        ("sub_831CC260", 0x831CC260, 0x831CCD00, "loc_831CCD00"),
+        ("sub_831CC260", 0x831CC260, 0x831CCD20, "loc_831CCD20"),
+        ("sub_831CC260", 0x831CC260, 0x831CCD44, "loc_831CCD44"),
+        ("sub_831CC260", 0x831CC260, 0x831CCD68, "loc_831CCD68"),
+        ("sub_831CC260", 0x831CC260, 0x831CCD8C, "loc_831CCD8C"),
+        ("sub_831CC260", 0x831CC260, 0x831CCDB0, "loc_831CCDB0"),
+        ("sub_831CC260", 0x831CC260, 0x831CCDD4, "loc_831CCDD4"),
+        ("sub_831CC260", 0x831CC260, 0x831CCDF8, "loc_831CCDF8"),
+        ("sub_831CC260", 0x831CC260, 0x831CCE80, "loc_831CCE80"),
+        ("sub_831CC260", 0x831CC260, 0x831CCF24, "loc_831CCF24"),
+        ("sub_831CC260", 0x831CC260, 0x831CCFB0, "loc_831CCFB0"),
+    ]
+
+    insertions = []
+    for function, function_address, target_address, label in target_labels:
+        if f"{label}:\n" in lines:
+            continue
+
+        start_marker = f"PPC_FUNC_IMPL(__imp__{function}) {{"
+        try:
+            start = next(i for i, line in enumerate(lines) if start_marker in line)
+        except StopIteration:
+            print(f"Error: function {function} not found in {path}")
+            return False
+
+        instruction_index = (target_address - function_address) // 4
+        if target_address < function_address or (target_address - function_address) % 4:
+            print(f"Error: invalid target address 0x{target_address:08X}")
+            return False
+
+        current_index = 0
+        target_line = None
+        for i in range(start + 1, len(lines)):
+            if lines[i].startswith("__attribute__((alias") and i > start + 1:
+                break
+            if lines[i].startswith("\t// "):
+                if current_index == instruction_index:
+                    target_line = i
+                    break
+                current_index += 1
+
+        if target_line is None:
+            print(f"Error: target 0x{target_address:08X} not found in {function}")
+            return False
+        insertions.append((target_line, f"{label}:\n"))
+
+    for idx, label_line in sorted(insertions, reverse=True):
+        lines.insert(idx, label_line)
+
+    text = "".join(lines)
     text = text.replace(old_switch_1, new_switch_1, 1)
     text = text.replace(old_switch_2, new_switch_2, 1)
 
@@ -222,6 +248,111 @@ loc_831CC2EC:"""
     print(f"Patched XML parser switch tables in {path}")
     return True
 
+
+def patch_variant_dispatch(path: pathlib.Path) -> bool:
+    if not path.exists():
+        print(f"File not found: {path}")
+        return False
+
+    text = path.read_text(encoding="utf-8")
+    old_dispatch = """\t// lis r12,-31966
+\tctx.r12.s64 = -2094923776;
+\t// rlwinm r0,r10,2,0,29
+\tctx.r0.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 2) & 0xFFFFFFFC;
+\t// addi r12,r12,-11428
+\tctx.r12.s64 = ctx.r12.s64 + -11428;
+\t// lwzx r0,r12,r0
+\tctx.r0.u64 = PPC_LOAD_U32(ctx.r12.u32 + ctx.r0.u32);
+\t// mtctr r0
+\tctr.u64 = ctx.r0.u64;
+\t// bctr
+\tPPC_CALL_INDIRECT_FUNC(ctr.u32);
+\treturn;"""
+    new_dispatch = """\tswitch (ctx.r10.u32) {
+\tcase 0: goto loc_8321D398;
+\tcase 1: goto loc_8321D3A0;
+\tcase 2: goto loc_8321D3A8;
+\tcase 3: goto loc_8321D3B0;
+\tcase 4: goto loc_8321D3E8;
+\tcase 5: goto loc_8321D3F0;
+\tcase 6: goto loc_8321D3F8;
+\tcase 7: goto loc_8321D400;
+\tcase 8: goto loc_8321D40C;
+\tcase 9: goto loc_8321D424;
+\tcase 10: goto loc_8321D42C;
+\tcase 11: goto loc_8321D434;
+\tcase 12: goto loc_8321D44C;
+\tcase 13: goto loc_8321D464;
+\tcase 14: goto loc_8321D454;
+\tdefault: goto loc_8321D464;
+\t}"""
+
+    if new_dispatch in text:
+        print(f"Already patched variant dispatch: {path.name}")
+        return False
+    if old_dispatch not in text:
+        print(f"Variant switch dispatch not found in: {path.name}")
+        return False
+
+    targets = (
+        (0x8321D398, "loc_8321D398"),
+        (0x8321D3A0, "loc_8321D3A0"),
+        (0x8321D3A8, "loc_8321D3A8"),
+        (0x8321D3B0, "loc_8321D3B0"),
+        (0x8321D3E8, "loc_8321D3E8"),
+        (0x8321D3F0, "loc_8321D3F0"),
+        (0x8321D3F8, "loc_8321D3F8"),
+        (0x8321D400, "loc_8321D400"),
+        (0x8321D40C, "loc_8321D40C"),
+        (0x8321D424, "loc_8321D424"),
+        (0x8321D42C, "loc_8321D42C"),
+        (0x8321D434, "loc_8321D434"),
+        (0x8321D44C, "loc_8321D44C"),
+        (0x8321D464, "loc_8321D464"),
+        (0x8321D454, "loc_8321D454"),
+    )
+    lines = text.splitlines(keepends=True)
+    start_marker = "PPC_FUNC_IMPL(__imp__sub_8321D020) {"
+    try:
+        start = next(i for i, line in enumerate(lines) if start_marker in line)
+    except StopIteration:
+        print(f"Function sub_8321D020 not found in {path.name}")
+        return False
+
+    insertions = []
+    for target_address, label in targets:
+        if any(line.strip() == f"{label}:" for line in lines):
+            continue
+
+        instruction_index = (target_address - 0x8321D020) // 4
+        if target_address < 0x8321D020 or (target_address - 0x8321D020) % 4:
+            print(f"Invalid variant target 0x{target_address:08X}")
+            return False
+
+        current_index = 0
+        target_line = None
+        for i in range(start + 1, len(lines)):
+            if lines[i].startswith("__attribute__((alias") and i > start + 1:
+                break
+            if lines[i].startswith("\t// "):
+                if current_index == instruction_index:
+                    target_line = i
+                    break
+                current_index += 1
+        if target_line is None:
+            print(f"Variant target 0x{target_address:08X} not found in {path.name}")
+            return False
+        insertions.append((target_line, f"{label}:\n"))
+
+    for idx, label_line in sorted(insertions, reverse=True):
+        lines.insert(idx, label_line)
+
+    text = "".join(lines).replace(old_dispatch, new_dispatch, 1)
+    path.write_text(text, encoding="utf-8")
+    print(f"Patched sub_8321D020 variant dispatch in {path.name}")
+    return True
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} <ppc output directory>", file=sys.stderr)
@@ -229,8 +360,10 @@ def main() -> int:
     ppc_dir = pathlib.Path(sys.argv[1])
     path = ppc_dir / "ppc_recomp.263.cpp"
     if not path.exists():
-        return 0
+        print(f"File not found: {path}")
+        return 1
     patch_file(path)
+    patch_variant_dispatch(ppc_dir / "ppc_recomp.269.cpp")
     return 0
 
 if __name__ == "__main__":

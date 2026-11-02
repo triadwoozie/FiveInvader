@@ -161,6 +161,7 @@ void sub_82D95030(PPCContext& ctx, uint8_t* base);
 void sub_83521D38(PPCContext& ctx, uint8_t* base);
 void sub_836B1768(PPCContext& ctx, uint8_t* base);
 void sub_83536A60(PPCContext& ctx, uint8_t* base);
+void sub_823CFAF0(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -211,6 +212,7 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x83521D38, &::sub_83521D38);
     PatchFuncMapping(0x836B1768, &::sub_836B1768);
     PatchFuncMapping(0x83536A60, &::sub_83536A60);
+    PatchFuncMapping(0x823CFAF0, &::sub_823CFAF0);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -458,6 +460,7 @@ namespace
     constexpr uint32_t STATUS_INVALID_HANDLE = 0xC0000008;
     constexpr uint32_t STATUS_INVALID_PARAMETER = 0xC000000D;
     constexpr uint32_t STATUS_INFO_LENGTH_MISMATCH = 0xC0000004;
+    constexpr uint32_t STATUS_NO_SUCH_FILE = 0xC000000F;
     constexpr uint32_t STATUS_END_OF_FILE = 0xC0000011;
     constexpr uint32_t STATUS_ACCESS_DENIED = 0xC0000022;
     constexpr uint32_t STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034;
@@ -1425,7 +1428,7 @@ namespace
         case EACCES:
             return STATUS_ACCESS_DENIED;
         case ENOENT:
-            return STATUS_OBJECT_NAME_NOT_FOUND;
+            return STATUS_NO_SUCH_FILE;
         case ENOTDIR:
             return STATUS_OBJECT_PATH_NOT_FOUND;
         default:
@@ -1593,6 +1596,14 @@ namespace
 
     static std::filesystem::path ResolveGuestPathBestEffort(const std::string& guestPath)
     {
+        if (VFS::IsInitialized())
+        {
+            std::filesystem::path vfsResolved = VFS::Resolve(guestPath);
+            std::error_code vfsEc;
+            if (!vfsResolved.empty() && std::filesystem::exists(vfsResolved, vfsEc) && !vfsEc)
+                return vfsResolved;
+        }
+
         std::filesystem::path resolved = FileSystem::ResolvePath(guestPath, true);
 
         std::error_code ec;
@@ -2829,6 +2840,26 @@ uint32_t NtCreateFile
     
     std::error_code ec;
     bool fileExists = std::filesystem::exists(resolved, ec);
+    std::string guestPathLower = guestPath;
+    std::transform(guestPathLower.begin(), guestPathLower.end(), guestPathLower.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool optionalMissingRead =
+        !fileExists &&
+        (DesiredAccess & GENERIC_WRITE) == 0 &&
+        (guestPathLower.ends_with(".bik") || guestPathLower.find("/cache/") != std::string::npos ||
+         guestPathLower.find("\\cache\\") != std::string::npos);
+    if (optionalMissingRead)
+    {
+        LOGF_IMPL(Utility, "NtCreateFile", "Optional read-only file missing: '{}'", guestPath);
+        if (IoStatusBlock)
+        {
+            IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
+            IoStatusBlock->Information = 0;
+        }
+        *FileHandle = 0;
+        return STATUS_NO_SUCH_FILE;
+    }
+
     bool shouldCreate = false;
     bool shouldTruncate = false;
     uint32_t fileInfo = 1; // FILE_OPENED
@@ -2849,11 +2880,11 @@ uint32_t NtCreateFile
                 LOGF_IMPL(Utility, "NtCreateFile", "FILE_OPEN failed - file does not exist: '{}'", resolved.string());
                 if (IoStatusBlock)
                 {
-                    IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                    IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
                     IoStatusBlock->Information = 0;
                 }
                 *FileHandle = 0;
-                return STATUS_OBJECT_NAME_NOT_FOUND;
+                return STATUS_NO_SUCH_FILE;
             }
             break;
             
@@ -2887,11 +2918,11 @@ uint32_t NtCreateFile
                 LOGF_IMPL(Utility, "NtCreateFile", "FILE_OVERWRITE failed - file does not exist: '{}'", resolved.string());
                 if (IoStatusBlock)
                 {
-                    IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
+                    IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
                     IoStatusBlock->Information = 0;
                 }
                 *FileHandle = 0;
-                return STATUS_OBJECT_NAME_NOT_FOUND;
+                return STATUS_NO_SUCH_FILE;
             }
             shouldTruncate = true;
             fileInfo = 3; // FILE_OVERWRITTEN
@@ -3686,9 +3717,9 @@ uint32_t NtQueryInformationFile(
         const bool exists = std::filesystem::exists(path, ec);
         if (!exists || ec)
         {
-            IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
             IoStatusBlock->Information = 0;
-            return STATUS_OBJECT_NAME_NOT_FOUND;
+            return STATUS_NO_SUCH_FILE;
         }
 
         isDir = std::filesystem::is_directory(path, ec);
@@ -4221,19 +4252,24 @@ uint32_t NtReadFile(
         if (nullHandleCount <= 3 || nullHandleCount % 1000 == 0) {
             LOGF_IMPL(Utility, "NtReadFile", "NULL handle 0x00000000 (count={})", nullHandleCount);
         }
-        // Return INVALID_HANDLE to signal the caller to give up
+        // A failed open can be followed by a read using the zero handle.
         if (IoStatusBlock) {
-            IoStatusBlock->Status = STATUS_INVALID_HANDLE;
+            IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
             IoStatusBlock->Information = 0;
         }
-        // Add small delay to prevent tight CPU loop
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        return STATUS_INVALID_HANDLE;
+        signalCompletionEvent();
+        return STATUS_NO_SUCH_FILE;
     }
     
     if (FileHandle == GUEST_INVALID_HANDLE_VALUE || !IsKernelObject(FileHandle))
     {
         LOGF_IMPL(Utility, "NtReadFile", "INVALID handle 0x{:08X}", FileHandle);
+        if (IoStatusBlock)
+        {
+            IoStatusBlock->Status = STATUS_INVALID_HANDLE;
+            IoStatusBlock->Information = 0;
+        }
+        signalCompletionEvent();
         return STATUS_INVALID_HANDLE;
     }
 
@@ -4288,6 +4324,12 @@ uint32_t NtReadFile(
     if (it == g_ntFileHandles.end() || !it->second || it->second->magic != kNtFileHandleMagic)
     {
         LOGF_IMPL(Utility, "NtReadFile", "Not a file handle 0x{:08X}", FileHandle);
+        if (IoStatusBlock)
+        {
+            IoStatusBlock->Status = STATUS_INVALID_HANDLE;
+            IoStatusBlock->Information = 0;
+        }
+        signalCompletionEvent();
         return STATUS_INVALID_HANDLE;
     }
 
@@ -6071,7 +6113,7 @@ uint32_t NtQueryFullAttributesFile(XOBJECT_ATTRIBUTES* ObjectAttributes, XFILE_N
     std::error_code ec;
     const bool exists = std::filesystem::exists(resolved, ec);
     if (!exists || ec)
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+        return STATUS_NO_SUCH_FILE;
 
     const bool isDir = std::filesystem::is_directory(resolved, ec);
     if (ec)
@@ -10318,29 +10360,25 @@ PPC_FUNC(sub_823CFAF0)
 {
     uint32_t dst = ctx.r3.u32;
     uint32_t src = ctx.r4.u32;
-    int32_t size = ctx.r5.s32;
-    void* callerPtr = __builtin_return_address(0);
+    const uint32_t size = ctx.r5.u32;
 
-    static uint32_t s_memcpyCount = 0;
-    if (++s_memcpyCount <= 20 || s_memcpyCount % 500 == 0 || size > 1000000)
+    if (size == 0)
+        return;
+
+    if (size == 0xFFFFFFFFu || size >= 0x10000000u ||
+        static_cast<uint64_t>(dst) + size > PPC_MEMORY_SIZE ||
+        static_cast<uint64_t>(src) + size > PPC_MEMORY_SIZE)
     {
-        LOGF_INFO("[MEMCPY] sub_823CFAF0 #{} dst=0x{:08X} src=0x{:08X} size={} callerPtr={}", 
-                  s_memcpyCount, dst, src, size, callerPtr);
+        static std::atomic<uint32_t> s_rejectedCopyCount{0};
+        if (s_rejectedCopyCount.fetch_add(1, std::memory_order_relaxed) < 32)
+        {
+            LOGF_WARNING("[MEM] sub_823CFAF0 rejected invalid copy dst=0x{:08X} src=0x{:08X} size=0x{:08X} lr=0x{:08X}",
+                         dst, src, size, static_cast<uint32_t>(ctx.lr));
+        }
+        return;
     }
 
-    if (size > 0 && dst != 0 && src != 0)
-    {
-        // Guard against out-of-bounds guest memory access
-        if ((uint64_t)dst + (uint32_t)size <= PPC_MEMORY_SIZE && (uint64_t)src + (uint32_t)size <= PPC_MEMORY_SIZE)
-        {
-            std::memmove(base + dst, base + src, size);
-        }
-        else
-        {
-            LOGF_ERROR("[MEMCPY] sub_823CFAF0 OUT OF BOUNDS! dst=0x{:08X} src=0x{:08X} size={}", dst, src, size);
-        }
-    }
-    // ctx.r3 remains dst
+    std::memmove(base + dst, base + src, size);
 }
 
 extern "C" void __imp__sub_831C1B10(PPCContext& ctx, uint8_t* base);
