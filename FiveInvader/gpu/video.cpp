@@ -1145,6 +1145,7 @@ struct RenderCommand
             uint32_t primitiveType; 
             uint32_t startVertex; 
             uint32_t primitiveCount;
+            bool isPm4;
         } drawPrimitive;
 
         struct 
@@ -1585,6 +1586,8 @@ static std::unique_ptr<RenderShader> g_copyShader;
 
 static std::unique_ptr<RenderShader> g_copyColorShader;
 static ankerl::unordered_dense::map<RenderFormat, std::unique_ptr<RenderPipeline>> g_copyColorPipelines;
+static std::unique_ptr<RenderShader> g_pm4FallbackPixelShader;
+static std::array<std::unique_ptr<RenderPipeline>, 7> g_pm4FallbackPipelines;
 static std::unique_ptr<RenderPipeline> g_copyDepthPipeline;
 
 static std::unique_ptr<RenderShader> g_resolveMsaaColorShaders[3];
@@ -5361,6 +5364,7 @@ static void DrawPrimitive(GuestDevice* device, uint32_t primitiveType, uint32_t 
     cmd.drawPrimitive.primitiveType = primitiveType;
     cmd.drawPrimitive.startVertex = startVertex;
     cmd.drawPrimitive.primitiveCount = primitiveCount;
+    cmd.drawPrimitive.isPm4 = false;
 
     queue.submit();
 }
@@ -5402,8 +5406,75 @@ bool Video::ExecutePM4Draw(uint32_t primitiveType, uint32_t indexCount)
     command.drawPrimitive.primitiveType = primitiveType;
     command.drawPrimitive.startVertex = 0;
     command.drawPrimitive.primitiveCount = primitiveCount;
+    command.drawPrimitive.isPm4 = true;
     g_renderQueue.enqueue(command);
     return true;
+}
+
+static RenderPipeline* GetPm4FallbackPipeline(uint32_t primitiveType, GuestSurface* renderTarget)
+{
+    if (g_backend != Backend::VULKAN || primitiveType >= g_pm4FallbackPipelines.size() ||
+        g_pipelineLayout == nullptr || g_copyShader == nullptr || renderTarget == nullptr)
+        return nullptr;
+
+    static constexpr uint32_t pixelShaderSpirv[] = {
+        0x07230203, 0x00010000, 0, 14, 0,
+        0x00020011, 1,
+        0x0003000E, 0, 1,
+        0x0006000F, 4, 4, 0x6E69616D, 0, 3,
+        0x00030010, 4, 7,
+        0x00040047, 3, 30, 0,
+        0x00020013, 1,
+        0x00030021, 2, 1,
+        0x00030016, 5, 32,
+        0x00040017, 6, 5, 4,
+        0x00040020, 7, 3, 6,
+        0x0004003B, 7, 3, 3,
+        0x0004002B, 5, 11, 0,
+        0x0004002B, 5, 12, 0x3F800000,
+        0x0007002C, 6, 13, 11, 11, 11, 12,
+        0x00050036, 1, 4, 0, 2,
+        0x000200F8, 10,
+        0x0003003E, 3, 13,
+        0x000100FD,
+        0x00010038
+    };
+
+    auto& pipeline = g_pm4FallbackPipelines[primitiveType];
+    if (pipeline == nullptr)
+    {
+        if (g_pm4FallbackPixelShader == nullptr)
+            g_pm4FallbackPixelShader = g_device->createShader(
+                pixelShaderSpirv, sizeof(pixelShaderSpirv), "main", RenderShaderFormat::SPIRV);
+
+        if (g_pm4FallbackPixelShader == nullptr)
+            return nullptr;
+
+        RenderGraphicsPipelineDesc desc;
+        desc.pipelineLayout = g_pipelineLayout.get();
+        desc.vertexShader = g_copyShader.get();
+        desc.pixelShader = g_pm4FallbackPixelShader.get();
+        desc.depthFunction = RenderComparisonFunction::ALWAYS;
+        desc.depthEnabled = false;
+        desc.depthWriteEnabled = false;
+        desc.stencilEnabled = false;
+        desc.primitiveTopology = ConvertPrimitiveType(primitiveType);
+        desc.cullMode = RenderCullMode::NONE;
+        desc.renderTargetFormat[0] = renderTarget->format;
+        desc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+        desc.renderTargetBlend[0].renderTargetWriteMask = uint32_t(RenderColorWriteEnable::ALL);
+        desc.renderTargetCount = 1;
+        desc.depthTargetFormat = RenderFormat::UNKNOWN;
+        desc.multisampling.sampleCount = renderTarget->sampleCount;
+        desc.alphaToCoverageEnabled = false;
+        desc.inputElements = nullptr;
+        desc.inputElementsCount = 0;
+        desc.inputSlots = nullptr;
+        desc.inputSlotsCount = 0;
+        pipeline = g_device->createGraphicsPipeline(desc);
+    }
+
+    return pipeline.get();
 }
 
 static void ProcDrawPrimitive(const RenderCommand& cmd)
@@ -5413,12 +5484,45 @@ static void ProcDrawPrimitive(const RenderCommand& cmd)
     
     const auto& args = cmd.drawPrimitive;
 
-    if (g_pipelineState.vertexShader == nullptr || g_pipelineState.vertexDeclaration == nullptr)
+    if (args.isPm4 && (g_pipelineState.vertexShader == nullptr || g_pipelineState.vertexDeclaration == nullptr))
     {
+        auto* renderTarget = g_renderTarget != nullptr ? g_renderTarget : g_backBuffer;
+        auto* pipeline = GetPm4FallbackPipeline(args.primitiveType, renderTarget);
+        if (pipeline == nullptr || renderTarget == nullptr || renderTarget->texture == nullptr)
+        {
+            LOGF_WARNING("[PM4] Cannot execute fallback draw without a Vulkan pipeline and render target");
+            return;
+        }
+
+        AddBarrier(renderTarget, RenderTextureLayout::COLOR_WRITE);
+        FlushBarriers();
+        SetFramebuffer(renderTarget, nullptr, true);
+
+        auto& commandList = g_commandLists[g_frame];
+        commandList->setPipeline(pipeline);
+        commandList->setViewports(RenderViewport(0.0f, 0.0f, float(renderTarget->width), float(renderTarget->height), 0.0f, 1.0f));
+        commandList->setScissors(RenderRect(0, 0, renderTarget->width, renderTarget->height));
+
+        uint32_t vertexCount = args.primitiveCount;
+        switch (args.primitiveType)
+        {
+        case D3DPT_LINELIST: vertexCount *= 2; break;
+        case D3DPT_TRIANGLELIST: vertexCount *= 3; break;
+        case D3DPT_LINESTRIP: vertexCount += 1; break;
+        case D3DPT_TRIANGLESTRIP:
+        case D3DPT_TRIANGLEFAN: vertexCount += 2; break;
+        case D3DPT_QUADLIST: vertexCount *= 6; break;
+        default: break;
+        }
+
+        if (vertexCount == 0)
+            return;
+
+        commandList->drawInstanced(vertexCount, 1, args.startVertex, 0);
+        g_guestDrawCommandCount.fetch_add(1, std::memory_order_relaxed);
         if (s_procDrawCount <= 10)
-            LOGF_WARNING("[PM4] Dropping draw without vertex shader/declaration (VS={:p} VDecl={:p})",
-                         static_cast<void*>(g_pipelineState.vertexShader),
-                         static_cast<void*>(g_pipelineState.vertexDeclaration));
+            LOGF_WARNING("[PM4] Executed fallback Vulkan draw #{} type={} vertices={} target={}x{}",
+                s_procDrawCount, args.primitiveType, vertexCount, renderTarget->width, renderTarget->height);
         return;
     }
     
