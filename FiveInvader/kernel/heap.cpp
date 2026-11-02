@@ -1,4 +1,5 @@
 #include <stdafx.h>
+#include <unordered_set>
 #include "heap.h"
 #include "memory.h"
 #include "function.h"
@@ -12,6 +13,8 @@
 constexpr size_t VIRTUAL_HEAP_BEGIN = 0x10000000;
 constexpr size_t RESERVED_BEGIN = 0x7FEA0000;
 constexpr size_t RESERVED_END = 0xA0000000;
+
+static std::unordered_set<void*> s_activePhysAllocations;
 
 void Heap::Init()
 {
@@ -69,6 +72,8 @@ void* Heap::AllocPhysical(size_t size, size_t alignment)
     *((void**)aligned - 1) = ptr;
     *((size_t*)aligned - 2) = size + O1HEAP_ALIGNMENT;
 
+    s_activePhysAllocations.insert(ptr);
+
     static int s_allocPhysCount = 0;
     if (++s_allocPhysCount <= 30 || s_allocPhysCount % 1000 == 0)
     {
@@ -97,6 +102,14 @@ void Heap::Free(void* ptr)
             ((uintptr_t)realPtr & (O1HEAP_ALIGNMENT - 1)) != 0)
         {
             std::fprintf(stderr, "[Heap::Free physical] CORRUPTED/INVALID/DOUBLE-FREE realPtr=%p for userPtr=%p, SKIPPING free!\n",
+                         realPtr, ptr);
+            return;
+        }
+
+        // Active allocation tracking to prevent double-free corruption in o1heap
+        if (s_activePhysAllocations.erase(realPtr) == 0)
+        {
+            std::fprintf(stderr, "[Heap::Free physical] DOUBLE-FREE PREVENTED realPtr=%p for userPtr=%p, SKIPPING free!\n",
                          realPtr, ptr);
             return;
         }

@@ -165,6 +165,9 @@ void sub_83536A60(PPCContext& ctx, uint8_t* base);
 void sub_823CFAF0(PPCContext& ctx, uint8_t* base);
 void sub_83622DF0(PPCContext& ctx, uint8_t* base);
 void sub_82EF3FA0(PPCContext& ctx, uint8_t* base);
+void sub_831B9330(PPCContext& ctx, uint8_t* base);
+void sub_831D0C30(PPCContext& ctx, uint8_t* base);
+void sub_827E1D70(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -220,6 +223,9 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x823CFAF0, &::sub_823CFAF0);
     PatchFuncMapping(0x83622DF0, &::sub_83622DF0);
     PatchFuncMapping(0x82EF3FA0, &::sub_82EF3FA0);
+    PatchFuncMapping(0x831B9330, &::sub_831B9330);
+    PatchFuncMapping(0x831D0C30, &::sub_831D0C30);
+    PatchFuncMapping(0x827E1D70, &::sub_827E1D70);
     PatchFuncMapping(0x82577590, &::sub_82577590);
     PatchFuncMapping(0x8299AB58, &::sub_8299AB58);
     PatchFuncMapping(0x8345BC98, &::sub_8345BC98);
@@ -10608,6 +10614,59 @@ PPC_FUNC(sub_82EF3FA0)
     ctx.r3.u64 = 0;
 }
 
+PPC_FUNC(sub_827E1D70)
+{
+    if (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 10)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    uint16_t numBuckets = PPC_LOAD_U16(ctx.r3.u32 + 8);
+    if (numBuckets == 0)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    uint32_t bucketsArray = PPC_LOAD_U32(ctx.r3.u32 + 4);
+    if (bucketsArray < 0x10000 || bucketsArray >= PPC_MEMORY_SIZE - numBuckets * 4)
+    {
+        ctx.r3.u64 = 0;
+        return;
+    }
+
+    uint32_t key = ctx.r4.u32;
+    uint32_t bucketIndex = key % numBuckets;
+    uint32_t node = PPC_LOAD_U32(bucketsArray + bucketIndex * 4);
+
+    int depth = 0;
+    while (node >= 0x10000 && node < PPC_MEMORY_SIZE - 12)
+    {
+        uint32_t nodeKey = PPC_LOAD_U32(node + 0);
+        if (key == nodeKey)
+        {
+            ctx.r3.u64 = PPC_LOAD_U32(node + 4);
+            return;
+        }
+        if (++depth > 256)
+        {
+            static int s_cycleWarn = 0;
+            if (s_cycleWarn++ < 10)
+            {
+                LOGF_WARNING("[sub_827E1D70] atMap::Find cycle detected! map=0x{:08X} key=0x{:08X} bucket={}",
+                             ctx.r3.u32, key, bucketIndex);
+            }
+            break;
+        }
+        uint32_t nextNode = PPC_LOAD_U32(node + 8);
+        if (nextNode == node) break;
+        node = nextNode;
+    }
+
+    ctx.r3.u64 = 0;
+}
+
 extern "C" void __imp__sub_831C1B10(PPCContext& ctx, uint8_t* base);
 PPC_FUNC(sub_831C1B10)
 {
@@ -12406,35 +12465,122 @@ PPC_FUNC(sub_8314C3C8)
     __imp__sub_8314C3C8(ctx, base);
 }
 
+extern "C" void __imp__sub_831B9330(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_831B9330)
+{
+    uint32_t node = ctx.r3.u32;
+    if (node < 0x10000 || node >= PPC_MEMORY_SIZE - 48)
+        return;
+
+    // Clear flags in node + 14
+    uint16_t val14 = PPC_LOAD_U16(node + 14);
+    val14 &= 0xFFF7;
+    PPC_STORE_U16(node + 14, val14);
+
+    // Free node + 28
+    uint32_t ptr28 = PPC_LOAD_U32(node + 28);
+    if (ptr28 >= 0x10000) {
+        ctx.r3.u64 = ptr28;
+        sub_8255DCC0(ctx, base);
+    }
+    PPC_STORE_U32(node + 28, 0);
+    PPC_STORE_U32(node + 32, 0);
+    PPC_STORE_U32(node + 36, 0);
+
+    // Loop through children at node + 24
+    uint32_t child = PPC_LOAD_U32(node + 24);
+    int childCount = 0;
+    while (child >= 0x10000 && child < PPC_MEMORY_SIZE - 48 && childCount++ < 10000)
+    {
+        uint32_t next = PPC_LOAD_U32(child + 20);
+        // Advance parent's child pointer immediately to prevent any re-entrant loop
+        PPC_STORE_U32(node + 24, next);
+
+        // Unlink child from parent
+        PPC_STORE_U32(child + 16, 0);
+        PPC_STORE_U32(child + 20, 0);
+
+        // Destroy child
+        ctx.r3.u64 = child;
+        sub_831D0C30(ctx, base);
+
+        // Free child memory
+        ctx.r3.u64 = child;
+        sub_8255DCB8(ctx, base);
+
+        child = next;
+    }
+    PPC_STORE_U32(node + 24, 0);
+}
+
 extern "C" void __imp__sub_831D0C30(PPCContext& ctx, uint8_t* base);
 PPC_FUNC(sub_831D0C30)
 {
     uint32_t node = ctx.r3.u32;
-    if (node == 0 || node >= PPC_MEMORY_SIZE - 64) {
+    if (node < 0x10000 || node >= PPC_MEMORY_SIZE - 48)
         return;
-    }
+
     uint32_t parent = PPC_LOAD_U32(node + 16);
-    if (parent != 0 && parent < PPC_MEMORY_SIZE - 64) {
-        uint32_t prev_link = parent + 24;
-        uint32_t curr = PPC_LOAD_U32(prev_link);
-        int steps = 0;
-        bool found = false;
-        while (curr != 0 && curr < PPC_MEMORY_SIZE - 64 && steps++ < 10000) {
-            if (curr == node) {
-                found = true;
-                break;
+    if (parent >= 0x10000 && parent < PPC_MEMORY_SIZE - 32)
+    {
+        uint32_t firstChild = PPC_LOAD_U32(parent + 24);
+        if (firstChild == node) {
+            uint32_t next = PPC_LOAD_U32(node + 20);
+            PPC_STORE_U32(parent + 24, next);
+        } else {
+            uint32_t curr = firstChild;
+            int walkLimit = 0;
+            while (curr >= 0x10000 && curr < PPC_MEMORY_SIZE - 32 && walkLimit++ < 5000) {
+                uint32_t next = PPC_LOAD_U32(curr + 20);
+                if (next == node) {
+                    uint32_t nodeNext = PPC_LOAD_U32(node + 20);
+                    PPC_STORE_U32(curr + 20, nodeNext);
+                    break;
+                }
+                curr = next;
             }
-            prev_link = curr + 20;
-            curr = PPC_LOAD_U32(prev_link);
-        }
-        if (!found) {
-            // Node is not in the parent linked list!
-            // Setting node+16 to 0 prevents the lifted code from entering the infinite spinloop at loc_831D0C60
-            PPC_STORE_U32(node + 16, 0);
-            PPC_STORE_U32(node + 20, 0);
         }
     }
-    __imp__sub_831D0C30(ctx, base);
+    PPC_STORE_U32(node + 16, 0);
+    PPC_STORE_U32(node + 20, 0);
+
+    // Destroy children
+    ctx.r3.u64 = node;
+    sub_831B9330(ctx, base);
+
+    // Free node + 28 if node + 36 != 0
+    uint32_t val36 = PPC_LOAD_U32(node + 36);
+    if (val36 != 0) {
+        uint32_t ptr28 = PPC_LOAD_U32(node + 28);
+        if (ptr28 >= 0x10000) {
+            ctx.r3.u64 = ptr28;
+            sub_8255DCC0(ctx, base);
+        }
+    }
+
+    // Free node + 0 if flag in node + 14 is set
+    uint16_t val14 = PPC_LOAD_U16(node + 14);
+    if (((val14 >> 1) & 1) != 0) {
+        uint32_t ptr0 = PPC_LOAD_U32(node + 0);
+        if (ptr0 >= 0x10000) {
+            ctx.r3.u64 = ptr0;
+            sub_8255DCC0(ctx, base);
+        }
+    }
+
+    // Destroy attribute list at node + 4
+    ctx.r3.u64 = node + 4;
+    sub_831C59C8(ctx, base);
+
+    // Free node + 4 array if node + 10 != 0
+    uint16_t val10 = PPC_LOAD_U16(node + 10);
+    if (val10 != 0) {
+        uint32_t ptr4 = PPC_LOAD_U32(node + 4);
+        if (ptr4 >= 0x10000) {
+            ctx.r3.u64 = ptr4;
+            sub_8255DCC0(ctx, base);
+        }
+    }
 }
 
 extern "C" void __imp__sub_8255DD00(PPCContext& ctx, uint8_t* base);

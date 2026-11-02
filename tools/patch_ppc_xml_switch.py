@@ -877,7 +877,145 @@ def main() -> int:
     patch_allocator_free_list_guard(ppc_dir / "ppc_recomp.330.cpp")
     patch_allocator_large_free_list_guard(ppc_dir / "ppc_recomp.330.cpp")
     patch_xml_unlink_loop_guard(ppc_dir / "ppc_recomp.263.cpp")
+    patch_atmap_insert_guard(ppc_dir / "ppc_recomp.79.cpp")
+    patch_recomp297_indirect_guard(ppc_dir / "ppc_recomp.297.cpp")
+    patch_recomp263_indirect_guard(ppc_dir / "ppc_recomp.263.cpp")
+    patch_recomp263_xml_indirect_guard(ppc_dir / "ppc_recomp.263.cpp")
     return 0
+
+def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "loc_827E201C:\n"
+        "\t// lwz r10,0(r31)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);\n"
+        "\t// stwx r11,r30,r10\n"
+        "\tPPC_STORE_U32(ctx.r30.u32 + ctx.r10.u32, ctx.r11.u32);\n"
+        "\t// lwz r9,0(r31)\n"
+        "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);\n"
+        "\t// lwzx r3,r30,r9\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + ctx.r9.u32);"
+    )
+    new = (
+        "loc_827E201C:\n"
+        "\t// lwz r10,0(r31)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);\n"
+        "\tif (ctx.r10.u32 >= 0x10000 && ctx.r10.u32 < PPC_MEMORY_SIZE - 4) {\n"
+        "\t\t// stwx r11,r30,r10\n"
+        "\t\tPPC_STORE_U32(ctx.r30.u32 + ctx.r10.u32, ctx.r11.u32);\n"
+        "\t}\n"
+        "\t// lwz r9,0(r31)\n"
+        "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r31.u32 + 0);\n"
+        "\tif (ctx.r9.u32 >= 0x10000 && ctx.r9.u32 < PPC_MEMORY_SIZE - 4) {\n"
+        "\t\t// lwzx r3,r30,r9\n"
+        "\t\tctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + ctx.r9.u32);\n"
+        "\t} else {\n"
+        "\t\tctx.r3.u64 = ctx.r11.u64;\n"
+        "\t}"
+    )
+    if old in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched atMap insert guard in {path}")
+        return True
+    return False
+
+def patch_recomp297_indirect_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "\t// mtctr r8\n"
+        "\tctr.u64 = ctx.r8.u64;\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x8344D19C;\n"
+        "\tPPC_CALL_INDIRECT_FUNC(ctr.u32);"
+    )
+    new = (
+        "\t// mtctr r8\n"
+        "\tctr.u64 = ctx.r8.u64;\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x8344D19C;\n"
+        "\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < (PPC_CODE_BASE + PPC_CODE_SIZE)) {\n"
+        "\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\t}"
+    )
+    if old in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched recomp.297 indirect guard in {path}")
+        return True
+    return False
+
+def patch_recomp263_indirect_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "\t// mtctr r10\n"
+        "\tctr.u64 = ctx.r10.u64;\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x831D0B28;\n"
+        "\tPPC_CALL_INDIRECT_FUNC(ctr.u32);"
+    )
+    new = (
+        "\t// mtctr r10\n"
+        "\tctr.u64 = ctx.r10.u64;\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x831D0B28;\n"
+        "\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < (PPC_CODE_BASE + PPC_CODE_SIZE)) {\n"
+        "\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\t}"
+    )
+    if old in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched recomp.263 indirect guard in {path}")
+        return True
+    return False
+
+def patch_recomp263_xml_indirect_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "\t// beq cr6,0x831ced8c\n"
+        "\tif (cr6.eq) goto loc_831CED8C;\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x831CED88;\n"
+        "\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\t// b 0x831ced90\n"
+        "\tgoto loc_831CED90;\n"
+        "loc_831CED8C:\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x831CED90;\n"
+        "\tPPC_CALL_INDIRECT_FUNC(ctr.u32);"
+    )
+    new = (
+        "\t// beq cr6,0x831ced8c\n"
+        "\tif (cr6.eq) goto loc_831CED8C;\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x831CED88;\n"
+        "\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < (PPC_CODE_BASE + PPC_CODE_SIZE)) {\n"
+        "\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\t} else {\n"
+        "\t\tctx.r3.u64 = 0;\n"
+        "\t}\n"
+        "\t// b 0x831ced90\n"
+        "\tgoto loc_831CED90;\n"
+        "loc_831CED8C:\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x831CED90;\n"
+        "\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < (PPC_CODE_BASE + PPC_CODE_SIZE)) {\n"
+        "\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\t} else {\n"
+        "\t\tctx.r3.u64 = 0;\n"
+        "\t}"
+    )
+    if old in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched recomp.263 XML indirect guard in {path}")
+        return True
+    return False
 
 def patch_xml_unlink_loop_guard(path: pathlib.Path) -> bool:
     if not path.exists():
