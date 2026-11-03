@@ -45,6 +45,26 @@ static void CrashSignalHandler(int sig, siginfo_t* info, void* ucontext)
     uintptr_t caller_rip = (rip == 0 && rsp != 0) ? *reinterpret_cast<uintptr_t*>(rsp) : 0;
     fprintf(stderr, "\n========== CRASH CAUGHT: signal %d (fault addr=%p, host rip=0x%lx, caller_rip=0x%lx) ==========\n",
             sig, info ? info->si_addr : nullptr, (unsigned long)rip, (unsigned long)caller_rip);
+    if (uc) {
+        fprintf(stderr, "[CRASH_REGS] RAX=0x%lx RBX=0x%lx RCX=0x%lx RDX=0x%lx RSI=0x%lx RDI=0x%lx RBP=0x%lx RSP=0x%lx\n",
+            (unsigned long)uc->uc_mcontext.gregs[REG_RAX],
+            (unsigned long)uc->uc_mcontext.gregs[REG_RBX],
+            (unsigned long)uc->uc_mcontext.gregs[REG_RCX],
+            (unsigned long)uc->uc_mcontext.gregs[REG_RDX],
+            (unsigned long)uc->uc_mcontext.gregs[REG_RSI],
+            (unsigned long)uc->uc_mcontext.gregs[REG_RDI],
+            (unsigned long)uc->uc_mcontext.gregs[REG_RBP],
+            (unsigned long)uc->uc_mcontext.gregs[REG_RSP]);
+        fprintf(stderr, "[CRASH_REGS] R8=0x%lx R9=0x%lx R10=0x%lx R11=0x%lx R12=0x%lx R13=0x%lx R14=0x%lx R15=0x%lx\n",
+            (unsigned long)uc->uc_mcontext.gregs[REG_R8],
+            (unsigned long)uc->uc_mcontext.gregs[REG_R9],
+            (unsigned long)uc->uc_mcontext.gregs[REG_R10],
+            (unsigned long)uc->uc_mcontext.gregs[REG_R11],
+            (unsigned long)uc->uc_mcontext.gregs[REG_R12],
+            (unsigned long)uc->uc_mcontext.gregs[REG_R13],
+            (unsigned long)uc->uc_mcontext.gregs[REG_R14],
+            (unsigned long)uc->uc_mcontext.gregs[REG_R15]);
+    }
     if (g_ppcContext) {
         fprintf(stderr, "[CRASH_CONTEXT] PPCContext=%p r1=0x%llX r3=0x%llX r4=0x%llX r5=0x%llX r10=0x%llX r12=0x%llX r13=0x%llX\n",
             g_ppcContext,

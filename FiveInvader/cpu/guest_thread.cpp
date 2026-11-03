@@ -286,6 +286,10 @@ uint32_t GuestThread::Start(const GuestThreadParams& params)
 GuestThreadHandle* GuestThread::Start(const GuestThreadParams& params, uint32_t* threadId)
 {
     auto hThread = CreateKernelObject<GuestThreadHandle>(params);
+    if (!hThread)
+    {
+        return nullptr;
+    }
 
     if (threadId != nullptr)
     {

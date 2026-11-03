@@ -2604,6 +2604,15 @@ uint32_t NtCreateFile
                 {
                     // Return directory handle for VFS directory
                     NtDirHandle* hDir = CreateKernelObject<NtDirHandle>();
+                    if (!hDir)
+                    {
+                        if (IoStatusBlock)
+                        {
+                            IoStatusBlock->Status = 0xC0000017; // STATUS_NO_MEMORY
+                            IoStatusBlock->Information = 0;
+                        }
+                        return 0xC0000017;
+                    }
                     hDir->path = vfsResolved;
                     
                     const uint32_t handleValue = GetKernelHandle(hDir);
@@ -2630,6 +2639,15 @@ uint32_t NtCreateFile
                     if (fileStream.is_open())
                     {
                         NtFileHandle* hFile = CreateKernelObject<NtFileHandle>();
+                        if (!hFile)
+                        {
+                            if (IoStatusBlock)
+                            {
+                                IoStatusBlock->Status = 0xC0000017; // STATUS_NO_MEMORY
+                                IoStatusBlock->Information = 0;
+                            }
+                            return 0xC0000017;
+                        }
                         hFile->stream = std::move(fileStream);
                         hFile->path = vfsResolved;
                         hFile->isRpf = false;
@@ -6222,13 +6240,34 @@ uint32_t MmQueryAllocationSize(uint32_t guestAddress)
     return (uint32_t)g_userHeap.Size(g_memory.Translate(guestAddress));
 }
 
-uint32_t NtClearEvent(Event* handle, uint32_t* previousState)
+uint32_t NtClearEvent(uint32_t Handle, uint32_t* previousState)
 {
-    if (!handle) {
-        LOGF_WARNING("[TRACE] NtClearEvent: null or invalid event handle");
+    Event* evt = nullptr;
+    if (IsValidKernelHandle(Handle))
+    {
+        evt = GetKernelObject<Event>(Handle);
+    }
+    else if (Handle >= 0x10000 && Handle <= 0xF0000000 && g_memory.base != nullptr)
+    {
+        XDISPATCHER_HEADER* header = reinterpret_cast<XDISPATCHER_HEADER*>(g_memory.Translate(Handle));
+        if (header->Type == 0 || header->Type == 1)
+        {
+            evt = QueryKernelObject<Event>(*header);
+        }
+    }
+    else if (Handle != 0 && Handle != 0xFFFFFFFF && g_memory.base != nullptr)
+    {
+        void* hostPtr = g_memory.Translate(Handle);
+        if (IsValidHostVtable(hostPtr))
+        {
+            evt = static_cast<Event*>(hostPtr);
+        }
+    }
+
+    if (!evt || !IsValidHostVtable(evt)) {
         return 0xC0000008; // STATUS_INVALID_HANDLE
     }
-    handle->Reset();
+    evt->Reset();
     return 0;
 }
 
@@ -6251,13 +6290,34 @@ uint32_t NtResumeThread(uint32_t threadHandle, be<uint32_t>* suspendCount)
     return S_OK;
 }
 
-uint32_t NtSetEvent(Event* handle, uint32_t* previousState)
+uint32_t NtSetEvent(uint32_t Handle, uint32_t* previousState)
 {
-    if (!handle) {
-        LOGF_WARNING("[TRACE] NtSetEvent: null or invalid event handle");
+    Event* evt = nullptr;
+    if (IsValidKernelHandle(Handle))
+    {
+        evt = GetKernelObject<Event>(Handle);
+    }
+    else if (Handle >= 0x10000 && Handle <= 0xF0000000 && g_memory.base != nullptr)
+    {
+        XDISPATCHER_HEADER* header = reinterpret_cast<XDISPATCHER_HEADER*>(g_memory.Translate(Handle));
+        if (header->Type == 0 || header->Type == 1)
+        {
+            evt = QueryKernelObject<Event>(*header);
+        }
+    }
+    else if (Handle != 0 && Handle != 0xFFFFFFFF && g_memory.base != nullptr)
+    {
+        void* hostPtr = g_memory.Translate(Handle);
+        if (IsValidHostVtable(hostPtr))
+        {
+            evt = static_cast<Event*>(hostPtr);
+        }
+    }
+
+    if (!evt || !IsValidHostVtable(evt)) {
         return 0xC0000008; // STATUS_INVALID_HANDLE
     }
-    handle->Set();
+    evt->Set();
     return 0;
 }
 
@@ -6587,6 +6647,15 @@ uint32_t ExCreateThread(be<uint32_t>* handle, uint32_t stackSize, be<uint32_t>* 
     LOGF_WARNING("[ExCreateThread] Creating thread entry=0x{:08X} r3=0x{:08X} r4=0x{:08X} flags=0x{:X}", 
                  entry, r3, r4, creationFlags);
     GuestThreadHandle* thObj = GuestThread::Start({ entry, r3, r4, creationFlags }, &hostThreadId);
+    if (!thObj)
+    {
+        LOGF_ERROR("[ExCreateThread] Failed to create thread object (OOM)");
+        if (handle != nullptr)
+            *handle = 0;
+        if (threadId != nullptr)
+            *threadId = 0;
+        return 0xC0000017; // STATUS_NO_MEMORY
+    }
     if (handle != nullptr) {
         *handle = GetKernelHandle(thObj);
     }

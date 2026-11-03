@@ -87,7 +87,8 @@ void* Heap::AllocPhysical(size_t size, size_t alignment)
 void Heap::Free(void* ptr)
 {
     if (!ptr) return;
-    if (ptr >= physicalHeap)
+    void* physBase = g_memory.Translate(RESERVED_END);
+    if (ptr >= physBase)
     {
         std::lock_guard lock(physicalMutex);
         void* realPtr = *((void**)ptr - 1);
@@ -98,7 +99,7 @@ void Heap::Free(void* ptr)
             std::fprintf(stderr, "[Heap::Free physical] #%d caller=%p userPtr=%p realPtr=%p\n",
                          s_freePhysCount, __builtin_return_address(0), ptr, realPtr);
         }
-        if (realPtr < physicalHeap || (uintptr_t)realPtr >= (uintptr_t)physicalHeap + (0x100000000ULL - RESERVED_END) ||
+        if (realPtr < physBase || (uintptr_t)realPtr >= (uintptr_t)physBase + (0x100000000ULL - RESERVED_END) ||
             ((uintptr_t)realPtr & (O1HEAP_ALIGNMENT - 1)) != 0)
         {
             std::fprintf(stderr, "[Heap::Free physical] CORRUPTED/INVALID/DOUBLE-FREE realPtr=%p for userPtr=%p, SKIPPING free!\n",

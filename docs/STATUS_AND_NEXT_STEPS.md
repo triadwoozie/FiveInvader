@@ -57,9 +57,20 @@
    - Guarded object bounds in `ppc_recomp.15.cpp:sub_82360250` against `< 0x10000 || >= PPC_MEMORY_SIZE - 4`.
    - Added atomic refcount guards in `ppc_recomp.36.cpp` (`sub_82556BD0` and `sub_82556C70`) against sentinel or negative pointers (e.g. `r30 = 0xFFFFFFF5`), preventing invalid `lwarx` / atomic decrement wraps to `0x200000000`.
 
+14. **o1heap Metadata Isolation & Heap Corruption Resolution**:
+   - Discovered `o1heapInit` placed `O1HeapInstance` metadata directly at `g_memory.Translate(0xA0000000)`, where guest code writing to uncached RAM alias `0xA0000000` directly corrupted bin pointers (specifically `bins[23]`).
+   - Decoupled `O1HeapInstance` metadata from the allocation arena by storing `arena_base` inside the struct, allocating `O1HeapInstance` in host memory via `calloc(1, sizeof(O1HeapInstance))` in `thirdparty/o1heap/o1heap.c`, and updating `Heap::Free` in `FiveInvader/kernel/heap.cpp` to check against `g_memory.Translate(RESERVED_END)` (`0xA0000000`).
+
+15. **Vulkan Framebuffer Safety, Recomp Bounds Guards & 21-Thread Sustained Execution**:
+   - Guarded `checkActiveRenderPass()`, `drawInstanced`, `drawIndexedInstanced`, `clearColor`, and `clearDepthStencil` in `thirdparty/plume/plume_vulkan.cpp` against null `targetFramebuffer`, and added null framebuffer guards to `ProcDrawPrimitive*` in `FiveInvader/gpu/video.cpp`.
+   - Added OOM handling in `ExCreateThread` and null checks in `GuestThread::Start`.
+   - Hardened `sub_83349068` (`ppc_recomp.288.cpp`), `sub_827BE4C0` (`ppc_recomp.77.cpp`), and `sub_824C78C0` / `sub_824C77C4` (`ppc_recomp.28.cpp`) against out-of-bounds pointer reads and infinite cyclic walks, codified in `tools/patch_ppc_xml_switch.py`.
+   - Achieved 30s+ uninterrupted runtime in Test Pass 51 with 21 concurrent worker threads, 770 swapchain presents, and zero crashes.
+
 ## Next Steps
 
-1. Verify stability in Test Pass 37 with all switch dispatch tables and refcount guards compiled.
+1. Tune critical section spinlock contention on `cs=0x83878764` in `RtlEnterCriticalSection`.
 2. Advance through movie playback and Scaleform frontend initialization to active 3D/Scaleform draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).
+
 
 

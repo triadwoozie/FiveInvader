@@ -5537,6 +5537,9 @@ static void ProcDrawPrimitive(const RenderCommand& cmd)
 
     FlushRenderStateForRenderThread();
 
+    if (g_framebuffer == nullptr)
+        return;
+
     auto& commandList = g_commandLists[g_frame];
     commandList->drawInstanced(args.primitiveCount, 1, args.startVertex, 0);
     if (args.primitiveCount > 0)
@@ -5573,6 +5576,8 @@ static void ProcDrawIndexedPrimitive(const RenderCommand& cmd)
 
     SetPrimitiveType(args.primitiveType);
     FlushRenderStateForRenderThread();
+    if (g_framebuffer == nullptr)
+        return;
     g_commandLists[g_frame]->drawIndexedInstanced(args.primCount, 1, args.startIndex, args.baseVertexIndex, 0);
     if (args.primCount > 0)
         g_guestDrawCommandCount.fetch_add(1, std::memory_order_relaxed);
@@ -5625,6 +5630,9 @@ static void ProcDrawPrimitiveUP(const RenderCommand& cmd)
     }
 
     FlushRenderStateForRenderThread();
+
+    if (g_framebuffer == nullptr)
+        return;
 
     if (indexCount != 0)
         g_commandLists[g_frame]->drawIndexedInstanced(indexCount, 1, 0, 0, 0);

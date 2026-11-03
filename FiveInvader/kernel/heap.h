@@ -22,7 +22,8 @@ struct Heap
     T* Alloc(Args&&... args)
     {
         T* obj = (T*)Alloc(sizeof(T));
-        new (obj) T(std::forward<Args>(args)...);
+        if (obj)
+            new (obj) T(std::forward<Args>(args)...);
         return obj;
     }
 
@@ -30,7 +31,8 @@ struct Heap
     T* AllocPhysical(Args&&... args)
     {
         T* obj = (T*)AllocPhysical(sizeof(T), alignof(T));
-        new (obj) T(std::forward<Args>(args)...);
+        if (obj)
+            new (obj) T(std::forward<Args>(args)...);
         return obj;
     }
 };
