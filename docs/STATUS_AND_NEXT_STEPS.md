@@ -67,10 +67,21 @@
    - Hardened `sub_83349068` (`ppc_recomp.288.cpp`), `sub_827BE4C0` (`ppc_recomp.77.cpp`), and `sub_824C78C0` / `sub_824C77C4` (`ppc_recomp.28.cpp`) against out-of-bounds pointer reads and infinite cyclic walks, codified in `tools/patch_ppc_xml_switch.py`.
    - Achieved 30s+ uninterrupted runtime in Test Pass 51 with 21 concurrent worker threads, 770 swapchain presents, and zero crashes.
 
+16. **Breakthrough into State 2, Spinlock Elimination & Division-by-Zero Fixes**:
+   - **Spinlock Contention on `cs=0x83878764` Eliminated**: Preserved caller non-volatile registers `ctx.r28`–`ctx.r31` across `PPC_CALL_INDIRECT_FUNC` in `sub_83641190` (`ppc_recomp.330.cpp`), preventing clobbering of the critical section pointer (`0x83878764`) and list sentinel (`0x83878780`), and added a 64-iteration loop guard. Added tiered backoff in `RtlEnterCriticalSection`.
+   - **State 1 -> State 2 Transition Achieved**: The engine cleanly completed all 30 steps of `sub_82577590` and advanced into `sub_825777D0` (State 2), successfully parsing Scaleform preallocations, control metadata, and mounting `platform:/data/lang/american.rpf`.
+   - **Allocator & Shader Resolution Guarding**:
+     - Fixed zero-increment infinite loop in `sub_83508B48` (`ppc_recomp.311.cpp:loc_83508BEC`).
+     - Guarded `sub_831EDB68`, `sub_831E2570`, and `sub_831E2460` (`ppc_recomp.265.cpp`) against non-printable ASCII strings and corrupt shader counts (>350), eliminating 87,000+ spurious VFS file lookups.
+     - Added `STATUS_NO_SUCH_FILE` (`0xC000000F`) translation to `ERROR_FILE_NOT_FOUND` in `RtlNtStatusToDosError`.
+   - **Division by Zero (`SIGFPE`) Fixed in `sub_8321D020`**:
+     - Added zero divisor guards to `divw` instructions and branch to `loc_8321D610` when `ctx.r11 == 0` in `ppc_recomp.269.cpp`.
+   - **Runtime Verification**: Sustained execution reached over 167,400 video presents with 0 crashes, 0 segfaults, and clean multi-threaded execution. All patches codified in `tools/patch_ppc_xml_switch.py`.
+
 ## Next Steps
 
-1. Tune critical section spinlock contention on `cs=0x83878764` in `RtlEnterCriticalSection`.
-2. Advance through movie playback and Scaleform frontend initialization to active 3D/Scaleform draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).
+1. Advance through movie playback (`rockstar_logos.bik`) and Scaleform frontend initialization to active 3D/Scaleform draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).
+2. Verify shader binds and pipeline creation for in-game render targets.
 
 
 

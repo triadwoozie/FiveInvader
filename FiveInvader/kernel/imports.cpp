@@ -2564,7 +2564,7 @@ uint32_t NtCreateFile
     const uint32_t createTraceCount =
         s_createTraceCount.fetch_add(1, std::memory_order_relaxed) + 1;
     if (createTraceCount <= 300)
-        LOGF_INFO("[NtCreateFile] guest path #{}: '{}'", createTraceCount, guestPath);
+        LOGF_INFO("[NtCreateFile] guest path #{}: '{}' (caller LR=0x{:08X})", createTraceCount, guestPath, GET_CALLER_LR());
 
     // === PHASE 2: Storage Init File Tracing ===
     static int s_storageInitFileCount = 0;
@@ -3612,6 +3612,8 @@ uint32_t RtlNtStatusToDosError(uint32_t Status)
 
     switch (Status)
     {
+    case 0xC000000F: // STATUS_NO_SUCH_FILE
+        return ERROR_FILE_NOT_FOUND;
     case uint32_t(STATUS_NOT_IMPLEMENTED):
         return ERROR_CALL_NOT_IMPLEMENTED;
     case uint32_t(STATUS_SEMAPHORE_LIMIT_EXCEEDED):
@@ -4646,6 +4648,18 @@ void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
     if (guestAddr < 0x10000000)
         return;
 
+    if (guestAddr == 0x83878764)
+    {
+        static uint32_t s_cs8387LeaveCount = 0;
+        if (++s_cs8387LeaveCount <= 20 || s_cs8387LeaveCount % 100 == 0)
+        {
+            LOGF_INFO("[LOCK 0x83878764] LEAVE #{} by thread=0x{:08X} (newRecCount={})",
+                      s_cs8387LeaveCount,
+                      (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1,
+                      cs->RecursionCount.get() - 1);
+        }
+    }
+
     cs->RecursionCount = cs->RecursionCount.get() - 1;
 
     if (cs->RecursionCount.get() != 0)
@@ -4679,6 +4693,16 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 
     be<uint32_t> thisThread =
         (g_ppcContext && g_ppcContext->r13.u32 != 0) ? g_ppcContext->r13.u32 : 1;
+
+    if (guestAddr == 0x83878764)
+    {
+        static uint32_t s_cs8387EnterCount = 0;
+        if (++s_cs8387EnterCount <= 20 || s_cs8387EnterCount % 100 == 0)
+        {
+            LOGF_INFO("[LOCK 0x83878764] ENTER #{} by thread=0x{:08X} (recCount={})",
+                      s_cs8387EnterCount, thisThread.get(), cs->RecursionCount.get());
+        }
+    }
 
     std::atomic_ref owningThread(cs->OwningThread);
 
@@ -4716,8 +4740,10 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
 
         if (loopCount < 50)
             std::this_thread::yield();
-        else
+        else if (loopCount < 1000)
             std::this_thread::sleep_for(std::chrono::microseconds(50));
+        else
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 

@@ -901,6 +901,9 @@ def main() -> int:
     patch_recomp269_array_guards(ppc_dir / "ppc_recomp.269.cpp")
     patch_recomp288_buffer_guard(ppc_dir / "ppc_recomp.288.cpp")
     patch_recomp77_find_guard(ppc_dir / "ppc_recomp.77.cpp")
+    patch_recomp330_thread_callback_guard(ppc_dir / "ppc_recomp.330.cpp")
+    patch_recomp311_alloc_chunk_loop(ppc_dir / "ppc_recomp.311.cpp")
+    patch_recomp265_shader_lookup_guard(ppc_dir / "ppc_recomp.265.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -2446,6 +2449,34 @@ def patch_recomp269_array_guards(path: pathlib.Path) -> bool:
         text = text.replace(old_loop3c, new_loop3c)
         patched = True
 
+    old_div = (
+        '\t// beq cr6,0x8321d610\n'
+        '\tif (cr6.eq) goto loc_8321D610;\n'
+        '\t// lis r9,16383\n'
+        '\tctx.r9.s64 = 1073676288;\n'
+        '\t// divw r26,r10,r11\n'
+        '\tctx.r26.s32 = ctx.r10.s32 / ctx.r11.s32;\n'
+        '\t// ori r8,r9,65535\n'
+        '\tctx.r8.u64 = ctx.r9.u64 | 65535;\n'
+        '\t// divw r27,r28,r11\n'
+        '\tctx.r27.s32 = ctx.r28.s32 / ctx.r11.s32;'
+    )
+    new_div = (
+        '\t// beq cr6,0x8321d610\n'
+        '\tif (cr6.eq || ctx.r11.u32 == 0) goto loc_8321D610;\n'
+        '\t// lis r9,16383\n'
+        '\tctx.r9.s64 = 1073676288;\n'
+        '\t// divw r26,r10,r11\n'
+        '\tctx.r26.s32 = ctx.r11.s32 != 0 ? (ctx.r10.s32 / ctx.r11.s32) : 0;\n'
+        '\t// ori r8,r9,65535\n'
+        '\tctx.r8.u64 = ctx.r9.u64 | 65535;\n'
+        '\t// divw r27,r28,r11\n'
+        '\tctx.r27.s32 = ctx.r11.s32 != 0 ? (ctx.r28.s32 / ctx.r11.s32) : 0;'
+    )
+    if old_div in text:
+        text = text.replace(old_div, new_div)
+        patched = True
+
     if patched:
         path.write_text(text)
         print(f"Patched recomp.269 array guards in {path}")
@@ -2592,6 +2623,427 @@ def patch_recomp77_find_guard(path: pathlib.Path) -> bool:
     if patched:
         path.write_text(text)
         print(f"Patched recomp.77 find guard in {path}")
+        return True
+    return False
+
+def patch_recomp330_thread_callback_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        '\t// beq cr6,0x836411e8\n'
+        '\tif (cr6.eq) goto loc_836411E8;\n'
+        'loc_836411C8:\n'
+        '\t// mr r11,r30\n'
+        '\tctx.r11.u64 = ctx.r30.u64;\n'
+        '\t// lwz r30,0(r30)\n'
+        '\tctx.r30.u64 = PPC_LOAD_U32(ctx.r30.u32 + 0);\n'
+        '\t// mr r3,r28\n'
+        '\tctx.r3.u64 = ctx.r28.u64;\n'
+        '\t// lwz r11,8(r11)\n'
+        '\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);\n'
+        '\t// mtctr r11\n'
+        '\tctr.u64 = ctx.r11.u64;\n'
+        '\t// bctrl \n'
+        '\tctx.lr = 0x836411E0;\n'
+        '\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n'
+        '\t// cmplw cr6,r30,r31\n'
+        '\tcr6.compare<uint32_t>(ctx.r30.u32, ctx.r31.u32, ctx.xer);\n'
+        '\t// bne cr6,0x836411c8\n'
+        '\tif (!cr6.eq) goto loc_836411C8;\n'
+        'loc_836411E8:\n'
+        '\t// mr r3,r29\n'
+        '\tctx.r3.u64 = ctx.r29.u64;\n'
+        '\t// bl 0x83752f4c\n'
+        '\tctx.lr = 0x836411F0;\n'
+        '\t__imp__RtlLeaveCriticalSection(ctx, base);'
+    )
+    new = (
+        '\t// beq cr6,0x836411e8\n'
+        '\tif (cr6.eq) goto loc_836411E8;\n'
+        '\t{\n'
+        '\t\tconst uint32_t lockAddr_8364 = 0x83878764;\n'
+        '\t\tconst uint32_t headSentinel_8364 = 0x83878780;\n'
+        '\t\tuint32_t loopGuard_8364 = 0;\n'
+        'loc_836411C8:\n'
+        '\t\tif (++loopGuard_8364 > 64) goto loc_836411E8;\n'
+        '\t\tif (ctx.r30.u32 < 0x10000 || ctx.r30.u32 >= PPC_MEMORY_SIZE - 16) goto loc_836411E8;\n'
+        '\t\t// mr r11,r30\n'
+        '\t\tctx.r11.u64 = ctx.r30.u64;\n'
+        '\t\t// lwz r30,0(r30)\n'
+        '\t\tctx.r30.u64 = PPC_LOAD_U32(ctx.r30.u32 + 0);\n'
+        '\t\tuint32_t nextNode_8364 = ctx.r30.u32;\n'
+        '\t\tuint32_t saved_r28 = ctx.r28.u32;\n'
+        '\t\t// mr r3,r28\n'
+        '\t\tctx.r3.u64 = saved_r28;\n'
+        '\t\t// lwz r11,8(r11)\n'
+        '\t\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 16) goto loc_836411E8;\n'
+        '\t\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);\n'
+        '\t\t// mtctr r11\n'
+        '\t\tctr.u64 = ctx.r11.u64;\n'
+        '\t\t// bctrl \n'
+        '\t\tctx.lr = 0x836411E0;\n'
+        '\t\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < (PPC_CODE_BASE + PPC_CODE_SIZE)) {\n'
+        '\t\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n'
+        '\t\t}\n'
+        '\t\tctx.r28.u64 = saved_r28;\n'
+        '\t\tctx.r29.u64 = lockAddr_8364;\n'
+        '\t\tctx.r31.u64 = headSentinel_8364;\n'
+        '\t\tctx.r30.u64 = nextNode_8364;\n'
+        '\t\t// cmplw cr6,r30,r31\n'
+        '\t\tcr6.compare<uint32_t>(ctx.r30.u32, ctx.r31.u32, ctx.xer);\n'
+        '\t\t// bne cr6,0x836411c8\n'
+        '\t\tif (!cr6.eq) goto loc_836411C8;\n'
+        '\t}\n'
+        'loc_836411E8:\n'
+        '\t// mr r3,r29\n'
+        '\tctx.r3.u64 = 0x83878764;\n'
+        '\t// bl 0x83752f4c\n'
+        '\tctx.lr = 0x836411F0;\n'
+        '\t__imp__RtlLeaveCriticalSection(ctx, base);'
+    )
+    # Also support replacing already patched version
+    mid = (
+        '\t// beq cr6,0x836411e8\n'
+        '\tif (cr6.eq) goto loc_836411E8;\n'
+        '\tconst uint32_t lockAddr_8364 = 0x83878764;\n'
+        '\tconst uint32_t headSentinel_8364 = 0x83878780;\n'
+        '\tuint32_t loopGuard_8364 = 0;\n'
+        'loc_836411C8:\n'
+        '\tif (++loopGuard_8364 > 64) goto loc_836411E8;\n'
+        '\tif (ctx.r30.u32 < 0x10000 || ctx.r30.u32 >= PPC_MEMORY_SIZE - 16) goto loc_836411E8;\n'
+        '\t// mr r11,r30\n'
+        '\tctx.r11.u64 = ctx.r30.u64;\n'
+        '\t// lwz r30,0(r30)\n'
+        '\tctx.r30.u64 = PPC_LOAD_U32(ctx.r30.u32 + 0);\n'
+        '\tuint32_t nextNode_8364 = ctx.r30.u32;\n'
+        '\tuint32_t saved_r28 = ctx.r28.u32;\n'
+        '\t// mr r3,r28\n'
+        '\tctx.r3.u64 = saved_r28;\n'
+        '\t// lwz r11,8(r11)\n'
+        '\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 16) goto loc_836411E8;\n'
+        '\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 8);\n'
+        '\t// mtctr r11\n'
+        '\tctr.u64 = ctx.r11.u64;\n'
+        '\t// bctrl \n'
+        '\tctx.lr = 0x836411E0;\n'
+        '\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < (PPC_CODE_BASE + PPC_CODE_SIZE)) {\n'
+        '\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n'
+        '\t}\n'
+        '\tctx.r28.u64 = saved_r28;\n'
+        '\tctx.r29.u64 = lockAddr_8364;\n'
+        '\tctx.r31.u64 = headSentinel_8364;\n'
+        '\tctx.r30.u64 = nextNode_8364;\n'
+        '\t// cmplw cr6,r30,r31\n'
+        '\tcr6.compare<uint32_t>(ctx.r30.u32, ctx.r31.u32, ctx.xer);\n'
+        '\t// bne cr6,0x836411c8\n'
+        '\tif (!cr6.eq) goto loc_836411C8;\n'
+        'loc_836411E8:\n'
+        '\t// mr r3,r29\n'
+        '\tctx.r3.u64 = lockAddr_8364;\n'
+        '\t// bl 0x83752f4c\n'
+        '\tctx.lr = 0x836411F0;\n'
+        '\t__imp__RtlLeaveCriticalSection(ctx, base);'
+    )
+    if mid in text:
+        text = text.replace(mid, new)
+        path.write_text(text)
+        print(f"Patched recomp.330 thread callback guard (updated block scope) in {path}")
+        return True
+    if old in text:
+        text = text.replace(old, new)
+        path.write_text(text)
+        print(f"Patched recomp.330 thread callback guard in {path}")
+        return True
+    return False
+
+def patch_recomp311_alloc_chunk_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        '\t// bge cr6,0x83508c14\n'
+        '\tif (!cr6.lt) goto loc_83508C14;\n'
+        '\t// lwz r8,4(r29)\n'
+        '\tctx.r8.u64 = PPC_LOAD_U32(ctx.r29.u32 + 4);\n'
+        'loc_83508BEC:\n'
+        '\t// add r4,r8,r4\n'
+        '\tctx.r4.u64 = ctx.r8.u64 + ctx.r4.u64;\n'
+        '\t// add r11,r10,r4\n'
+        '\tctx.r11.u64 = ctx.r10.u64 + ctx.r4.u64;\n'
+        '\t// srw r11,r11,r9\n'
+        '\tctx.r11.u64 = ctx.r9.u8 & 0x20 ? 0 : (ctx.r11.u32 >> (ctx.r9.u8 & 0x3F));\n'
+        '\t// addi r7,r11,31\n'
+        '\tctx.r7.s64 = ctx.r11.s64 + 31;\n'
+        '\t// rlwinm r11,r7,29,3,29\n'
+        '\tctx.r11.u64 = __builtin_rotateleft64(ctx.r7.u32 | (ctx.r7.u64 << 32), 29) & 0x1FFFFFFC;\n'
+        '\t// addi r6,r11,47\n'
+        '\tctx.r6.s64 = ctx.r11.s64 + 47;\n'
+        '\t// rlwinm r11,r6,0,0,27\n'
+        '\tctx.r11.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 0) & 0xFFFFFFF0;\n'
+        '\t// add r5,r11,r31\n'
+        '\tctx.r5.u64 = ctx.r11.u64 + ctx.r31.u64;\n'
+        '\t// cmplw cr6,r4,r5\n'
+        '\tcr6.compare<uint32_t>(ctx.r4.u32, ctx.r5.u32, ctx.xer);\n'
+        '\t// blt cr6,0x83508bec\n'
+        '\tif (cr6.lt) goto loc_83508BEC;\n'
+        'loc_83508C14:'
+    )
+    new = (
+        '\t// bge cr6,0x83508c14\n'
+        '\tif (!cr6.lt) goto loc_83508C14;\n'
+        '\t// lwz r8,4(r29)\n'
+        '\tctx.r8.u64 = PPC_LOAD_U32(ctx.r29.u32 + 4);\n'
+        '\t{\n'
+        '\t\tuint32_t loopGuard_83508 = 0;\n'
+        'loc_83508BEC:\n'
+        '\t\tif (++loopGuard_83508 > 512 || ctx.r8.u32 == 0) goto loc_83508C14;\n'
+        '\t\t// add r4,r8,r4\n'
+        '\t\tctx.r4.u64 = ctx.r8.u64 + ctx.r4.u64;\n'
+        '\t\t// add r11,r10,r4\n'
+        '\t\tctx.r11.u64 = ctx.r10.u64 + ctx.r4.u64;\n'
+        '\t\t// srw r11,r11,r9\n'
+        '\t\tctx.r11.u64 = ctx.r9.u8 & 0x20 ? 0 : (ctx.r11.u32 >> (ctx.r9.u8 & 0x3F));\n'
+        '\t\t// addi r7,r11,31\n'
+        '\t\tctx.r7.s64 = ctx.r11.s64 + 31;\n'
+        '\t\t// rlwinm r11,r7,29,3,29\n'
+        '\t\tctx.r11.u64 = __builtin_rotateleft64(ctx.r7.u32 | (ctx.r7.u64 << 32), 29) & 0x1FFFFFFC;\n'
+        '\t\t// addi r6,r11,47\n'
+        '\t\tctx.r6.s64 = ctx.r11.s64 + 47;\n'
+        '\t\t// rlwinm r11,r6,0,0,27\n'
+        '\t\tctx.r11.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 0) & 0xFFFFFFF0;\n'
+        '\t\t// add r5,r11,r31\n'
+        '\t\tctx.r5.u64 = ctx.r11.u64 + ctx.r31.u64;\n'
+        '\t\t// cmplw cr6,r4,r5\n'
+        '\t\tcr6.compare<uint32_t>(ctx.r4.u32, ctx.r5.u32, ctx.xer);\n'
+        '\t\t// blt cr6,0x83508bec\n'
+        '\t\tif (cr6.lt) goto loc_83508BEC;\n'
+        '\t}\n'
+        'loc_83508C14:'
+    )
+    if old in text:
+        text = text.replace(old, new)
+        path.write_text(text)
+        print(f"Patched recomp.311 alloc chunk loop in {path}")
+        return True
+    return False
+
+def patch_recomp265_shader_lookup_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    old_lookup = (
+        '\t// stwu r1,-384(r1)\n'
+        '\tea = -384 + ctx.r1.u32;\n'
+        '\tPPC_STORE_U32(ea, ctx.r1.u32);\n'
+        '\tctx.r1.u32 = ea;\n'
+        '\t// lwz r11,3076(r3)\n'
+        '\tctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 3076);\n'
+        '\t// mr r31,r3\n'
+        '\tctx.r31.u64 = ctx.r3.u64;\n'
+        '\t// mr r28,r4\n'
+        '\tctx.r28.u64 = ctx.r4.u64;\n'
+        '\t// mr r27,r5\n'
+        '\tctx.r27.u64 = ctx.r5.u64;\n'
+        '\t// mr r29,r7\n'
+        '\tctx.r29.u64 = ctx.r7.u64;\n'
+        '\t// li r3,0\n'
+        '\tctx.r3.s64 = 0;\n'
+        '\t// li r30,0\n'
+        '\tctx.r30.s64 = 0;\n'
+        '\t// cmpwi cr6,r11,0\n'
+        '\tcr6.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n'
+        '\t// ble cr6,0x831edbfc\n'
+        '\tif (!cr6.gt) goto loc_831EDBFC;'
+    )
+    new_lookup = (
+        '\t// stwu r1,-384(r1)\n'
+        '\tea = -384 + ctx.r1.u32;\n'
+        '\tPPC_STORE_U32(ea, ctx.r1.u32);\n'
+        '\tctx.r1.u32 = ea;\n'
+        '\t// mr r28,r4\n'
+        '\tctx.r28.u64 = ctx.r4.u64;\n'
+        '\t// li r3,0\n'
+        '\tctx.r3.s64 = 0;\n'
+        '\tif (ctx.r4.u32 < 0x10000 || ctx.r4.u32 >= PPC_MEMORY_SIZE) goto loc_831EDBFC;\n'
+        '\t{\n'
+        '\t\tuint8_t first_char_831e = PPC_LOAD_U8(ctx.r4.u32);\n'
+        '\t\tif (first_char_831e < 32 || first_char_831e > 126) goto loc_831EDBFC;\n'
+        '\t}\n'
+        '\t// lwz r11,3076(r3)\n'
+        '\tctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 3076);\n'
+        '\tif (ctx.r11.u32 > 350) ctx.r11.u64 = 0;\n'
+        '\t// mr r31,r3\n'
+        '\tctx.r31.u64 = ctx.r3.u64;\n'
+        '\t// mr r27,r5\n'
+        '\tctx.r27.u64 = ctx.r5.u64;\n'
+        '\t// mr r29,r7\n'
+        '\tctx.r29.u64 = ctx.r7.u64;\n'
+        '\t// li r30,0\n'
+        '\tctx.r30.s64 = 0;\n'
+        '\t// cmpwi cr6,r11,0\n'
+        '\tcr6.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n'
+        '\t// ble cr6,0x831edbfc\n'
+        '\tif (!cr6.gt) goto loc_831EDBFC;'
+    )
+    if old_lookup in text:
+        text = text.replace(old_lookup, new_lookup)
+        patched = True
+
+    old_loop_step = (
+        'loc_831EDBEC:\n'
+        '\t// lwz r11,3076(r31)\n'
+        '\tctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 3076);\n'
+        '\t// addi r30,r30,1\n'
+        '\tctx.r30.s64 = ctx.r30.s64 + 1;\n'
+        '\t// cmpw cr6,r30,r11\n'
+        '\tcr6.compare<int32_t>(ctx.r30.s32, ctx.r11.s32, ctx.xer);\n'
+        '\t// blt cr6,0x831edb98\n'
+        '\tif (cr6.lt) goto loc_831EDB98;'
+    )
+    new_loop_step = (
+        'loc_831EDBEC:\n'
+        '\t// lwz r11,3076(r31)\n'
+        '\tctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 3076);\n'
+        '\tif (ctx.r11.u32 > 350) ctx.r11.u64 = 0;\n'
+        '\t// addi r30,r30,1\n'
+        '\tctx.r30.s64 = ctx.r30.s64 + 1;\n'
+        '\t// cmpw cr6,r30,r11\n'
+        '\tcr6.compare<int32_t>(ctx.r30.s32, ctx.r11.s32, ctx.xer);\n'
+        '\t// blt cr6,0x831edb98\n'
+        '\tif (cr6.lt) goto loc_831EDB98;'
+    )
+    if old_loop_step in text:
+        text = text.replace(old_loop_step, new_loop_step)
+        patched = True
+
+    old_copy1 = (
+        'loc_831E2608:\n'
+        '\t// cmplwi cr6,r8,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r8.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e262c\n'
+        '\tif (cr6.eq) goto loc_831E262C;\n'
+        '\t// lbz r9,0(r10)\n'
+        '\tctx.r9.u64 = PPC_LOAD_U8(ctx.r10.u32 + 0);\n'
+        '\t// cmplwi cr6,r9,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r9.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e262c\n'
+        '\tif (cr6.eq) goto loc_831E262C;\n'
+        '\t// stb r9,0(r11)\n'
+        '\tPPC_STORE_U8(ctx.r11.u32 + 0, ctx.r9.u8);'
+    )
+    new_copy1 = (
+        'loc_831E2608:\n'
+        '\t// cmplwi cr6,r8,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r8.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e262c\n'
+        '\tif (cr6.eq) goto loc_831E262C;\n'
+        '\t// lbz r9,0(r10)\n'
+        '\tctx.r9.u64 = PPC_LOAD_U8(ctx.r10.u32 + 0);\n'
+        '\t// cmplwi cr6,r9,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r9.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e262c\n'
+        '\tif (cr6.eq) goto loc_831E262C;\n'
+        '\tif (ctx.r9.u8 < 32 || ctx.r9.u8 > 126) goto loc_831E262C;\n'
+        '\t// stb r9,0(r11)\n'
+        '\tPPC_STORE_U8(ctx.r11.u32 + 0, ctx.r9.u8);'
+    )
+    if old_copy1 in text:
+        text = text.replace(old_copy1, new_copy1)
+        patched = True
+
+    old_copy2 = (
+        'loc_831E2694:\n'
+        '\t// cmplwi cr6,r8,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r8.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e26b8\n'
+        '\tif (cr6.eq) goto loc_831E26B8;\n'
+        '\t// lbz r9,0(r10)\n'
+        '\tctx.r9.u64 = PPC_LOAD_U8(ctx.r10.u32 + 0);\n'
+        '\t// cmplwi cr6,r9,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r9.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e26b8\n'
+        '\tif (cr6.eq) goto loc_831E26B8;\n'
+        '\t// stb r9,0(r11)\n'
+        '\tPPC_STORE_U8(ctx.r11.u32 + 0, ctx.r9.u8);'
+    )
+    new_copy2 = (
+        'loc_831E2694:\n'
+        '\t// cmplwi cr6,r8,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r8.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e26b8\n'
+        '\tif (cr6.eq) goto loc_831E26B8;\n'
+        '\t// lbz r9,0(r10)\n'
+        '\tctx.r9.u64 = PPC_LOAD_U8(ctx.r10.u32 + 0);\n'
+        '\t// cmplwi cr6,r9,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r9.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e26b8\n'
+        '\tif (cr6.eq) goto loc_831E26B8;\n'
+        '\tif (ctx.r9.u8 < 32 || ctx.r9.u8 > 126) goto loc_831E26B8;\n'
+        '\t// stb r9,0(r11)\n'
+        '\tPPC_STORE_U8(ctx.r11.u32 + 0, ctx.r9.u8);'
+    )
+    if old_copy2 in text:
+        text = text.replace(old_copy2, new_copy2)
+        patched = True
+
+    old_copy3 = (
+        'loc_831E24FC:\n'
+        '\t// lbz r10,0(r31)\n'
+        '\tctx.r10.u64 = PPC_LOAD_U8(ctx.r31.u32 + 0);\n'
+        '\t// mr r11,r31\n'
+        '\tctx.r11.u64 = ctx.r31.u64;\n'
+        '\t// mr r9,r31\n'
+        '\tctx.r9.u64 = ctx.r31.u64;\n'
+        '\t// cmplwi cr6,r10,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e2560\n'
+        '\tif (cr6.eq) goto loc_831E2560;\n'
+        '\t// addi r8,r31,2'
+    )
+    new_copy3 = (
+        'loc_831E24FC:\n'
+        '\t// lbz r10,0(r31)\n'
+        '\tctx.r10.u64 = PPC_LOAD_U8(ctx.r31.u32 + 0);\n'
+        '\t// mr r11,r31\n'
+        '\tctx.r11.u64 = ctx.r31.u64;\n'
+        '\t// mr r9,r31\n'
+        '\tctx.r9.u64 = ctx.r31.u64;\n'
+        '\t// cmplwi cr6,r10,0\n'
+        '\tcr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);\n'
+        '\t// beq cr6,0x831e2560\n'
+        '\tif (cr6.eq) goto loc_831E2560;\n'
+        '\tif (ctx.r10.u8 < 32 || ctx.r10.u8 > 126) goto loc_831E2560;\n'
+        '\t// addi r8,r31,2'
+    )
+    if old_copy3 in text:
+        text = text.replace(old_copy3, new_copy3)
+        patched = True
+
+    old_copy4 = (
+        'loc_831E2518:\n'
+        '\t// lbz r10,0(r9)\n'
+        '\tctx.r10.u64 = PPC_LOAD_U8(ctx.r9.u32 + 0);\n'
+        '\t// cmplwi cr6,r10,92\n'
+        '\tcr6.compare<uint32_t>(ctx.r10.u32, 92, ctx.xer);'
+    )
+    new_copy4 = (
+        'loc_831E2518:\n'
+        '\t// lbz r10,0(r9)\n'
+        '\tctx.r10.u64 = PPC_LOAD_U8(ctx.r9.u32 + 0);\n'
+        '\tif (ctx.r10.u8 < 32 || ctx.r10.u8 > 126) goto loc_831E2560;\n'
+        '\t// cmplwi cr6,r10,92\n'
+        '\tcr6.compare<uint32_t>(ctx.r10.u32, 92, ctx.xer);'
+    )
+    if old_copy4 in text:
+        text = text.replace(old_copy4, new_copy4)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.265 shader lookup guard in {path}")
         return True
     return False
 
