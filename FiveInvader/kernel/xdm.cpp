@@ -52,6 +52,10 @@ void DestroyKernelObject(uint32_t handle)
 
 bool IsKernelObject(uint32_t handle)
 {
+    if (handle == 0 || handle == GUEST_INVALID_HANDLE_VALUE || handle >= 0xFFFFFFF0u)
+    {
+        return false;
+    }
     return (handle & 0x80000000) != 0;
 }
 

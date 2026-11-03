@@ -26,11 +26,13 @@
 // =============================================================================
 
 // Thread context sizes
+constexpr size_t X360_PREFIX_GUARD_SIZE = 0x1000; // 4KB guard against negative-offset TLS/PCR accesses
 constexpr size_t X360_PCR_SIZE   = 0xAB0;   // Processor Control Region
 constexpr size_t X360_TLS_SIZE   = 0x100;   // Thread Local Storage slots
 constexpr size_t X360_TEB_SIZE   = 0x2E0;   // Thread Environment Block
 constexpr size_t X360_STACK_SIZE = 0x80000; // 512KB stack per thread
-constexpr size_t X360_THREAD_CONTEXT_TOTAL = X360_PCR_SIZE + X360_TLS_SIZE + X360_TEB_SIZE + X360_STACK_SIZE;
+constexpr size_t X360_POSTFIX_GUARD_SIZE = 0x1000; // 4KB guard at top of stack
+constexpr size_t X360_THREAD_CONTEXT_TOTAL = X360_PREFIX_GUARD_SIZE + X360_PCR_SIZE + X360_TLS_SIZE + X360_TEB_SIZE + X360_STACK_SIZE + X360_POSTFIX_GUARD_SIZE;
 
 // Computed offsets
 constexpr size_t X360_TLS_OFFSET = X360_PCR_SIZE;

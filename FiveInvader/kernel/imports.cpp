@@ -4762,9 +4762,10 @@ void RtlFillMemoryUlong()
     LOG_UTILITY("!!! STUB !!!");
 }
 
-void KeBugCheckEx()
+void KeBugCheckEx(uint32_t bugCheckCode, uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4)
 {
-    __builtin_debugtrap();
+    LOGF_ERROR("[KeBugCheckEx] code=0x{:08X} ({}) p1=0x{:08X} p2=0x{:08X} p3=0x{:08X} p4=0x{:08X}", 
+               bugCheckCode, bugCheckCode, p1, p2, p3, p4);
 }
 
 uint32_t KeGetCurrentProcessType()
@@ -5818,9 +5819,9 @@ void VdEnableDisableClockGating()
     LOG_UTILITY("!!! STUB !!!");
 }
 
-void KeBugCheck()
+void KeBugCheck(uint32_t bugCheckCode)
 {
-    __builtin_debugtrap();
+    LOGF_ERROR("[KeBugCheck] code=0x{:08X} ({})", bugCheckCode, bugCheckCode);
 }
 
 void KeLockL2()
@@ -7216,7 +7217,10 @@ void XamFree(void* buffer)
 uint32_t NtSetTimerEx(uint32_t timerHandle, void* dueTime, void* apcRoutine, void* apcContext, uint32_t resume, uint32_t period, void* previousState)
 {
     LOGF_INFO("[TRACE] NtSetTimerEx: timerHandle=0x{:08X} period={}", timerHandle, period);
-    if (IsKernelObject(timerHandle)) {
+    if (timerHandle == 0 || timerHandle == GUEST_INVALID_HANDLE_VALUE || timerHandle >= 0xFFFFFFF0u) {
+        return 0xC0000008; // STATUS_INVALID_HANDLE
+    }
+    if (IsValidKernelHandle(timerHandle)) {
         Event* evt = GetKernelObject<Event>(timerHandle);
         if (evt) {
             evt->Set();
@@ -7228,7 +7232,10 @@ uint32_t NtSetTimerEx(uint32_t timerHandle, void* dueTime, void* apcRoutine, voi
 uint32_t NtCancelTimer(uint32_t timerHandle, uint32_t* currentState)
 {
     LOGF_INFO("[TRACE] NtCancelTimer: timerHandle=0x{:08X}", timerHandle);
-    if (IsKernelObject(timerHandle)) {
+    if (timerHandle == 0 || timerHandle == GUEST_INVALID_HANDLE_VALUE || timerHandle >= 0xFFFFFFF0u) {
+        return 0xC0000008; // STATUS_INVALID_HANDLE
+    }
+    if (IsValidKernelHandle(timerHandle)) {
         Event* evt = GetKernelObject<Event>(timerHandle);
         if (evt) {
             evt->Reset();
@@ -7275,7 +7282,10 @@ uint32_t NtReleaseMutant(uint32_t mutantHandle, uint32_t* previousCount)
     if (previousCount) {
         *previousCount = 1;
     }
-    if (IsKernelObject(mutantHandle)) {
+    if (mutantHandle == 0 || mutantHandle == GUEST_INVALID_HANDLE_VALUE || mutantHandle >= 0xFFFFFFF0u) {
+        return 0xC0000008; // STATUS_INVALID_HANDLE
+    }
+    if (IsValidKernelHandle(mutantHandle)) {
         Event* evt = GetKernelObject<Event>(mutantHandle);
         if (evt) {
             evt->Set();

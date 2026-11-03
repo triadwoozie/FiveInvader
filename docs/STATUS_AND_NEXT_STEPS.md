@@ -78,6 +78,13 @@
      - Added zero divisor guards to `divw` instructions and branch to `loc_8321D610` when `ctx.r11 == 0` in `ppc_recomp.269.cpp`.
    - **Runtime Verification**: Sustained execution reached over 167,400 video presents with 0 crashes, 0 segfaults, and clean multi-threaded execution. All patches codified in `tools/patch_ppc_xml_switch.py`.
 
+17. **Assert Traps Bypassed, Handle Validation & Thread Context Guard Zones**:
+   - **`KeBugCheck(245)` assert trap bypassed**: Replaced `__builtin_debugtrap()` in `KeBugCheck` with `LOGF_ERROR` logging; traced the crash to `sub_823BAAC8` (`ppc_recomp.18.cpp`) where D3D command buffer nesting counter was 0, and patched both call sites to branch directly to safe continuation label `loc_823BADC4`.
+   - **Worker thread queue validation (`sub_836BEEA0`, `sub_836BEBE0`, `sub_8238BD58`)**: Guarded work queue pointers in `ppc_recomp.338.cpp` and `ppc_recomp.17.cpp` against sentinel `0xFFFFFFFF` and out-of-bounds addresses, gracefully terminating queue processing loops. Codified in `tools/patch_ppc_xml_switch.py`.
+   - **Kernel object handle validation**: Hardened `IsKernelObject` in `FiveInvader/kernel/xdm.cpp` and `NtReleaseMutant`, `NtSetTimerEx`, `NtCancelTimer` in `FiveInvader/kernel/imports.cpp` to reject `0`, `0xFFFFFFFF` (`GUEST_INVALID_HANDLE_VALUE`), and `>= 0xFFFFFFF0u`, eliminating host page faults at `0x200000008`.
+   - **Thread context prefix/postfix guard zones & o1heap safety**: Added `X360_PREFIX_GUARD_SIZE` (4KB) and `X360_POSTFIX_GUARD_SIZE` (4KB) in `FiveInvader/cpu/guest_thread.h` and `guest_thread.cpp`. Negative TLS/PCR offsets from `r13` now safely hit the zeroed prefix guard without corrupting preceding `realPtr` pointers or `o1heap` fragment headers. Added corrupt fragment pruning to `o1heapAllocate` in `thirdparty/o1heap/o1heap.c`.
+   - **Runtime Verification**: Test Pass 8 sustained over 1,539 video presents with 0 crashes, 0 segfaults, healthy heaps, active ALSA audio playback, and PM4 packet processing.
+
 ## Next Steps
 
 1. Advance through movie playback (`rockstar_logos.bik`) and Scaleform frontend initialization to active 3D/Scaleform draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).

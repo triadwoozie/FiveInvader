@@ -22,22 +22,25 @@ GuestThreadContext::GuestThreadContext(uint32_t cpuNumber)
 {
     assert(thread == nullptr);
 
-    // Allocate contiguous block: [PCR][TLS][TEB][Stack]
+    // Allocate contiguous block: [Prefix Guard][PCR][TLS][TEB][Stack][Postfix Guard]
     // Use physical heap (0x80000000+) so stack addresses match Xbox 360 expectations
-    thread = (uint8_t*)g_userHeap.AllocPhysical(TOTAL_SIZE, 16);
+    thread = (uint8_t*)g_userHeap.AllocPhysical(TOTAL_SIZE, 64);
     memset(thread, 0, TOTAL_SIZE);
 
+    // PCR starts after the prefix guard so negative-offset TLS/PCR accesses land safely
+    uint8_t* pcrBase = thread + X360_PREFIX_GUARD_SIZE;
+
     // Get typed pointers to each region
-    X360_PCR* pcr = reinterpret_cast<X360_PCR*>(thread);
-    X360_TLS* tls = reinterpret_cast<X360_TLS*>(thread + X360_TLS_OFFSET);
-    X360_TEB* teb = reinterpret_cast<X360_TEB*>(thread + X360_TEB_OFFSET);
+    X360_PCR* pcr = reinterpret_cast<X360_PCR*>(pcrBase);
+    X360_TLS* tls = reinterpret_cast<X360_TLS*>(pcrBase + X360_TLS_OFFSET);
+    X360_TEB* teb = reinterpret_cast<X360_TEB*>(pcrBase + X360_TEB_OFFSET);
 
     // Calculate virtual addresses for each region
-    uint32_t pcrAddr   = g_memory.MapVirtual(thread);
-    uint32_t tlsAddr   = g_memory.MapVirtual(thread + X360_TLS_OFFSET);
-    uint32_t tebAddr   = g_memory.MapVirtual(thread + X360_TEB_OFFSET);
-    uint32_t stackBase = g_memory.MapVirtual(thread + TOTAL_SIZE);  // High address (stack grows down)
-    uint32_t stackLimit = g_memory.MapVirtual(thread + X360_STACK_OFFSET);  // Low address
+    uint32_t pcrAddr   = g_memory.MapVirtual(pcrBase);
+    uint32_t tlsAddr   = g_memory.MapVirtual(pcrBase + X360_TLS_OFFSET);
+    uint32_t tebAddr   = g_memory.MapVirtual(pcrBase + X360_TEB_OFFSET);
+    uint32_t stackBase = g_memory.MapVirtual(pcrBase + X360_STACK_OFFSET + X360_STACK_SIZE);  // High address (stack grows down)
+    uint32_t stackLimit = g_memory.MapVirtual(pcrBase + X360_STACK_OFFSET);  // Low address
 
     // -------------------------------------------------------------------------
     // Initialize PCR (Processor Control Region)
@@ -58,9 +61,9 @@ GuestThreadContext::GuestThreadContext(uint32_t cpuNumber)
     // Initialize RAGE thread-local allocator slots (0x74 = 116, 0x78 = 120, 0x84 = 132)
     // to point to the master allocator so worker threads don't crash on uninitialized allocator slots
     constexpr uint32_t RAGE_MASTER_ALLOCATOR = 0x83887168;
-    *reinterpret_cast<be<uint32_t>*>(thread + X360_TLS_OFFSET + 116) = RAGE_MASTER_ALLOCATOR;
-    *reinterpret_cast<be<uint32_t>*>(thread + X360_TLS_OFFSET + 120) = RAGE_MASTER_ALLOCATOR;
-    *reinterpret_cast<be<uint32_t>*>(thread + X360_TLS_OFFSET + 132) = RAGE_MASTER_ALLOCATOR;
+    *reinterpret_cast<be<uint32_t>*>(pcrBase + X360_TLS_OFFSET + 116) = RAGE_MASTER_ALLOCATOR;
+    *reinterpret_cast<be<uint32_t>*>(pcrBase + X360_TLS_OFFSET + 120) = RAGE_MASTER_ALLOCATOR;
+    *reinterpret_cast<be<uint32_t>*>(pcrBase + X360_TLS_OFFSET + 132) = RAGE_MASTER_ALLOCATOR;
 
     // -------------------------------------------------------------------------
     // Initialize TEB (Thread Environment Block)

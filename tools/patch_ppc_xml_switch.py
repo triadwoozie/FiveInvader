@@ -902,8 +902,12 @@ def main() -> int:
     patch_recomp288_buffer_guard(ppc_dir / "ppc_recomp.288.cpp")
     patch_recomp77_find_guard(ppc_dir / "ppc_recomp.77.cpp")
     patch_recomp330_thread_callback_guard(ppc_dir / "ppc_recomp.330.cpp")
+    patch_recomp330_free_list_insert_guards(ppc_dir / "ppc_recomp.330.cpp")
     patch_recomp311_alloc_chunk_loop(ppc_dir / "ppc_recomp.311.cpp")
     patch_recomp265_shader_lookup_guard(ppc_dir / "ppc_recomp.265.cpp")
+    patch_recomp18_bugcheck_guards(ppc_dir / "ppc_recomp.18.cpp")
+    patch_recomp338_worker_thread_guards(ppc_dir / "ppc_recomp.338.cpp")
+    patch_recomp17_queue_guard(ppc_dir / "ppc_recomp.17.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -1936,6 +1940,7 @@ def patch_recomp28_pointer_guard(path: pathlib.Path) -> bool:
     if not path.exists():
         return False
     text = path.read_text()
+    patched = False
     old = (
         "\t// mr r29,r3\n"
         "\tctx.r29.u64 = ctx.r3.u64;\n"
@@ -1954,6 +1959,49 @@ def patch_recomp28_pointer_guard(path: pathlib.Path) -> bool:
     )
     if old in text:
         text = text.replace(old, new)
+        patched = True
+
+    old_listener = (
+        '\t// lwz r3,4(r31)\n'
+        '\tctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 4);\n'
+        '\t// mr r4,r26\n'
+        '\tctx.r4.u64 = ctx.r26.u64;\n'
+        '\t// lwz r10,0(r3)\n'
+        '\tctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n'
+        '\t// lwz r9,12(r10)\n'
+        '\tctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 12);\n'
+        '\t// mtctr r9\n'
+        '\tctr.u64 = ctx.r9.u64;\n'
+        '\t// bctrl \n'
+        '\tctx.lr = 0x824C2B34;\n'
+        '\tPPC_CALL_INDIRECT_FUNC(ctr.u32);'
+    )
+    new_listener = (
+        '\t// lwz r3,4(r31)\n'
+        '\tctx.r3.u64 = PPC_LOAD_U32(ctx.r31.u32 + 4);\n'
+        '\t// mr r4,r26\n'
+        '\tctx.r4.u64 = ctx.r26.u64;\n'
+        '\tif (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 4) {\n'
+        '\t\t// lwz r10,0(r3)\n'
+        '\t\tctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n'
+        '\t\tif (ctx.r10.u32 >= 0x10000 && ctx.r10.u32 < PPC_MEMORY_SIZE - 16) {\n'
+        '\t\t\t// lwz r9,12(r10)\n'
+        '\t\t\tctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 12);\n'
+        '\t\t\t// mtctr r9\n'
+        '\t\t\tctr.u64 = ctx.r9.u64;\n'
+        '\t\t\t// bctrl \n'
+        '\t\t\tctx.lr = 0x824C2B34;\n'
+        '\t\t\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < PPC_CODE_BASE + PPC_CODE_SIZE) {\n'
+        '\t\t\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n'
+        '\t\t\t}\n'
+        '\t\t}\n'
+        '\t}'
+    )
+    if old_listener in text:
+        text = text.replace(old_listener, new_listener)
+        patched = True
+
+    if patched:
         path.write_text(text)
         print(f"Patched recomp.28 pointer guard in {path}")
         return True
@@ -3044,6 +3092,233 @@ def patch_recomp265_shader_lookup_guard(path: pathlib.Path) -> bool:
     if patched:
         path.write_text(text)
         print(f"Patched recomp.265 shader lookup guard in {path}")
+        return True
+    return False
+
+def patch_recomp330_free_list_insert_guards(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    for reg, has_addi_first in [("r30", False), ("r31", True), ("r4", True), ("r29", True)]:
+        if not has_addi_first:
+            old = (
+                "\t// lwz r9,4(r11)\n"
+                "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);\n"
+                f"\t// stw r11,8({reg})\n"
+                f"\tPPC_STORE_U32(ctx.{reg}.u32 + 8, ctx.r11.u32);\n"
+                f"\t// stw r9,12({reg})\n"
+                f"\tPPC_STORE_U32(ctx.{reg}.u32 + 12, ctx.r9.u32);\n"
+                f"\t// addi r10,{reg},8\n"
+                f"\tctx.r10.s64 = ctx.{reg}.s64 + 8;\n"
+                "\t// stw r10,0(r9)\n"
+                "\tPPC_STORE_U32(ctx.r9.u32 + 0, ctx.r10.u32);\n"
+                "\t// stw r10,4(r11)\n"
+                "\tPPC_STORE_U32(ctx.r11.u32 + 4, ctx.r10.u32);"
+            )
+            new = (
+                "\t// lwz r9,4(r11)\n"
+                "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);\n"
+                "\tif (ctx.r9.u32 < 0x10000 || ctx.r9.u32 >= PPC_MEMORY_SIZE - 4) ctx.r9.u64 = ctx.r11.u64;\n"
+                f"\t// stw r11,8({reg})\n"
+                f"\tPPC_STORE_U32(ctx.{reg}.u32 + 8, ctx.r11.u32);\n"
+                f"\t// stw r9,12({reg})\n"
+                f"\tPPC_STORE_U32(ctx.{reg}.u32 + 12, ctx.r9.u32);\n"
+                f"\t// addi r10,{reg},8\n"
+                f"\tctx.r10.s64 = ctx.{reg}.s64 + 8;\n"
+                "\t// stw r10,0(r9)\n"
+                "\tif (ctx.r9.u32 >= 0x10000 && ctx.r9.u32 < PPC_MEMORY_SIZE - 4) {\n"
+                "\t\tPPC_STORE_U32(ctx.r9.u32 + 0, ctx.r10.u32);\n"
+                "\t}\n"
+                "\t// stw r10,4(r11)\n"
+                "\tif (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 4) {\n"
+                "\t\tPPC_STORE_U32(ctx.r11.u32 + 4, ctx.r10.u32);\n"
+                "\t}"
+            )
+        else:
+            old = (
+                "\t// lwz r9,4(r11)\n"
+                "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);\n"
+                f"\t// addi r10,{reg},8\n"
+                f"\tctx.r10.s64 = ctx.{reg}.s64 + 8;\n"
+                f"\t// stw r11,8({reg})\n"
+                f"\tPPC_STORE_U32(ctx.{reg}.u32 + 8, ctx.r11.u32);\n"
+                f"\t// stw r9,12({reg})\n"
+                f"\tPPC_STORE_U32(ctx.{reg}.u32 + 12, ctx.r9.u32);\n"
+                "\t// stw r10,0(r9)\n"
+                "\tPPC_STORE_U32(ctx.r9.u32 + 0, ctx.r10.u32);\n"
+                "\t// stw r10,4(r11)\n"
+                "\tPPC_STORE_U32(ctx.r11.u32 + 4, ctx.r10.u32);"
+            )
+            new = (
+                "\t// lwz r9,4(r11)\n"
+                "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r11.u32 + 4);\n"
+                "\tif (ctx.r9.u32 < 0x10000 || ctx.r9.u32 >= PPC_MEMORY_SIZE - 4) ctx.r9.u64 = ctx.r11.u64;\n"
+                f"\t// addi r10,{reg},8\n"
+                f"\tctx.r10.s64 = ctx.{reg}.s64 + 8;\n"
+                f"\t// stw r11,8({reg})\n"
+                f"\tPPC_STORE_U32(ctx.{reg}.u32 + 8, ctx.r11.u32);\n"
+                f"\t// stw r9,12({reg})\n"
+                f"\tPPC_STORE_U32(ctx.{reg}.u32 + 12, ctx.r9.u32);\n"
+                "\t// stw r10,0(r9)\n"
+                "\tif (ctx.r9.u32 >= 0x10000 && ctx.r9.u32 < PPC_MEMORY_SIZE - 4) {\n"
+                "\t\tPPC_STORE_U32(ctx.r9.u32 + 0, ctx.r10.u32);\n"
+                "\t}\n"
+                "\t// stw r10,4(r11)\n"
+                "\tif (ctx.r11.u32 >= 0x10000 && ctx.r11.u32 < PPC_MEMORY_SIZE - 4) {\n"
+                "\t\tPPC_STORE_U32(ctx.r11.u32 + 4, ctx.r10.u32);\n"
+                "\t}"
+            )
+        if old in text:
+            text = text.replace(old, new)
+            patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.330 free list insert guards in {path}")
+        return True
+    return False
+
+def patch_recomp18_bugcheck_guards(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    old_site1 = (
+        "\t// li r3,245\n"
+        "\tctx.r3.s64 = 245;\n"
+        "\t// bl 0x8375339c\n"
+        "\tctx.lr = 0x823BAC30;\n"
+        "\t__imp__KeBugCheck(ctx, base);"
+    )
+    new_site1 = (
+        "\t// li r3,245\n"
+        "\tctx.r3.s64 = 245;\n"
+        "\t// bl 0x8375339c\n"
+        "\tctx.lr = 0x823BAC30;\n"
+        "\t// KeBugCheck(245) bypassed: resume at loc_823BADC4\n"
+        "\tgoto loc_823BADC4;"
+    )
+    if old_site1 in text:
+        text = text.replace(old_site1, new_site1)
+        patched = True
+
+    old_site2 = (
+        "\t// li r3,245\n"
+        "\tctx.r3.s64 = 245;\n"
+        "\t// bl 0x8375339c\n"
+        "\tctx.lr = 0x823BADC4;\n"
+        "\t__imp__KeBugCheck(ctx, base);"
+    )
+    new_site2 = (
+        "\t// li r3,245\n"
+        "\tctx.r3.s64 = 245;\n"
+        "\t// bl 0x8375339c\n"
+        "\tctx.lr = 0x823BADC4;\n"
+        "\t// KeBugCheck(245) bypassed: resume at loc_823BADC4\n"
+        "\tgoto loc_823BADC4;"
+    )
+    if old_site2 in text:
+        text = text.replace(old_site2, new_site2)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.18 bugcheck guards in {path}")
+        return True
+    return False
+
+def patch_recomp338_worker_thread_guards(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    old_bebe0 = (
+        "\t// stwu r1,-128(r1)\n"
+        "\tea = -128 + ctx.r1.u32;\n"
+        "\tPPC_STORE_U32(ea, ctx.r1.u32);\n"
+        "\tctx.r1.u32 = ea;\n"
+        "\t// lwz r31,0(r3)\n"
+        "\tctx.r31.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n"
+        "\t// mr r30,r3\n"
+        "\tctx.r30.u64 = ctx.r3.u64;"
+    )
+    new_bebe0 = (
+        "\t// stwu r1,-128(r1)\n"
+        "\tea = -128 + ctx.r1.u32;\n"
+        "\tPPC_STORE_U32(ea, ctx.r1.u32);\n"
+        "\tctx.r1.u32 = ea;\n"
+        "\tif (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 4) goto loc_836BEC7C;\n"
+        "\t// lwz r31,0(r3)\n"
+        "\tctx.r31.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n"
+        "\t// mr r30,r3\n"
+        "\tctx.r30.u64 = ctx.r3.u64;\n"
+        "\tif (ctx.r31.u32 < 0x10000 || ctx.r31.u32 >= PPC_MEMORY_SIZE - 400) goto loc_836BEC7C;"
+    )
+    if old_bebe0 in text:
+        text = text.replace(old_bebe0, new_bebe0)
+        patched = True
+
+    old_beea0 = (
+        "loc_836BEEC4:\n"
+        "\t// lis r11,-5\n"
+        "\tctx.r11.s64 = -327680;\n"
+        "\t// lwz r25,0(r28)\n"
+        "\tctx.r25.u64 = PPC_LOAD_U32(ctx.r28.u32 + 0);"
+    )
+    new_beea0 = (
+        "loc_836BEEC4:\n"
+        "\t// lis r11,-5\n"
+        "\tctx.r11.s64 = -327680;\n"
+        "\tif (ctx.r28.u32 < 0x10000 || ctx.r28.u32 >= PPC_MEMORY_SIZE - 4) goto loc_836BF034;\n"
+        "\t// lwz r25,0(r28)\n"
+        "\tctx.r25.u64 = PPC_LOAD_U32(ctx.r28.u32 + 0);\n"
+        "\tif (ctx.r25.u32 < 0x10000 || ctx.r25.u32 >= PPC_MEMORY_SIZE - 400) goto loc_836BF034;"
+    )
+    if old_beea0 in text:
+        text = text.replace(old_beea0, new_beea0)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.338 worker thread guards in {path}")
+        return True
+    return False
+
+def patch_recomp17_queue_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    old_chk = (
+        "\t// bl 0x823c0578\n"
+        "\tctx.lr = 0x8238BDD4;\n"
+        "\tsub_823C0578(ctx, base);\n"
+        "\t// cmplwi cr6,r31,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r31.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x8238be64\n"
+        "\tif (cr6.eq) goto loc_8238BE64;"
+    )
+    new_chk = (
+        "\t// bl 0x823c0578\n"
+        "\tctx.lr = 0x8238BDD4;\n"
+        "\tsub_823C0578(ctx, base);\n"
+        "\t// cmplwi cr6,r31,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r31.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x8238be64\n"
+        "\tif (cr6.eq || ctx.r31.u32 < 0x10000 || ctx.r31.u32 >= PPC_MEMORY_SIZE - 400) goto loc_8238BE64;"
+    )
+    if old_chk in text:
+        text = text.replace(old_chk, new_chk)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.17 queue guard in {path}")
         return True
     return False
 
