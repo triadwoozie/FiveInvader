@@ -1,5 +1,6 @@
 #pragma once
 
+#include <unordered_map>
 #include "heap.h"
 #include "memory.h"
 
@@ -243,21 +244,33 @@ template<typename T>
 inline T* QueryKernelObject(XDISPATCHER_HEADER& header)
 {
     std::lock_guard guard{ g_kernelLock };
-    if (header.WaitListHead.Flink != OBJECT_SIGNATURE || header.WaitListHead.Blink == 0)
+    static std::unordered_map<uint32_t, KernelObject*> s_dispatcherMap;
+    uint32_t headerAddr = g_memory.MapVirtual(&header);
+    if (headerAddr != 0)
     {
-        header.WaitListHead.Flink = OBJECT_SIGNATURE;
-        auto* obj = CreateKernelObject<T>(reinterpret_cast<typename T::guest_type*>(&header));
-        header.WaitListHead.Blink = g_memory.MapVirtual(obj);
-
-        return obj;
+        auto it = s_dispatcherMap.find(headerAddr);
+        if (it != s_dispatcherMap.end() && IsValidHostVtable(it->second))
+        {
+            return static_cast<T*>(it->second);
+        }
     }
 
-    auto* obj = static_cast<T*>(g_memory.Translate(header.WaitListHead.Blink.get()));
-    if (!IsValidHostVtable(obj))
+    if (header.WaitListHead.Flink == OBJECT_SIGNATURE && header.WaitListHead.Blink != 0)
     {
-        auto* newObj = CreateKernelObject<T>(reinterpret_cast<typename T::guest_type*>(&header));
-        header.WaitListHead.Blink = g_memory.MapVirtual(newObj);
-        return newObj;
+        auto* obj = static_cast<T*>(g_memory.Translate(header.WaitListHead.Blink.get()));
+        if (IsValidHostVtable(obj))
+        {
+            if (headerAddr != 0) s_dispatcherMap[headerAddr] = obj;
+            return obj;
+        }
+    }
+
+    header.WaitListHead.Flink = OBJECT_SIGNATURE;
+    auto* obj = CreateKernelObject<T>(reinterpret_cast<typename T::guest_type*>(&header));
+    if (obj)
+    {
+        header.WaitListHead.Blink = g_memory.MapVirtual(obj);
+        if (headerAddr != 0) s_dispatcherMap[headerAddr] = obj;
     }
     return obj;
 }
@@ -266,12 +279,14 @@ inline T* QueryKernelObject(XDISPATCHER_HEADER& header)
 template<typename T>
 inline T* TryQueryKernelObject(XDISPATCHER_HEADER& header)
 {
-    if (header.WaitListHead.Flink != OBJECT_SIGNATURE || header.WaitListHead.Blink == 0)
-        return nullptr;
+    std::lock_guard guard{ g_kernelLock };
+    uint32_t headerAddr = g_memory.MapVirtual(&header);
+    if (header.WaitListHead.Flink == OBJECT_SIGNATURE && header.WaitListHead.Blink != 0)
+    {
+        auto* obj = static_cast<T*>(g_memory.Translate(header.WaitListHead.Blink.get()));
+        if (IsValidHostVtable(obj))
+            return obj;
+    }
 
-    auto* obj = static_cast<T*>(g_memory.Translate(header.WaitListHead.Blink.get()));
-    if (!IsValidHostVtable(obj))
-        return nullptr;
-
-    return obj;
+    return nullptr;
 }

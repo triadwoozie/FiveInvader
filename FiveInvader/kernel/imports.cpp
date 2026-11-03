@@ -3306,9 +3306,10 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
                         s_waitCount, Handle, objType, s_invalidWaitCount);
         }
         if (timeout != 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            uint32_t sleepMs = isMainThread ? 1 : std::min(timeout, 50u);
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
         }
-        return ShouldFailOpenWait() ? STATUS_SUCCESS : STATUS_INVALID_HANDLE;
+        return (ShouldFailOpenWait() && isMainThread) ? STATUS_SUCCESS : STATUS_TIMEOUT;
     }
 
     // KERNEL POLICY: Fail-open during Boot/Init only for the main thread (workers must sleep on queues)

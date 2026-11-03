@@ -48,9 +48,18 @@
    - Removed `mprotect(..., PROT_READ)` on the PPC recomp function table in `FiveInvader/kernel/memory.cpp` and `imports.cpp`, which previously collided with guest physical allocations (e.g. `0x86376600`), causing page permission SIGSEGV on guest write.
    - Reached Test Pass 32: 30+ full seconds execution with 0 crashes, 0 segfaults, and >1,200 swapchain presents.
 
+12. **Kernel Object Dispatcher Caching & Worker Sleep Tuning**:
+   - Implemented `s_dispatcherMap` in `FiveInvader/kernel/xdm.h` caching mapping `headerAddr` -> `KernelObject*`, preventing repeated heap allocations and metadata leakage during high-frequency `KeWaitForSingleObject` queries.
+   - Tuned `NtWaitForSingleObjectEx` sleep behavior for worker threads to prevent spinlock starvation and high-frequency lock contention.
+
+13. **Restored Event Switch Dispatch in `sub_824C7980` & Refcount Pointer Guards**:
+   - Restored 14-way intra-function switch table in `ppc_recomp.28.cpp:sub_824C7980` to correctly dispatch event cases 0, 1, 2, 4, 11, and 12 to event handler functions (`sub_82556BD0`, `sub_83333598`, etc.).
+   - Guarded object bounds in `ppc_recomp.15.cpp:sub_82360250` against `< 0x10000 || >= PPC_MEMORY_SIZE - 4`.
+   - Added atomic refcount guards in `ppc_recomp.36.cpp` (`sub_82556BD0` and `sub_82556C70`) against sentinel or negative pointers (e.g. `r30 = 0xFFFFFFF5`), preventing invalid `lwarx` / atomic decrement wraps to `0x200000000`.
+
 ## Next Steps
 
-1. Resolve worker task queue signaling for `sub_830D6CD0` (semaphore handle `0xC1200C70` and task completion at `loc_830E0934`).
+1. Verify stability in Test Pass 37 with all switch dispatch tables and refcount guards compiled.
 2. Advance through movie playback and Scaleform frontend initialization to active 3D/Scaleform draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).
 
 
