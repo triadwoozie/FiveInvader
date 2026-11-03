@@ -41,9 +41,16 @@
    - Engine advanced cleanly through initialization Steps 1, 2, 3, and 4 (`sub_82F3A5B8`, `sub_828FD100`, `sub_82918D28`, `sub_825FE880`).
    - Successfully loaded and mapped shader `X:\GTA5\build\dev\fxl_final_final\rage_bink.fxc` and movie `platform:\movies\rockstar_logos.bik`.
 
+11. **PPC Function Table Protection Fix, CTR Switches & Task Pointer Safeguards**:
+   - Restored CTR decrement switch table in `ppc_recomp.47.cpp:sub_825FE880` (`patch_recomp47_switch_dispatch`).
+   - Guarded event count in `ppc_recomp.246.cpp:sub_830DB378` (`r30 <= 4096`) and lookup loop in `ppc_recomp.372.cpp:sub_83757BF0` (`r7 <= 4096`, pointer bounds, iteration cap).
+   - Eliminated OOB dereference crash in `ppc_recomp.28.cpp:sub_824C7980` by guarding sentinel `0xFFFFFFFF` pointer entries in task queue iterations.
+   - Removed `mprotect(..., PROT_READ)` on the PPC recomp function table in `FiveInvader/kernel/memory.cpp` and `imports.cpp`, which previously collided with guest physical allocations (e.g. `0x86376600`), causing page permission SIGSEGV on guest write.
+   - Reached Test Pass 32: 30+ full seconds execution with 0 crashes, 0 segfaults, and >1,200 swapchain presents.
+
 ## Next Steps
 
-1. Restore commented-out `bdzf` CTR switch dispatch table in `ppc_recomp.47.cpp:loc_825FEA00` (`sub_825FE880`).
-2. Add bounds checks and iteration guards in `ppc_recomp.372.cpp:sub_83757BF0` and `ppc_recomp.246.cpp:sub_830DB378`.
-3. Advance movie playback to Scaleform frontend initialization and monitor Vulkan draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).
+1. Resolve worker task queue signaling for `sub_830D6CD0` (semaphore handle `0xC1200C70` and task completion at `loc_830E0934`).
+2. Advance through movie playback and Scaleform frontend initialization to active 3D/Scaleform draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).
+
 

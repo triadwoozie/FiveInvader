@@ -888,6 +888,10 @@ def main() -> int:
     patch_recomp269_data_switches(ppc_dir / "ppc_recomp.269.cpp")
     patch_recomp268_schema_guards(ppc_dir / "ppc_recomp.268.cpp")
     patch_recomp77_atmap_guards(ppc_dir / "ppc_recomp.77.cpp")
+    patch_recomp47_switch_dispatch(ppc_dir / "ppc_recomp.47.cpp")
+    patch_recomp246_event_count_guard(ppc_dir / "ppc_recomp.246.cpp")
+    patch_recomp372_handler_lookup_guard(ppc_dir / "ppc_recomp.372.cpp")
+    patch_recomp28_pointer_guard(ppc_dir / "ppc_recomp.28.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -1718,6 +1722,228 @@ def patch_recomp77_atmap_guards(path: pathlib.Path) -> bool:
     if patched:
         path.write_text(text)
         print(f"Patched recomp.77 atMap guards in {path}")
+        return True
+    return False
+
+def patch_recomp47_switch_dispatch(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "\t// mtctr r11\n"
+        "\tctr.u64 = ctx.r11.u64;\n"
+        "\t// cmpwi cr6,r11,0\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n"
+        "\t// bdzf 4*cr6+eq,0x825fea00\n"
+        "\t// bdzf 4*cr6+eq,0x825fe994\n"
+        "\t// bdzf 4*cr6+eq,0x825fe994\n"
+        "\t// bdzf 4*cr6+eq,0x825fea00\n"
+        "\t// bdzf 4*cr6+eq,0x825fea00\n"
+        "\t// bne cr6,0x825fe9c8\n"
+        "\tif (!cr6.eq) goto loc_825FE9C8;"
+    )
+    new = (
+        "\tswitch (ctx.r11.u32) {\n"
+        "\tcase 0:\n"
+        "\t\tbreak;\n"
+        "\tcase 1:\n"
+        "\t\tgoto loc_825FEA00;\n"
+        "\tcase 2:\n"
+        "\tcase 3:\n"
+        "\t\tgoto loc_825FE994;\n"
+        "\tcase 4:\n"
+        "\tcase 5:\n"
+        "\t\tgoto loc_825FEA00;\n"
+        "\tdefault:\n"
+        "\t\tgoto loc_825FE9C8;\n"
+        "\t}"
+    )
+    if old in text:
+        text = text.replace(old, new)
+        path.write_text(text)
+        print(f"Patched recomp.47 switch dispatch in {path}")
+        return True
+    return False
+
+def patch_recomp246_event_count_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "\t// lwz r30,56(r31)\n"
+        "\tctx.r30.u64 = PPC_LOAD_U32(ctx.r31.u32 + 56);\n"
+        "\t// mr r29,r3\n"
+        "\tctx.r29.u64 = ctx.r3.u64;\n"
+        "\t// li r31,0\n"
+        "\tctx.r31.s64 = 0;\n"
+        "\t// cmplwi cr6,r30,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r30.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x830db3c8\n"
+        "\tif (cr6.eq) goto loc_830DB3C8;"
+    )
+    new = (
+        "\t// lwz r30,56(r31)\n"
+        "\tctx.r30.u64 = PPC_LOAD_U32(ctx.r31.u32 + 56);\n"
+        "\tif (ctx.r30.u32 > 4096) goto loc_830DB3C8;\n"
+        "\t// mr r29,r3\n"
+        "\tctx.r29.u64 = ctx.r3.u64;\n"
+        "\t// li r31,0\n"
+        "\tctx.r31.s64 = 0;\n"
+        "\t// cmplwi cr6,r30,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r30.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x830db3c8\n"
+        "\tif (cr6.eq) goto loc_830DB3C8;"
+    )
+    if old in text:
+        text = text.replace(old, new)
+        path.write_text(text)
+        print(f"Patched recomp.246 event count guard in {path}")
+        return True
+    return False
+
+def patch_recomp372_handler_lookup_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "PPC_FUNC_IMPL(__imp__sub_83757BF0) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCRegister ctr{};\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\t// mr r6,r4\n"
+        "\tctx.r6.u64 = ctx.r4.u64;\n"
+        "\t// cmplwi cr6,r3,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "\t// lwz r7,296(r3)\n"
+        "\tctx.r7.u64 = PPC_LOAD_U32(ctx.r3.u32 + 296);\n"
+        "\t// cmplwi cr6,r7,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r7.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "\t// li r10,0\n"
+        "\tctx.r10.s64 = 0;\n"
+        "\t// cmpwi cr6,r7,0\n"
+        "\tcr6.compare<int32_t>(ctx.r7.s32, 0, ctx.xer);\n"
+        "\t// blelr cr6\n"
+        "\tif (!cr6.gt) return;\n"
+        "\t// lwz r9,252(r3)\n"
+        "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r3.u32 + 252);\n"
+        "\t// li r11,0\n"
+        "\tctx.r11.s64 = 0;\n"
+        "\t// lwz r8,376(r3)\n"
+        "\tctx.r8.u64 = PPC_LOAD_U32(ctx.r3.u32 + 376);\n"
+        "loc_83757C20:\n"
+        "\t// lwzx r4,r11,r9\n"
+        "\tctx.r4.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r9.u32);\n"
+        "\t// rlwinm r4,r4,2,0,29\n"
+        "\tctx.r4.u64 = __builtin_rotateleft64(ctx.r4.u32 | (ctx.r4.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\t// lwzx r4,r4,r8\n"
+        "\tctx.r4.u64 = PPC_LOAD_U32(ctx.r4.u32 + ctx.r8.u32);\n"
+        "\t// cmpw cr6,r4,r6\n"
+        "\tcr6.compare<int32_t>(ctx.r4.s32, ctx.r6.s32, ctx.xer);\n"
+        "\t// beq cr6,0x83757c48\n"
+        "\tif (cr6.eq) goto loc_83757C48;\n"
+        "\t// addi r10,r10,1\n"
+        "\tctx.r10.s64 = ctx.r10.s64 + 1;\n"
+        "\t// addi r11,r11,4\n"
+        "\tctx.r11.s64 = ctx.r11.s64 + 4;\n"
+        "\t// cmpw cr6,r10,r7\n"
+        "\tcr6.compare<int32_t>(ctx.r10.s32, ctx.r7.s32, ctx.xer);\n"
+        "\t// blt cr6,0x83757c20\n"
+        "\tif (cr6.lt) goto loc_83757C20;\n"
+        "\t// blr \n"
+        "\treturn;"
+    )
+    new = (
+        "PPC_FUNC_IMPL(__imp__sub_83757BF0) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCRegister ctr{};\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\tuint32_t loop_guard = 0;\n"
+        "\tif (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 380) return;\n"
+        "\t// mr r6,r4\n"
+        "\tctx.r6.u64 = ctx.r4.u64;\n"
+        "\t// cmplwi cr6,r3,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "\t// lwz r7,296(r3)\n"
+        "\tctx.r7.u64 = PPC_LOAD_U32(ctx.r3.u32 + 296);\n"
+        "\tif (ctx.r7.u32 > 4096) return;\n"
+        "\t// cmplwi cr6,r7,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r7.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "\t// li r10,0\n"
+        "\tctx.r10.s64 = 0;\n"
+        "\t// cmpwi cr6,r7,0\n"
+        "\tcr6.compare<int32_t>(ctx.r7.s32, 0, ctx.xer);\n"
+        "\t// blelr cr6\n"
+        "\tif (!cr6.gt) return;\n"
+        "\t// lwz r9,252(r3)\n"
+        "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r3.u32 + 252);\n"
+        "\tif (ctx.r9.u32 < 0x10000 || ctx.r9.u32 >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\t// li r11,0\n"
+        "\tctx.r11.s64 = 0;\n"
+        "\t// lwz r8,376(r3)\n"
+        "\tctx.r8.u64 = PPC_LOAD_U32(ctx.r3.u32 + 376);\n"
+        "\tif (ctx.r8.u32 < 0x10000 || ctx.r8.u32 >= PPC_MEMORY_SIZE - 4) return;\n"
+        "loc_83757C20:\n"
+        "\tif (++loop_guard > 4096) return;\n"
+        "\t// lwzx r4,r11,r9\n"
+        "\tctx.r4.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r9.u32);\n"
+        "\t// rlwinm r4,r4,2,0,29\n"
+        "\tctx.r4.u64 = __builtin_rotateleft64(ctx.r4.u32 | (ctx.r4.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\t// lwzx r4,r4,r8\n"
+        "\tctx.r4.u64 = PPC_LOAD_U32(ctx.r4.u32 + ctx.r8.u32);\n"
+        "\t// cmpw cr6,r4,r6\n"
+        "\tcr6.compare<int32_t>(ctx.r4.s32, ctx.r6.s32, ctx.xer);\n"
+        "\t// beq cr6,0x83757c48\n"
+        "\tif (cr6.eq) goto loc_83757C48;\n"
+        "\t// addi r10,r10,1\n"
+        "\tctx.r10.s64 = ctx.r10.s64 + 1;\n"
+        "\t// addi r11,r11,4\n"
+        "\tctx.r11.s64 = ctx.r11.s64 + 4;\n"
+        "\t// cmpw cr6,r10,r7\n"
+        "\tcr6.compare<int32_t>(ctx.r10.s32, ctx.r7.s32, ctx.xer);\n"
+        "\t// blt cr6,0x83757c20\n"
+        "\tif (cr6.lt) goto loc_83757C20;\n"
+        "\t// blr \n"
+        "\treturn;"
+    )
+    if old in text:
+        text = text.replace(old, new)
+        path.write_text(text)
+        print(f"Patched recomp.372 handler lookup guard in {path}")
+        return True
+    return False
+
+def patch_recomp28_pointer_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    old = (
+        "\t// mr r29,r3\n"
+        "\tctx.r29.u64 = ctx.r3.u64;\n"
+        "\t// cmplwi cr6,r3,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x824c7aa4\n"
+        "\tif (cr6.eq) goto loc_824C7AA4;"
+    )
+    new = (
+        "\t// mr r29,r3\n"
+        "\tctx.r29.u64 = ctx.r3.u64;\n"
+        "\t// cmplwi cr6,r3,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x824c7aa4\n"
+        "\tif (cr6.eq || ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 8) goto loc_824C7AA4;"
+    )
+    if old in text:
+        text = text.replace(old, new)
+        path.write_text(text)
+        print(f"Patched recomp.28 pointer guard in {path}")
         return True
     return False
 

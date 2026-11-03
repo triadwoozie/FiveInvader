@@ -123,23 +123,9 @@ Memory::Memory()
             InsertFunction(PPCFuncMappings[i].guest, PPCFuncMappings[i].host);
     }
 
-    // Protect the recomp function lookup table from guest writes.
-    // If the game overwrites these host function pointers, it can lead to crashes that look like
-    // invalid indirect branches / pointer-authentication failures on arm64e.
-    constexpr size_t kPageSize = 0x1000;
-    constexpr size_t kFuncTableOffset = PPC_IMAGE_BASE + PPC_IMAGE_SIZE;
-    constexpr size_t kFuncTableSize = (PPC_CODE_SIZE * 2) + sizeof(PPCFunc*);
-    const size_t protectBegin = AlignDown(kFuncTableOffset, kPageSize);
-    const size_t protectEnd = AlignUp(kFuncTableOffset + kFuncTableSize, kPageSize);
-    if (protectEnd > protectBegin)
-    {
-#ifdef _WIN32
-        DWORD oldProtect{};
-        VirtualProtect(base + protectBegin, protectEnd - protectBegin, PAGE_READONLY, &oldProtect);
-#else
-        mprotect(base + protectBegin, protectEnd - protectBegin, PROT_READ);
-#endif
-    }
+    // Note: Do not mprotect the recomp function lookup table as PROT_READ on Linux,
+    // because Xbox 360 physical allocations in GTA V (e.g., 0x86376600) overlap with
+    // this 44MB region (0x83DB8000-0x868689E8), causing SIGSEGV on guest buffer writes.
 }
 
 void* MmGetHostAddress(uint32_t ptr)

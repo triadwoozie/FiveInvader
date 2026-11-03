@@ -8104,36 +8104,7 @@ static void StorageDevice_ReadFile(PPCContext& ctx, uint8_t* base) {
 
 // Helper to dynamically register a function in the PPC function table
 static bool RegisterDynamicFunction(uint32_t guestAddr, PPCFunc* hostFunc) {
-    // Calculate function table location
-    constexpr size_t kPageSize = 0x1000;
-    constexpr size_t kFuncTableOffset = PPC_IMAGE_BASE + PPC_IMAGE_SIZE;
-    constexpr size_t kFuncTableSize = (PPC_CODE_SIZE * 2) + sizeof(PPCFunc*);
-    const size_t protectBegin = (kFuncTableOffset / kPageSize) * kPageSize;
-    const size_t protectEnd = ((kFuncTableOffset + kFuncTableSize + kPageSize - 1) / kPageSize) * kPageSize;
-    
-#ifdef _WIN32
-    // Windows: use VirtualProtect
-    DWORD oldProtect{};
-    if (!VirtualProtect(g_memory.base + protectBegin, protectEnd - protectBegin, PAGE_READWRITE, &oldProtect)) {
-        LOG_WARNING("[STORAGE] Failed to unprotect function table for registration");
-        return false;
-    }
-    
     g_memory.InsertFunction(guestAddr, hostFunc);
-    
-    VirtualProtect(g_memory.base + protectBegin, protectEnd - protectBegin, PAGE_READONLY, &oldProtect);
-#else
-    // Unix: use mprotect
-    if (mprotect(g_memory.base + protectBegin, protectEnd - protectBegin, PROT_READ | PROT_WRITE) != 0) {
-        LOGF_WARNING("[STORAGE] Failed to unprotect function table: {}", strerror(errno));
-        return false;
-    }
-    
-    g_memory.InsertFunction(guestAddr, hostFunc);
-    
-    mprotect(g_memory.base + protectBegin, protectEnd - protectBegin, PROT_READ);
-#endif
-    
     LOGF_WARNING("[STORAGE] Registered dynamic function at 0x{:08X}", guestAddr);
     return true;
 }
