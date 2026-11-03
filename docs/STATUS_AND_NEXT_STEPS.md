@@ -28,9 +28,22 @@
 7. **`atMap::Find` Memory Bounds Safety Guarding (`sub_82273368`)**:
    - Added memory bounds checks and bucket/node pointer validation in `ppc_recomp.6.cpp:sub_82273368` (`ctx.r3`, `ctx.r8`, `ctx.r11`), along with a cycle guard (`loop_guard > 4096`), preventing invalid pointer dereferences when searching unpopulated or corrupt map buckets during Step 7 (`sub_83447AD0`). Codified in `tools/patch_ppc_xml_switch.py`.
 
+8. **Restored CTR Switch Dispatches & Loop Underflow Guards (`ppc_recomp.269.cpp`, `ppc_recomp.268.cpp`)**:
+   - Restored 4 `bdzf` CTR-decrement switch dispatch tables in XML/parMember schema parsing (`sub_83221078`, `sub_83226768`, `sub_8322B7B8`).
+   - Prevented 4.2 billion iteration signed underflow loop at `loc_83221538` where `r30 <= 0` wrapped to `0xFFFFFFFF`, eliminating millions of bogus indirect calls to `0x7E000000`.
+   - Capped `UnmappedIndirectHandler` logging in `memory.cpp` using atomic CAS to prevent log explosion and wrap-around.
+   - Added null schema pointer guards in `ppc_recomp.268.cpp:sub_832193E8` and `sub_83219480`. Codified in `tools/patch_ppc_xml_switch.py`.
+
+9. **Global `atMap::Find` Bounds Safeguards (`sub_827BE448` & `sub_827BE4C0`)**:
+   - Added bounds checking and circular loop guard to `ppc_recomp.77.cpp:sub_827BE448` and `sub_827BE4C0` (`atMap::Find` for global map `*(0x83C1D204)`), preventing null bucket table dereference and crash. Codified in `tools/patch_ppc_xml_switch.py`.
+
+10. **Bink Movie & Shader Initialization Reached (`rage_bink.fxc`, `rockstar_logos.bik`)**:
+   - Engine advanced cleanly through initialization Steps 1, 2, 3, and 4 (`sub_82F3A5B8`, `sub_828FD100`, `sub_82918D28`, `sub_825FE880`).
+   - Successfully loaded and mapped shader `X:\GTA5\build\dev\fxl_final_final\rage_bink.fxc` and movie `platform:\movies\rockstar_logos.bik`.
+
 ## Next Steps
 
-1. Address the unmapped indirect branch at target `0x7E000000` (lr=`0x83221584`) in worker threads during streaming.
-2. Advance through State 1 completion into State 2 (Scaleform frontend initialization).
-3. Monitor Vulkan swapchain presentation and initial draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).
+1. Restore commented-out `bdzf` CTR switch dispatch table in `ppc_recomp.47.cpp:loc_825FEA00` (`sub_825FE880`).
+2. Add bounds checks and iteration guards in `ppc_recomp.372.cpp:sub_83757BF0` and `ppc_recomp.246.cpp:sub_830DB378`.
+3. Advance movie playback to Scaleform frontend initialization and monitor Vulkan draw calls (`PM4_DRAW_INDX` / `PM4_DRAW_INDX_2`).
 

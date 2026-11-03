@@ -885,6 +885,9 @@ def main() -> int:
     patch_recomp265_stream_guard(ppc_dir / "ppc_recomp.265.cpp")
     patch_recomp246_task_dispatch(ppc_dir / "ppc_recomp.246.cpp")
     patch_recomp6_atmap_find(ppc_dir / "ppc_recomp.6.cpp")
+    patch_recomp269_data_switches(ppc_dir / "ppc_recomp.269.cpp")
+    patch_recomp268_schema_guards(ppc_dir / "ppc_recomp.268.cpp")
+    patch_recomp77_atmap_guards(ppc_dir / "ppc_recomp.77.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -1303,6 +1306,418 @@ def patch_recomp6_atmap_find(path: pathlib.Path) -> bool:
     if old in text:
         path.write_text(text.replace(old, new))
         print(f"Patched recomp.6 atMap find in {path}")
+        return True
+    return False
+
+def patch_recomp269_data_switches(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    old_loop_guard = (
+        "loc_83221538:\n"
+        "\t// addi r10,r29,-2\n"
+    )
+    new_loop_guard = (
+        "loc_83221538:\n"
+        "\tif (ctx.r30.s32 <= 0) goto loc_832217EC;\n"
+        "\t// addi r10,r29,-2\n"
+    )
+    if old_loop_guard in text:
+        text = text.replace(old_loop_guard, new_loop_guard)
+        patched = True
+
+    old1 = (
+        "\t// mtctr r10\n"
+        "\tctr.u64 = ctx.r10.u64;\n"
+        "\t// cmpwi cr6,r10,0\n"
+        "\tcr6.compare<int32_t>(ctx.r10.s32, 0, ctx.xer);\n"
+        "\t// bdzf 4*cr6+eq,0x832215a0\n"
+        "\t// bdzf 4*cr6+eq,0x832215f0\n"
+        "\t// bdzf 4*cr6+eq,0x83221658\n"
+        "\t// bdzf 4*cr6+eq,0x832217e4\n"
+        "\t// bdzf 4*cr6+eq,0x832217e4\n"
+        "\t// bdzf 4*cr6+eq,0x832216d8\n"
+        "\t// bne cr6,0x83221760\n"
+        "\tif (!cr6.eq) goto loc_83221760;"
+    )
+    new1 = (
+        "\tswitch (ctx.r10.u32) {\n"
+        "\tcase 0:\n"
+        "\t\tbreak;\n"
+        "\tcase 1:\n"
+        "\t\tgoto loc_832215A0;\n"
+        "\tcase 2:\n"
+        "\t\tgoto loc_832215F0;\n"
+        "\tcase 3:\n"
+        "\t\tgoto loc_83221658;\n"
+        "\tcase 4:\n"
+        "\tcase 5:\n"
+        "\t\tgoto loc_832217E4;\n"
+        "\tcase 6:\n"
+        "\t\tgoto loc_832216D8;\n"
+        "\tcase 7:\n"
+        "\t\tgoto loc_83221760;\n"
+        "\tdefault:\n"
+        "\t\tgoto loc_832217E4;\n"
+        "\t}"
+    )
+    if old1 in text:
+        text = text.replace(old1, new1)
+        patched = True
+
+    old2 = (
+        "\t// mtctr r11\n"
+        "\tctr.u64 = ctx.r11.u64;\n"
+        "\t// cmpwi cr6,r11,0\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n"
+        "\t// bdzf 4*cr6+eq,0x8322709c\n"
+        "\t// bdzf 4*cr6+eq,0x8322709c\n"
+        "\t// bdzf 4*cr6+eq,0x832270ac\n"
+        "\t// bne cr6,0x832270ac\n"
+        "\tif (!cr6.eq) goto loc_832270AC;"
+    )
+    new2 = (
+        "\tswitch (ctx.r11.u32) {\n"
+        "\tcase 0:\n"
+        "\t\tbreak;\n"
+        "\tcase 1:\n"
+        "\tcase 2:\n"
+        "\t\tgoto loc_8322709C;\n"
+        "\tcase 3:\n"
+        "\tcase 4:\n"
+        "\t\tgoto loc_832270AC;\n"
+        "\tdefault:\n"
+        "\t\tgoto loc_832270BC;\n"
+        "\t}"
+    )
+    if old2 in text:
+        text = text.replace(old2, new2)
+        patched = True
+
+    old3 = (
+        "\t// mtctr r10\n"
+        "\tctr.u64 = ctx.r10.u64;\n"
+        "\t// cmpwi cr6,r10,0\n"
+        "\tcr6.compare<int32_t>(ctx.r10.s32, 0, ctx.xer);\n"
+        "\t// bdzf 4*cr6+eq,0x8322718c\n"
+        "\t// bdzf 4*cr6+eq,0x832271e8\n"
+        "\t// bdzf 4*cr6+eq,0x83227268\n"
+        "\t// bne cr6,0x832272c4\n"
+        "\tif (!cr6.eq) goto loc_832272C4;"
+    )
+    new3 = (
+        "\tswitch (ctx.r10.u32) {\n"
+        "\tcase 0:\n"
+        "\t\tbreak;\n"
+        "\tcase 1:\n"
+        "\t\tgoto loc_8322718C;\n"
+        "\tcase 2:\n"
+        "\t\tgoto loc_832271E8;\n"
+        "\tcase 3:\n"
+        "\t\tgoto loc_83227268;\n"
+        "\tcase 4:\n"
+        "\t\tgoto loc_832272C4;\n"
+        "\tdefault:\n"
+        "\t\tgoto loc_83227344;\n"
+        "\t}"
+    )
+    if old3 in text:
+        text = text.replace(old3, new3)
+        patched = True
+
+    old4 = (
+        "\t// mtctr r11\n"
+        "\tctr.u64 = ctx.r11.u64;\n"
+        "\t// cmpwi cr6,r11,0\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n"
+        "\t// bdzf 4*cr6+eq,0x8322d5c8\n"
+        "\t// bdzf 4*cr6+eq,0x8322d5f8\n"
+        "\t// bne cr6,0x8322d5e4\n"
+        "\tif (!cr6.eq) goto loc_8322D5E4;"
+    )
+    new4 = (
+        "\tswitch (ctx.r11.u32) {\n"
+        "\tcase 0:\n"
+        "\t\tbreak;\n"
+        "\tcase 1:\n"
+        "\t\tgoto loc_8322D5C8;\n"
+        "\tcase 2:\n"
+        "\t\tgoto loc_8322D5F8;\n"
+        "\tcase 3:\n"
+        "\t\tgoto loc_8322D5E4;\n"
+        "\tdefault:\n"
+        "\t\tgoto loc_8322D744;\n"
+        "\t}"
+    )
+    if old4 in text:
+        text = text.replace(old4, new4)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.269 data switches in {path}")
+        return True
+    return False
+
+def patch_recomp268_schema_guards(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    t1 = "PPC_FUNC_IMPL(__imp__sub_832193E8) {\n\tPPC_FUNC_PROLOGUE();\n\tPPCCRRegister cr6{};\n"
+    r1 = "PPC_FUNC_IMPL(__imp__sub_832193E8) {\n\tPPC_FUNC_PROLOGUE();\n\tif (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 16) return;\n\tPPCCRRegister cr6{};\n"
+    if t1 in text:
+        text = text.replace(t1, r1)
+        patched = True
+
+    t2 = "\t// beq cr6,0x832194c8\n\tif (cr6.eq) goto loc_832194C8;\n\t// addi r4,r3,8"
+    r2 = "\t// beq cr6,0x832194c8\n\tif (cr6.eq || PPC_LOAD_U32(ctx.r3.u32 + 24) < 0x10000) goto loc_832194C8;\n\t// addi r4,r3,8"
+    if t2 in text:
+        text = text.replace(t2, r2)
+        patched = True
+
+    t3 = "\t// beq cr6,0x83219500\n\tif (cr6.eq) goto loc_83219500;\n\t// addi r4,r31,8"
+    r3 = "\t// beq cr6,0x83219500\n\tif (cr6.eq || PPC_LOAD_U32(ctx.r31.u32 + 32) < 0x10000) goto loc_83219500;\n\t// addi r4,r31,8"
+    if t3 in text:
+        text = text.replace(t3, r3)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.268 schema guards in {path}")
+        return True
+    return False
+
+def patch_recomp77_atmap_guards(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    old1 = (
+        "PPC_FUNC_IMPL(__imp__sub_827BE448) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\t// lis r11,-31802\n"
+        "\tctx.r11.s64 = -2084175872;\n"
+        "\t// mr r3,r5\n"
+        "\tctx.r3.u64 = ctx.r5.u64;\n"
+        "\t// lwz r11,-11772(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + -11772);\n"
+        "\t// lwz r10,16(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);\n"
+        "\t// lhz r11,468(r10)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U16(ctx.r10.u32 + 468);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "\t// divwu r9,r4,r11\n"
+        "\tctx.r9.u32 = ctx.r4.u32 / ctx.r11.u32;\n"
+        "\t// lwz r8,464(r10)\n"
+        "\tctx.r8.u64 = PPC_LOAD_U32(ctx.r10.u32 + 464);\n"
+        "\t// mullw r7,r9,r11\n"
+        "\tctx.r7.s64 = int64_t(ctx.r9.s32) * int64_t(ctx.r11.s32);\n"
+        "\t// subf r6,r7,r4\n"
+        "\tctx.r6.s64 = ctx.r4.s64 - ctx.r7.s64;\n"
+        "\t// rlwinm r5,r6,2,0,29\n"
+        "\tctx.r5.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\t// lwzx r11,r5,r8\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r5.u32 + ctx.r8.u32);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "loc_827BE484:\n"
+        "\t// lwz r10,0(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplw cr6,r4,r10\n"
+        "\tcr6.compare<uint32_t>(ctx.r4.u32, ctx.r10.u32, ctx.xer);\n"
+        "\t// beq cr6,0x827be4a0\n"
+        "\tif (cr6.eq) goto loc_827BE4A0;\n"
+        "\t// lwz r11,12(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x827be484\n"
+        "\tif (!cr6.eq) goto loc_827BE484;\n"
+        "\t// blr \n"
+        "\treturn;"
+    )
+    new1 = (
+        "PPC_FUNC_IMPL(__imp__sub_827BE448) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\tuint32_t loop_guard = 0;\n"
+        "\t// lis r11,-31802\n"
+        "\tctx.r11.s64 = -2084175872;\n"
+        "\t// mr r3,r5\n"
+        "\tctx.r3.u64 = ctx.r5.u64;\n"
+        "\tif ((ctx.r11.u32 + -11772) >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + -11772);\n"
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 20) return;\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);\n"
+        "\tif (ctx.r10.u32 < 0x10000 || ctx.r10.u32 >= PPC_MEMORY_SIZE - 472) return;\n"
+        "\t// lhz r11,468(r10)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U16(ctx.r10.u32 + 468);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "\t// divwu r9,r4,r11\n"
+        "\tif (ctx.r11.u32 != 0) ctx.r9.u32 = ctx.r4.u32 / ctx.r11.u32;\n"
+        "\t// lwz r8,464(r10)\n"
+        "\tctx.r8.u64 = PPC_LOAD_U32(ctx.r10.u32 + 464);\n"
+        "\tif (ctx.r8.u32 < 0x10000 || ctx.r8.u32 >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\t// mullw r7,r9,r11\n"
+        "\tctx.r7.s64 = int64_t(ctx.r9.s32) * int64_t(ctx.r11.s32);\n"
+        "\t// subf r6,r7,r4\n"
+        "\tctx.r6.s64 = ctx.r4.s64 - ctx.r7.s64;\n"
+        "\t// rlwinm r5,r6,2,0,29\n"
+        "\tctx.r5.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\tif ((ctx.r5.u32 + ctx.r8.u32) >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\t// lwzx r11,r5,r8\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r5.u32 + ctx.r8.u32);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "loc_827BE484:\n"
+        "\tif (++loop_guard > 4096) return;\n"
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 16) return;\n"
+        "\t// lwz r10,0(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplw cr6,r4,r10\n"
+        "\tcr6.compare<uint32_t>(ctx.r4.u32, ctx.r10.u32, ctx.xer);\n"
+        "\t// beq cr6,0x827be4a0\n"
+        "\tif (cr6.eq) goto loc_827BE4A0;\n"
+        "\t// lwz r11,12(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x827be484\n"
+        "\tif (!cr6.eq) goto loc_827BE484;\n"
+        "\t// blr \n"
+        "\treturn;"
+    )
+    if old1 in text:
+        text = text.replace(old1, new1)
+        patched = True
+
+    old2 = (
+        "PPC_FUNC_IMPL(__imp__sub_827BE4C0) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\t// lis r11,-31802\n"
+        "\tctx.r11.s64 = -2084175872;\n"
+        "\t// lwz r11,-11772(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + -11772);\n"
+        "\t// lwz r10,16(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);\n"
+        "\t// lhz r11,468(r10)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U16(ctx.r10.u32 + 468);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "\t// divwu r9,r3,r11\n"
+        "\tctx.r9.u32 = ctx.r3.u32 / ctx.r11.u32;\n"
+        "\t// lwz r8,464(r10)\n"
+        "\tctx.r8.u64 = PPC_LOAD_U32(ctx.r10.u32 + 464);\n"
+        "\t// mullw r7,r9,r11\n"
+        "\tctx.r7.s64 = int64_t(ctx.r9.s32) * int64_t(ctx.r11.s32);\n"
+        "\t// subf r6,r7,r3\n"
+        "\tctx.r6.s64 = ctx.r3.s64 - ctx.r7.s64;\n"
+        "\t// rlwinm r11,r6,2,0,29\n"
+        "\tctx.r11.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\t// lwzx r11,r11,r8\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r8.u32);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "loc_827BE4F8:\n"
+        "\t// lwz r10,0(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplw cr6,r3,r10\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, ctx.r10.u32, ctx.xer);\n"
+        "\t// beq cr6,0x827be514\n"
+        "\tif (cr6.eq) goto loc_827BE514;\n"
+        "\t// lwz r11,12(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x827be4f8\n"
+        "\tif (!cr6.eq) goto loc_827BE4F8;\n"
+        "\t// blr \n"
+        "\treturn;"
+    )
+    new2 = (
+        "PPC_FUNC_IMPL(__imp__sub_827BE4C0) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\tuint32_t loop_guard = 0;\n"
+        "\t// lis r11,-31802\n"
+        "\tctx.r11.s64 = -2084175872;\n"
+        "\tif ((ctx.r11.u32 + -11772) >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\t// lwz r11,-11772(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + -11772);\n"
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 20) return;\n"
+        "\t// lwz r10,16(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 16);\n"
+        "\tif (ctx.r10.u32 < 0x10000 || ctx.r10.u32 >= PPC_MEMORY_SIZE - 472) return;\n"
+        "\t// lhz r11,468(r10)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U16(ctx.r10.u32 + 468);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "\t// divwu r9,r3,r11\n"
+        "\tif (ctx.r11.u32 != 0) ctx.r9.u32 = ctx.r3.u32 / ctx.r11.u32;\n"
+        "\t// lwz r8,464(r10)\n"
+        "\tctx.r8.u64 = PPC_LOAD_U32(ctx.r10.u32 + 464);\n"
+        "\tif (ctx.r8.u32 < 0x10000 || ctx.r8.u32 >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\t// mullw r7,r9,r11\n"
+        "\tctx.r7.s64 = int64_t(ctx.r9.s32) * int64_t(ctx.r11.s32);\n"
+        "\t// subf r6,r7,r3\n"
+        "\tctx.r6.s64 = ctx.r3.s64 - ctx.r7.s64;\n"
+        "\t// rlwinm r11,r6,2,0,29\n"
+        "\tctx.r11.u64 = __builtin_rotateleft64(ctx.r6.u32 | (ctx.r6.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\tif ((ctx.r11.u32 + ctx.r8.u32) >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\t// lwzx r11,r11,r8\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r8.u32);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beqlr cr6\n"
+        "\tif (cr6.eq) return;\n"
+        "loc_827BE4F8:\n"
+        "\tif (++loop_guard > 4096) return;\n"
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 16) return;\n"
+        "\t// lwz r10,0(r11)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplw cr6,r3,r10\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, ctx.r10.u32, ctx.xer);\n"
+        "\t// beq cr6,0x827be514\n"
+        "\tif (cr6.eq) goto loc_827BE514;\n"
+        "\t// lwz r11,12(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 12);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x827be4f8\n"
+        "\tif (!cr6.eq) goto loc_827BE4F8;\n"
+        "\t// blr \n"
+        "\treturn;"
+    )
+    if old2 in text:
+        text = text.replace(old2, new2)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.77 atMap guards in {path}")
         return True
     return False
 

@@ -17,7 +17,8 @@ static constexpr size_t AlignUp(size_t value, size_t alignment) noexcept
 static void UnmappedIndirectHandler(PPCContext& ctx, uint8_t* base)
 {
     static std::atomic<int> s_unmappedCount{0};
-    if (s_unmappedCount++ < 25) {
+    int count = s_unmappedCount.load(std::memory_order_relaxed);
+    if (count < 25 && s_unmappedCount.compare_exchange_strong(count, count + 1)) {
         LOGF_ERROR(
             "[PPC Indirect] Called UNMAPPED indirect function! target=0x{:08X} lr=0x{:08X} "
             "ctr=0x{:08X} r0=0x{:08X} r1=0x{:08X} r3=0x{:08X} r4=0x{:08X} "
