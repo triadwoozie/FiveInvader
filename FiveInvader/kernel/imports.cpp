@@ -177,6 +177,9 @@ bool PatchFuncMapping(size_t guestAddr, PPCFunc* newFunc) {
         if (PPCFuncMappings[i].guest == guestAddr) {
             PPCFunc* oldFunc = PPCFuncMappings[i].host;
             PPCFuncMappings[i].host = newFunc;
+            if (g_ppcFunctionTable) {
+                g_memory.InsertFunction(static_cast<uint32_t>(guestAddr), newFunc);
+            }
             printf("[PATCH] 0x%08zX: %p -> %p\n", guestAddr, (void*)oldFunc, (void*)newFunc);
             fflush(stdout);
             return true;
@@ -232,6 +235,15 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x829E3CA8, &::sub_829E3CA8);
     PatchFuncMapping(0x8298B940, &::sub_8298B940);
     PatchFuncMapping(0x829C4C00, &::sub_829C4C00);
+    PatchFuncMapping(0x824F4850, &::sub_824F4850);
+    PatchFuncMapping(0x82574338, &::sub_82574338);
+    PatchFuncMapping(0x824B9C20, &::sub_824B9C20);
+    PatchFuncMapping(0x824759C8, &::sub_824759C8);
+    PatchFuncMapping(0x824F1388, &::sub_824F1388);
+    PatchFuncMapping(0x824F1418, &::sub_824F1418);
+    PatchFuncMapping(0x822D9768, &::sub_822D9768);
+    PatchFuncMapping(0x822D9690, &::sub_822D9690);
+    PatchFuncMapping(0x834DFFA0, &::sub_834DFFA0);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -3339,6 +3351,8 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         if (timeout != 0) {
             uint32_t sleepMs = isMainThread ? 1 : std::min(timeout, 50u);
             std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        } else if (!isMainThread) {
+            std::this_thread::yield();
         }
         return (ShouldFailOpenWait() && isMainThread) ? STATUS_SUCCESS : STATUS_TIMEOUT;
     }
@@ -3699,7 +3713,8 @@ uint32_t KeDelayExecutionThread(uint32_t WaitMode, bool Alertable, be<int64_t>* 
     ScopedWaitTracker waitTracker("KeDelayExecutionThread", 0, timeout, callerLR);
     static std::atomic<int> s_delayCount{0};
     if (s_delayCount++ < 50 || s_delayCount % 100 == 0) {
-        LOGF_INFO("[TRACE] KeDelayExecutionThread(timeout={}ms)", timeout);
+        LOGF_INFO("[TRACE] KeDelayExecutionThread(timeout={}ms, main={}, callerLR=0x{:08X})",
+                  timeout, IsMainThread(), callerLR);
     }
 
     if (timeout == 0)
@@ -4673,14 +4688,18 @@ void RtlLeaveCriticalSection(XRTL_CRITICAL_SECTION* cs)
         }
     }
 
-    cs->RecursionCount = cs->RecursionCount.get() - 1;
-
-    if (cs->RecursionCount.get() != 0)
-        return;
-
-    std::atomic_ref owningThread(cs->OwningThread);
-    owningThread.store(0);
-    owningThread.notify_all();
+    int32_t rec = cs->RecursionCount.get();
+    if (rec <= 1)
+    {
+        cs->RecursionCount = 0;
+        std::atomic_ref owningThread(cs->OwningThread);
+        owningThread.store(0);
+        owningThread.notify_all();
+    }
+    else
+    {
+        cs->RecursionCount = rec - 1;
+    }
 }
 
 void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
@@ -4717,6 +4736,22 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
         }
     }
 
+    // If critical section has no recursion count (unlocked) but stale owner, clear stale owner
+    if (cs->RecursionCount.get() == 0 && cs->OwningThread.get() != 0)
+    {
+        uint32_t owner = cs->OwningThread.get();
+        if (owner < 0x80000000 || owner > 0xF0000000)
+        {
+            static uint32_t s_staleCount = 0;
+            if (++s_staleCount <= 20)
+            {
+                LOGF_WARNING("[LOCK] Clearing stale owner 0x{:08X} (recCount=0) on cs=0x{:08X}",
+                             owner, guestAddr);
+            }
+            cs->OwningThread = 0;
+        }
+    }
+
     std::atomic_ref owningThread(cs->OwningThread);
 
     int loopCount = 0;
@@ -4735,19 +4770,33 @@ void RtlEnterCriticalSection(XRTL_CRITICAL_SECTION* cs)
         if (loopCount == 0)
         {
             ++s_waitCount;
-            if (s_waitCount <= 20)
+            if (s_waitCount <= 50)
             {
                 LOGF_WARNING("[LOCK] RtlEnterCriticalSection #{} thisThread=0x{:08X} WAITING on owner=0x{:08X} cs=0x{:08X}",
                              s_count, thisThread.get(), previousOwner.get(),
-                             reinterpret_cast<uintptr_t>(cs) & 0xFFFFFFFF);
+                             guestAddr);
             }
         }
         ++loopCount;
 
+        // Anti-deadlock guard: if spinning on an invalid thread ID or orphaned lock
+        if (loopCount > 100 && (previousOwner.get() < 0x80000000 || previousOwner.get() > 0xF0000000))
+        {
+            static uint32_t s_breakCount = 0;
+            if (++s_breakCount <= 20)
+            {
+                LOGF_WARNING("[LOCK] Breaking deadlock on cs=0x{:08X}: invalid owner=0x{:08X}, acquiring for thread=0x{:08X}",
+                             guestAddr, previousOwner.get(), thisThread.get());
+            }
+            owningThread.store(thisThread);
+            cs->RecursionCount = 1;
+            return;
+        }
+
         if (loopCount % 5000 == 0)
         {
             LOGF_WARNING("[LOCK] Long wait on cs=0x{:08X} ({} spins, owner=0x{:08X}, thisThread=0x{:08X})",
-                         reinterpret_cast<uintptr_t>(cs) & 0xFFFFFFFF, loopCount,
+                         guestAddr, loopCount,
                          previousOwner.get(), thisThread.get());
         }
 
@@ -5210,8 +5259,10 @@ static uint32_t ExecutePM4Buffer(uint32_t* buffer, uint32_t dwordCount,
                     if (sourceSelect == 2)
                     {
                         const bool queued = Video::ExecutePM4Draw(primitiveType, indexCount);
-                        LOGF_INFO("[PM4] Auto-index draw executed primitive={} indices={} queued={}",
-                                  primitiveType, indexCount, queued);
+                        g_gpuRingBuffer.pm4DrawCount++;
+                        g_pm4PacketCounter.fetch_add(1, std::memory_order_relaxed);
+                        LOGF_INFO("[PM4] Auto-index draw executed #{} primitive={} indices={} queued={}",
+                                  g_gpuRingBuffer.pm4DrawCount, primitiveType, indexCount, queued);
                     }
                     else
                     {
@@ -5237,7 +5288,7 @@ static uint32_t ExecutePM4Buffer(uint32_t* buffer, uint32_t dwordCount,
 // Returns number of packets found
 static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIndirect, uint32_t scanCount, uint32_t depth = 0) {
     static uint32_t s_loggedWaitCount = 0;
-    const bool accountPackets = scanCount == 0;
+    const bool accountPackets = true;
     uint32_t packetsFound = 0;
     uint32_t pos = 0;
     uint32_t maxScan = std::min(bufferDwords, 1024u);
@@ -5593,7 +5644,7 @@ void FireVBlankCallback() {
 
         // Set up context with valid stack and TLS on the dedicated vblank context
         PPCContext ctx = s_vblankContext->ppcContext;
-        ctx.r3.u32 = 0;  // Xenia dispatches VBlank as source 0 on CPU 2.
+        ctx.r3.u32 = 1;  // Xenon graphics interrupt source 1 = VBlank
         ctx.r4.u32 = g_gpuRingBuffer.interruptUserData;  // Context/userData
         if (ctx.r13.u32 < PPC_MEMORY_SIZE - 269)
             *reinterpret_cast<uint8_t*>(g_memory.Translate(ctx.r13.u32 + 268)) = 2;
@@ -5629,6 +5680,9 @@ void VBlankTimerThread() {
     while (g_vblankTimerRunning.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60Hz
         FireVBlankCallback();
+
+        // Process any pending PM4 packets in the ring buffer
+        ScanRingBufferForPM4Packets();
 
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - g_lastVdSwapTime).count() >= 32) {
@@ -6430,7 +6484,7 @@ uint32_t NtReleaseSemaphore(uint32_t Handle, uint32_t ReleaseCount, int32_t* Pre
     {
         if (s_count <= 20 || s_count % 100 == 0)
         {
-            LOGF_WARNING("[NtReleaseSemaphore] #{} Invalid or unresolvable handle 0x{:08X}", s_count, Handle);
+            LOGF_WARNING("[NtReleaseSemaphore] #{} Invalid or unresolvable handle 0x{:08X} callerLR=0x{:08X}", s_count, Handle, GET_CALLER_LR());
         }
         return STATUS_INVALID_HANDLE;
     }
@@ -13657,25 +13711,108 @@ loc_83480FE0:
 // RAGE State Machine & Allocator Traps Instrumentation and Diagnostics
 // =============================================================================
 
+extern "C" void __imp__sub_824F4850(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_824F4850)
+{
+    static std::atomic<uint64_t> s_sCalls{0};
+    uint64_t c = ++s_sCalls;
+    uint32_t obj = ctx.r3.u32;
+    int32_t r4 = (int32_t)ctx.r4.s32;
+    int32_t r5 = (int32_t)ctx.r5.s32;
+    int32_t r6 = (int32_t)ctx.r6.s32;
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_824F4850] #{} obj=0x{:08X} r4={} r5={} r6={}", c, obj, r4, r5, r6);
+    }
+    __imp__sub_824F4850(ctx, base);
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_824F4850] #{} exit ret={}", c, (int32_t)ctx.r3.s32);
+    }
+}
+
+extern "C" void __imp__sub_824759C8(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_824759C8)
+{
+    static std::atomic<uint64_t> s_s2UpdateCalls{0};
+    uint64_t c = ++s_s2UpdateCalls;
+    if (c <= 20 || c % 60 == 0) {
+        LOGF_INFO("[sub_824759C8] State 2 update Frame #{} obj=0x{:08X}", c, ctx.r3.u32);
+    }
+    __imp__sub_824759C8(ctx, base);
+    ScanRingBufferForPM4Packets();
+    if (c <= 20 || c % 60 == 0) {
+        LOGF_INFO("[sub_824759C8] State 2 update Frame #{} exit ret={}", c, (int32_t)ctx.r3.s32);
+    }
+}
+
 extern "C" void __imp__sub_824B9C20(PPCContext& ctx, uint8_t* base);
 PPC_FUNC(sub_824B9C20)
 {
     static std::atomic<uint64_t> s_smCalls{0};
     uint64_t c = ++s_smCalls;
     uint32_t obj = ctx.r3.u32;
+    if (obj >= 0x10000 && obj < PPC_MEMORY_SIZE - 20) {
+        if (PPC_LOAD_U32(obj) == 0) {
+            PPC_STORE_U32(obj, 0x82001554);
+            LOGF_WARNING("[sub_824B9C20] Restored vtable 0x82001554 on obj=0x{:08X}", obj);
+        }
+        uint32_t curVtbl = PPC_LOAD_U32(obj);
+        if (curVtbl >= 0x10000 && curVtbl < PPC_MEMORY_SIZE - 8) {
+            if (PPC_LOAD_U32(curVtbl + 4) == 0) {
+                PPC_STORE_U32(curVtbl + 4, 0x824F4850);
+                LOGF_WARNING("[sub_824B9C20] Restored vtable[1] = 0x824F4850 at 0x{:08X}", curVtbl + 4);
+            }
+        }
+    }
     uint16_t state = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 12) : 0;
     uint16_t nextState = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 14) : 0;
     uint16_t pendingState = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 16) : 0;
-    if (c <= 20 || c % 100 == 0) {
-        LOGF_INFO("[sub_824B9C20] StateMachine enter #{} obj=0x{:08X} state={}/{} pending={}",
-                  c, obj, state, nextState, pendingState);
+    uint16_t flags = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 18) : 0;
+    uint32_t vtbl = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U32(obj) : 0;
+    uint32_t fn4 = (vtbl >= 0x10000 && vtbl < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U32(vtbl + 4) : 0;
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_824B9C20] StateMachine enter #{} obj=0x{:08X} state={}/{} pending={} flags=0x{:04X} vtbl=0x{:08X} fn4=0x{:08X}",
+                  c, obj, state, nextState, pendingState, flags, vtbl, fn4);
     }
     __imp__sub_824B9C20(ctx, base);
     uint16_t endState = (obj < PPC_MEMORY_SIZE - 20) ? PPC_LOAD_U16(obj + 12) : 0;
-    if (c <= 20 || c % 100 == 0) {
+    if (c <= 30 || c % 100 == 0) {
         LOGF_INFO("[sub_824B9C20] StateMachine exit #{} state={} ret={}",
                   c, endState, (int32_t)ctx.r3.s32);
     }
+}
+
+extern "C" void __imp__sub_824F1388(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_824F1388)
+{
+    if (IsMainThread()) {
+        static int s_mainSleep1388 = 0;
+        if (s_mainSleep1388++ < 30 || s_mainSleep1388 % 1000 == 0) {
+            auto trace = CaptureGuestStackTrace();
+            LOGF_WARNING("[sub_824F1388] Main thread Sleep({}, r4={}) called! trace: 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}",
+                         (int32_t)ctx.r3.s32, (int32_t)ctx.r4.s32,
+                         trace.size() > 0 ? trace[0] : 0, trace.size() > 1 ? trace[1] : 0,
+                         trace.size() > 2 ? trace[2] : 0, trace.size() > 3 ? trace[3] : 0,
+                         trace.size() > 4 ? trace[4] : 0);
+        }
+    }
+    __imp__sub_824F1388(ctx, base);
+}
+
+extern "C" void __imp__sub_824F1418(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_824F1418)
+{
+    if (IsMainThread()) {
+        static int s_mainSleep1418 = 0;
+        if (s_mainSleep1418++ < 30 || s_mainSleep1418 % 1000 == 0) {
+            auto trace = CaptureGuestStackTrace();
+            LOGF_WARNING("[sub_824F1418] Main thread Sleep({}) called! trace: 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}, 0x{:08X}",
+                         (int32_t)ctx.r3.s32,
+                         trace.size() > 0 ? trace[0] : 0, trace.size() > 1 ? trace[1] : 0,
+                         trace.size() > 2 ? trace[2] : 0, trace.size() > 3 ? trace[3] : 0,
+                         trace.size() > 4 ? trace[4] : 0);
+        }
+    }
+    __imp__sub_824F1418(ctx, base);
 }
 
 extern "C" void __imp__sub_825777D0(PPCContext& ctx, uint8_t* base);
@@ -13691,6 +13828,7 @@ PPC_FUNC(sub_825777D0)
 extern "C" void __imp__sub_82574338(PPCContext& ctx, uint8_t* base);
 PPC_FUNC(sub_82574338)
 {
+    KernelPhase_EnterRuntime();
     static std::atomic<uint64_t> s_s2Calls{0};
     uint64_t c = ++s_s2Calls;
     LOGF_INFO("[sub_82574338] State 2 handler enter #{} obj=0x{:08X}", c, ctx.r3.u32);
@@ -13699,6 +13837,100 @@ PPC_FUNC(sub_82574338)
     auto t1 = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     LOGF_INFO("[sub_82574338] State 2 handler exit #{} ret={} elapsed={}ms", c, (int32_t)ctx.r3.s32, ms);
+}
+
+extern "C" void __imp__sub_822D9768(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_822D9768)
+{
+    static std::atomic<uint64_t> s_calls{0};
+    uint64_t c = ++s_calls;
+    uint32_t pool = ctx.r3.u32;
+    uint32_t freeBlocks = (pool >= 0x10000 && pool < PPC_MEMORY_SIZE - 2200) ? PPC_LOAD_U32(pool + 2184) : 0;
+    uint32_t activeBlocks = (pool >= 0x10000 && pool < PPC_MEMORY_SIZE - 2400) ? PPC_LOAD_U32(pool + 2380) : 0;
+
+    if (pool >= 0x10000 && pool < PPC_MEMORY_SIZE - 2500) {
+        if (freeBlocks == 0 && activeBlocks == 0) {
+            LOGF_WARNING("[sub_822D9768] Pool 0x{:08X} uninitialized: 0 free, 0 active. Populating 48 free slots!", pool);
+            PPC_STORE_U32(pool + 2184, 48);
+            for (uint32_t i = 0; i < 48; ++i) {
+                PPC_STORE_U32(pool + 1992 + i * 4, i);
+            }
+            freeBlocks = 48;
+        }
+    }
+
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_822D9768] #{} pool=0x{:08X} free={} active={} r4={} r5={} r6={} r7={}",
+                  c, pool, freeBlocks, activeBlocks, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32);
+    }
+
+    __imp__sub_822D9768(ctx, base);
+
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_822D9768] #{} exit ret=0x{:08X}", c, ctx.r3.u32);
+    }
+}
+
+extern "C" void __imp__sub_822D9690(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_822D9690)
+{
+    static std::atomic<uint64_t> s_calls{0};
+    uint64_t c = ++s_calls;
+    uint32_t pool = ctx.r3.u32;
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_822D9690] #{} pool=0x{:08X} r4={} r5={} r6={} r7={}",
+                  c, pool, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32);
+    }
+    __imp__sub_822D9690(ctx, base);
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_822D9690] #{} exit ret=0x{:08X}", c, ctx.r3.u32);
+    }
+}
+
+extern "C" void __imp__sub_834DFFA0(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_834DFFA0)
+{
+    static std::atomic<uint64_t> s_calls{0};
+    uint64_t c = ++s_calls;
+    uint32_t desc = ctx.r3.u32;
+    uint32_t r4 = ctx.r4.u32;
+    uint32_t r5 = ctx.r5.u32;
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_834DFFA0] #{} desc=0x{:08X} r4={} r5={}", c, desc, r4, r5);
+    }
+    __imp__sub_834DFFA0(ctx, base);
+    if (ctx.r3.u32 == 0) {
+        // Fallback physical allocation if guest allocator returned null.
+        // Cache allocated physical buffer per descriptor to prevent physical heap exhaustion.
+        static std::mutex s_descMutex;
+        static std::unordered_map<uint32_t, uint32_t> s_descBuffers;
+        std::lock_guard<std::mutex> lock(s_descMutex);
+        uint32_t guestMem = 0;
+        auto it = s_descBuffers.find(desc);
+        if (it != s_descBuffers.end()) {
+            guestMem = it->second;
+        } else {
+            void* hostMem = g_userHeap.AllocPhysical(r5, 128);
+            if (hostMem) {
+                guestMem = g_memory.MapVirtual(hostMem);
+                s_descBuffers[desc] = guestMem;
+                LOGF_WARNING("[sub_834DFFA0] #{} Allocated fallback physical buffer 0x{:08X} (size={}) for desc=0x{:08X}",
+                             c, guestMem, r5, desc);
+            }
+        }
+        if (guestMem != 0) {
+            if (desc >= 0x10000 && desc < PPC_MEMORY_SIZE - 20) {
+                PPC_STORE_U32(desc + 0, guestMem);
+                PPC_STORE_U32(desc + 4, r4);
+                PPC_STORE_U32(desc + 16, r5);
+                PPC_STORE_U16(desc + 10, 0xFFFF);
+            }
+            ctx.r3.u64 = 1;
+        }
+    }
+    if (c <= 30 || c % 100 == 0) {
+        LOGF_INFO("[sub_834DFFA0] #{} exit ret={}", c, (int32_t)ctx.r3.s32);
+    }
 }
 
 PPC_EXTERN_FUNC(sub_82F3A5B8);
@@ -15131,6 +15363,10 @@ PPC_FUNC(sub_8229AD78)
     uint16_t oldState = (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 16) ? PPC_LOAD_U16(ctx.r3.u32 + 14) : 0;
     if (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 16) {
         PPC_STORE_U16(ctx.r3.u32 + 14, ctx.r4.u16);
+        if (ctx.r4.u16 == 2) {
+            PPC_STORE_U16(ctx.r3.u32 + 16, 0xFFFF);
+            KernelPhase_EnterRuntime();
+        }
     }
     LOGF_WARNING("===============================================================");
     LOGF_WARNING("[RAGE_STATE] Transition: State {} -> State {} (obj=0x{:08X})", oldState, ctx.r4.u16, ctx.r3.u32);
@@ -15282,7 +15518,7 @@ PPC_FUNC(sub_82D95030)
                 continue;
             }
             uint32_t func = PPC_LOAD_U32(vtbl);
-            if (func < 0x82000000 || func >= PPC_CODE_SIZE) {
+            if (func < PPC_CODE_BASE || func >= (PPC_CODE_BASE + PPC_CODE_SIZE)) {
                 PPC_STORE_U32(arr + i * 8 + 4, 0);
                 continue;
             }
@@ -15326,7 +15562,7 @@ PPC_FUNC(sub_83521D38)
             uint32_t vtbl = PPC_LOAD_U32(mgr);
             if (vtbl >= 0x82000000 && vtbl < PPC_MEMORY_SIZE - 52) {
                 uint32_t free_fn = PPC_LOAD_U32(vtbl + 48);
-                if (free_fn >= 0x82000000 && free_fn < PPC_CODE_SIZE) {
+                if (free_fn >= PPC_CODE_BASE && free_fn < (PPC_CODE_BASE + PPC_CODE_SIZE)) {
                     ctx.r3.u64 = mgr;
                     ctx.r4.u64 = buf;
                     PPC_CALL_INDIRECT_FUNC(free_fn);
@@ -15358,7 +15594,7 @@ PPC_FUNC(sub_836B1768)
             LOGF_INFO("[GPU IRQ] VBlank pending=0x{:08X} guestCallback=0x{:08X} callbackArg=0x{:08X}",
                       PPC_LOAD_U32(r11), callback, PPC_LOAD_U32(r11 + 20));
         // Only call callback if it is a valid code address
-        if (callback >= 0x82000000 && callback < PPC_CODE_SIZE) {
+        if (callback >= PPC_CODE_BASE && callback < (PPC_CODE_BASE + PPC_CODE_SIZE)) {
             PPCContext cbCtx = ctx;
             cbCtx.r3.u64 = PPC_LOAD_U32(r11 + 20);
             PPCContext* previousContext = GetPPCContext();

@@ -63,6 +63,8 @@ void PPCHandleInvalidIndirectCall(PPCContext& ctx, uint8_t* base, uint32_t targe
     UnmappedIndirectHandler(ctx, base);
 }
 
+PPCFunc** g_ppcFunctionTable = nullptr;
+
 void PPCCallIndirectFunc(PPCContext& ctx, uint8_t* base, uint32_t target)
 {
     if (target < PPC_CODE_BASE || target >= PPC_CODE_BASE + PPC_CODE_SIZE ||
@@ -74,9 +76,26 @@ void PPCCallIndirectFunc(PPCContext& ctx, uint8_t* base, uint32_t target)
         return;
     }
 
-    PPCFunc* function = PPC_LOOKUP_FUNC(base, target);
+    PPCFunc* function = g_ppcFunctionTable ? g_ppcFunctionTable[(target - PPC_CODE_BASE) >> 2] : nullptr;
     if (!function)
     {
+        for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++) {
+            if (PPCFuncMappings[i].guest == target) {
+                function = PPCFuncMappings[i].host;
+                if (g_ppcFunctionTable) {
+                    g_ppcFunctionTable[(target - PPC_CODE_BASE) >> 2] = function;
+                }
+                break;
+            }
+        }
+    }
+    if (!function)
+    {
+        static std::atomic<int> s_unmappedLogCount{0};
+        int c = ++s_unmappedLogCount;
+        if (c <= 30 || c % 100 == 0) {
+            LOGF_ERROR("[PPCCallIndirectFunc] Target 0x{:08X} has NULL host function in table! lr=0x{:08X}", target, ctx.lr);
+        }
         PPCHandleInvalidIndirectCall(ctx, base, target);
         return;
     }
@@ -113,19 +132,15 @@ Memory::Memory()
     // Do not install a null-page guard in that case.
 #endif
 
-    // Leave unmapped function entries null so PPCCallIndirectFunc can preserve
-    // the actual guest target when routing them through its diagnostic handler.
-    PPCFunc** table = (PPCFunc**)(base + PPC_IMAGE_BASE + PPC_IMAGE_SIZE);
+    // Allocate dedicated host function lookup table so guest physical allocations
+    // in GTA V (e.g., 0x83DB8000-0x868689E8) never overwrite recomp function pointers.
+    g_ppcFunctionTable = (PPCFunc**)calloc((PPC_CODE_SIZE >> 2) + 1, sizeof(PPCFunc*));
 
     for (size_t i = 0; PPCFuncMappings[i].guest != 0; i++)
     {
         if (PPCFuncMappings[i].host != nullptr)
             InsertFunction(PPCFuncMappings[i].guest, PPCFuncMappings[i].host);
     }
-
-    // Note: Do not mprotect the recomp function lookup table as PROT_READ on Linux,
-    // because Xbox 360 physical allocations in GTA V (e.g., 0x86376600) overlap with
-    // this 44MB region (0x83DB8000-0x868689E8), causing SIGSEGV on guest buffer writes.
 }
 
 void* MmGetHostAddress(uint32_t ptr)

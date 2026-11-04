@@ -5,6 +5,28 @@
 #define MEM_RESERVE 0x00002000  
 #endif
 
+#include <cstdint>
+#include <cstddef>
+#include <cassert>
+
+typedef void PPCFunc(struct PPCContext& __restrict__ ctx, uint8_t* base);
+extern PPCFunc** g_ppcFunctionTable;
+
+inline PPCFunc*& PpcLookupFuncHelper(uint32_t target) {
+    static PPCFunc* s_dummyNullFunc = nullptr;
+    if (target >= PPC_CODE_BASE && target < (PPC_CODE_BASE + PPC_CODE_SIZE) && ((target & 3) == 0)) {
+        if (g_ppcFunctionTable)
+            return g_ppcFunctionTable[(target - PPC_CODE_BASE) >> 2];
+    }
+    s_dummyNullFunc = nullptr;
+    return s_dummyNullFunc;
+}
+
+#ifdef PPC_LOOKUP_FUNC
+#undef PPC_LOOKUP_FUNC
+#endif
+#define PPC_LOOKUP_FUNC(x, y) PpcLookupFuncHelper(static_cast<uint32_t>(y))
+
 struct Memory
 {
     uint8_t* base{};
@@ -34,12 +56,18 @@ struct Memory
 
     PPCFunc* FindFunction(uint32_t guest) const noexcept
     {
-        return PPC_LOOKUP_FUNC(base, guest);
+        if (guest >= PPC_CODE_BASE && guest < (PPC_CODE_BASE + PPC_CODE_SIZE) && ((guest & 3) == 0)) {
+            return g_ppcFunctionTable ? g_ppcFunctionTable[(guest - PPC_CODE_BASE) >> 2] : nullptr;
+        }
+        return nullptr;
     }
 
     void InsertFunction(uint32_t guest, PPCFunc* host)
     {
-        PPC_LOOKUP_FUNC(base, guest) = host;
+        if (guest >= PPC_CODE_BASE && guest < (PPC_CODE_BASE + PPC_CODE_SIZE) && ((guest & 3) == 0)) {
+            if (g_ppcFunctionTable)
+                g_ppcFunctionTable[(guest - PPC_CODE_BASE) >> 2] = host;
+        }
     }
 };
 
