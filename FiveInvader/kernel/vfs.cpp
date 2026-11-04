@@ -79,6 +79,40 @@ namespace VFS
         {
             normalized.pop_back();
         }
+
+        // Strip trailing dots, semicolons, hashes or unprintable junk after known file extensions
+        for (const char* ext : {".sps", ".bik", ".fxc", ".dat", ".rpf", ".gxt2", ".xml", ".meta"})
+        {
+            size_t pos = normalized.rfind(ext);
+            if (pos != std::string::npos)
+            {
+                size_t extLen = std::strlen(ext);
+                if (pos + extLen < normalized.size())
+                {
+                    bool hasJunk = true;
+                    for (size_t i = pos + extLen; i < normalized.size(); ++i)
+                    {
+                        char c = normalized[i];
+                        if (c != '.' && c != ';' && c != '#' && c != '~' && c != ' ' && c != '\r' && c != '\n' && c != '\t')
+                        {
+                            hasJunk = false;
+                            break;
+                        }
+                    }
+                    if (hasJunk)
+                    {
+                        normalized = normalized.substr(0, pos + extLen);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Remove trailing dots or spaces
+        while (!normalized.empty() && (normalized.back() == '.' || normalized.back() == ' '))
+        {
+            normalized.pop_back();
+        }
         
         return normalized;
     }

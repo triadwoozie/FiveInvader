@@ -168,6 +168,14 @@ void sub_82EF3FA0(PPCContext& ctx, uint8_t* base);
 void sub_831B9330(PPCContext& ctx, uint8_t* base);
 void sub_831D0C30(PPCContext& ctx, uint8_t* base);
 void sub_827E1D70(PPCContext& ctx, uint8_t* base);
+void sub_8248B538(PPCContext& ctx, uint8_t* base);
+void sub_82988A60(PPCContext& ctx, uint8_t* base);
+void sub_82578948(PPCContext& ctx, uint8_t* base);
+void sub_8294C6C0(PPCContext& ctx, uint8_t* base);
+void sub_82948308(PPCContext& ctx, uint8_t* base);
+void sub_822438F8(PPCContext& ctx, uint8_t* base);
+void sub_824BBB30(PPCContext& ctx, uint8_t* base);
+void sub_822DA770(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -239,6 +247,14 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x82574338, &::sub_82574338);
     PatchFuncMapping(0x824B9C20, &::sub_824B9C20);
     PatchFuncMapping(0x824759C8, &::sub_824759C8);
+    PatchFuncMapping(0x8248B538, &::sub_8248B538);
+    PatchFuncMapping(0x82988A60, &::sub_82988A60);
+    PatchFuncMapping(0x82578948, &::sub_82578948);
+    PatchFuncMapping(0x8294C6C0, &::sub_8294C6C0);
+    PatchFuncMapping(0x82948308, &::sub_82948308);
+    PatchFuncMapping(0x822438F8, &::sub_822438F8);
+    PatchFuncMapping(0x824BBB30, &::sub_824BBB30);
+    PatchFuncMapping(0x822DA770, &::sub_822DA770);
     PatchFuncMapping(0x824F1388, &::sub_824F1388);
     PatchFuncMapping(0x824F1418, &::sub_824F1418);
     PatchFuncMapping(0x822D9768, &::sub_822D9768);
@@ -3286,16 +3302,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
                   stackTrace[0], stackTrace[1], stackTrace[2], stackTrace[3]);
     }
 
-    // POST-INIT FIX: timeout=0 polls are frame sync checks
-    // After init completes, return success to let scheduler invoke render callbacks
-    if (timeout == 0 && !ShouldFailOpenWait()) {
-        static int s_postInitPoll = 0;
-        if (++s_postInitPoll <= 5) {
-            LOGF_WARNING("[NtWaitEx] POST-INIT timeout=0 poll #{} returning SUCCESS for render loop", s_postInitPoll);
-        }
-        return STATUS_SUCCESS;
-    }
-    
+
     // VBlank removed - following UnleashedRecomp pattern (no force-firing)
     // Game progresses naturally without interrupt-driven timing
 
@@ -3384,18 +3391,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         return result;
     }
 
-    // POST-INIT: timeout=0 polls should return success to allow scheduler to proceed
-    // The game polls with timeout=0 waiting for frame signals - VBlank timer provides timing
-    if (timeout == 0 && !ShouldFailOpenWait()) {
-        // After init, timeout=0 polls are frame sync checks
-        // Return success to let scheduler invoke render callback
-        static int s_postInitPoll = 0;
-        if (++s_postInitPoll <= 5) {
-            LOGF_WARNING("[NtWaitEx] POST-INIT timeout=0 poll #{} returning SUCCESS", s_postInitPoll);
-        }
-        return STATUS_SUCCESS;
-    }
-    
+
     return obj->Wait(timeout);
 }
 
@@ -13737,11 +13733,109 @@ PPC_FUNC(sub_824759C8)
     if (c <= 20 || c % 60 == 0) {
         LOGF_INFO("[sub_824759C8] State 2 update Frame #{} obj=0x{:08X}", c, ctx.r3.u32);
     }
+    // Pace the loop at ~60 FPS (16ms) to avoid starving worker threads
+    std::this_thread::sleep_for(std::chrono::milliseconds(16));
     __imp__sub_824759C8(ctx, base);
     ScanRingBufferForPM4Packets();
     if (c <= 20 || c % 60 == 0) {
         LOGF_INFO("[sub_824759C8] State 2 update Frame #{} exit ret={}", c, (int32_t)ctx.r3.s32);
     }
+}
+
+extern "C" void __imp__sub_8248B538(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8248B538)
+{
+    static std::atomic<uint64_t> s_renderCalls{0};
+    uint64_t c = ++s_renderCalls;
+    if (c <= 20 || c % 60 == 0) {
+        LOGF_INFO("[sub_8248B538] Main render submission Frame #{}", c);
+    }
+    __imp__sub_8248B538(ctx, base);
+}
+
+extern "C" void __imp__sub_82988A60(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82988A60)
+{
+    __imp__sub_82988A60(ctx, base);
+    // Emulated keyboard/mouse controller 0 is always connected
+    if (ctx.r3.u32 == 0) {
+        static int s_connectedLog = 0;
+        if (++s_connectedLog <= 5) {
+            LOGF_INFO("[sub_82988A60] Emulated controller 0 marked connected (was 0)");
+        }
+        ctx.r3.u64 = 1;
+    }
+}
+
+extern "C" void __imp__sub_82578948(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82578948)
+{
+    // Storage is never busy in recompilation (no async disc drive latency)
+    static int s_count = 0;
+    if (++s_count <= 10) {
+        LOGF_INFO("[sub_82578948] #{} Storage idle report (ret=0) LR=0x{:08X}", s_count, ctx.lr);
+    }
+    ctx.r3.u64 = 0;
+}
+
+extern "C" void __imp__sub_8294C6C0(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_8294C6C0)
+{
+    __imp__sub_8294C6C0(ctx, base);
+    static int s_count = 0;
+    if (++s_count <= 20 || s_count % 100 == 0) {
+        uint32_t state = PPC_LOAD_U32(0x839D0000 - 4868);
+        LOGF_INFO("[sub_8294C6C0] #{} state={} ret={}", s_count, state, ctx.r3.u32);
+    }
+}
+
+extern "C" void __imp__sub_82948308(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82948308)
+{
+    static int s_count = 0;
+    if (++s_count <= 20 || s_count % 50 == 0) {
+        LOGF_INFO("[sub_82948308] #{} r3={} r4={} r5=0x{:08X} LR=0x{:08X}",
+                  s_count, ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.lr);
+    }
+    // Set output flag to 1 (profile / storage setting ready)
+    if (ctx.r5.u32 != 0 && ctx.r5.u32 < PPC_MEMORY_SIZE) {
+        PPC_STORE_U8(ctx.r5.u32, 1);
+    }
+    ctx.r3.u64 = 1;
+}
+
+extern "C" void __imp__sub_822438F8(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_822438F8)
+{
+    static int s_count = 0;
+    uint32_t stageBefore = PPC_LOAD_U32(0x8388C63C);
+    LOGF_INFO("[sub_822438F8] #{} ENTER stage={}", ++s_count, stageBefore);
+    __imp__sub_822438F8(ctx, base);
+    uint32_t stageAfter = PPC_LOAD_U32(0x8388C63C);
+    LOGF_INFO("[sub_822438F8] #{} EXIT stage={}", s_count, stageAfter);
+}
+
+extern "C" void __imp__sub_824BBB30(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_824BBB30)
+{
+    static int s_count = 0;
+    if (++s_count <= 20 || s_count % 1000 == 0) {
+        LOGF_INFO("[sub_824BBB30] #{} enter", s_count);
+    }
+    __imp__sub_824BBB30(ctx, base);
+    if (s_count <= 20 || s_count % 1000 == 0) {
+        LOGF_INFO("[sub_824BBB30] #{} exit", s_count);
+    }
+}
+
+extern "C" void __imp__sub_822DA770(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_822DA770)
+{
+    static int s_count = 0;
+    if (++s_count <= 20 || s_count % 5000 == 0) {
+        LOGF_INFO("[sub_822DA770] #{} r3=0x{:08X}", s_count, ctx.r3.u32);
+    }
+    __imp__sub_822DA770(ctx, base);
 }
 
 extern "C" void __imp__sub_824B9C20(PPCContext& ctx, uint8_t* base);
@@ -15617,19 +15711,12 @@ PPC_FUNC(sub_836B1768)
         flags &= 0x3F;
         PPC_STORE_U32(r11, flags);
     }
-    // Check if reason != 1, call sub_836B4A68 if enabled
-    if (interruptReason != 1) {
-        uint32_t flagAddr = 2143813632 + 25924;
-        if (flagAddr < PPC_MEMORY_SIZE - 4) {
-            uint32_t val = PPC_LOAD_U32(flagAddr);
-            if (vblankCount > 0 && vblankCount <= 4)
-                LOGF_INFO("[GPU IRQ] VBlank dispatch flag=0x{:08X} value=0x{:08X}",
-                          flagAddr, val);
-            if (val & 1) {
-                ctx.r3.u64 = ctx.r4.u64;
-                __imp__sub_836B4A68(ctx, base);
-            }
-        }
+    // Check if reason == 0 (VBlank), call sub_836B4A68 to advance D3D frame presentation
+    if (interruptReason == 0) {
+        if (vblankCount > 0 && vblankCount <= 4)
+            LOGF_INFO("[GPU IRQ] VBlank dispatch calling __imp__sub_836B4A68 device=0x{:08X}", ctx.r4.u32);
+        ctx.r3.u64 = ctx.r4.u64;
+        __imp__sub_836B4A68(ctx, base);
     }
 }
 

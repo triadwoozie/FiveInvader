@@ -917,6 +917,23 @@ def main() -> int:
     patch_recomp260_pool_init(ppc_dir / "ppc_recomp.260.cpp")
     patch_recomp27_statemachine_loop(ppc_dir / "ppc_recomp.27.cpp")
     patch_recomp9_queue_guard(ppc_dir / "ppc_recomp.9.cpp")
+    patch_recomp3_sub_822438F8_switch(ppc_dir / "ppc_recomp.3.cpp")
+    patch_recomp33_sub_8252E5A0_switch(ppc_dir / "ppc_recomp.33.cpp")
+    patch_recomp101_sub_8294C6C0_switch(ppc_dir / "ppc_recomp.101.cpp")
+    patch_recomp10_event_loop_guard(ppc_dir / "ppc_recomp.10.cpp")
+    patch_recomp27_event_loop_guard(ppc_dir / "ppc_recomp.27.cpp")
+    patch_recomp29_node_loop_guard(ppc_dir / "ppc_recomp.29.cpp")
+    patch_recomp33_sub_8251ED60(ppc_dir / "ppc_recomp.33.cpp")
+    patch_recomp8_session_loop_guard(ppc_dir / "ppc_recomp.8.cpp")
+    patch_recomp47_sub_826060C0_loop(ppc_dir / "ppc_recomp.47.cpp")
+    patch_recomp38_stage_loop_guards(ppc_dir / "ppc_recomp.38.cpp")
+    patch_recomp39_stage8_loop_guard(ppc_dir / "ppc_recomp.39.cpp")
+    patch_recomp212_sub_82F0F078_loop(ppc_dir / "ppc_recomp.212.cpp")
+    patch_recomp51_sub_82626FE8_guard(ppc_dir / "ppc_recomp.51.cpp")
+    patch_recomp118_sub_82A13988_guard(ppc_dir / "ppc_recomp.118.cpp")
+    patch_recomp31_sub_824F8A48_guard(ppc_dir / "ppc_recomp.31.cpp")
+    patch_recomp20_sub_823DF6A8_guard(ppc_dir / "ppc_recomp.20.cpp")
+    patch_recomp106_sub_8299BD70_loop(ppc_dir / "ppc_recomp.106.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -2227,7 +2244,7 @@ def patch_recomp245_poll_guard(path: pathlib.Path) -> bool:
         "\t// beq cr6,0x830d6cf4\n"
         "\tif (cr6.eq) goto loc_830D6CF4;"
     )
-    new = (
+    prev_new = (
         "loc_830D6CF4:\n"
         "\t{\n"
         "\t\tstatic int s_pollCount = 0;\n"
@@ -2256,8 +2273,33 @@ def patch_recomp245_poll_guard(path: pathlib.Path) -> bool:
         "\t// beq cr6,0x830d6cf4\n"
         "\tif (cr6.eq) goto loc_830D6CF4;"
     )
-    if old in text:
-        text = text.replace(old, new)
+    clean_new = (
+        "loc_830D6CF4:\n"
+        "\t{\n"
+        "\t\tstatic int s_pollCount = 0;\n"
+        "\t\tif (++s_pollCount <= 5 || s_pollCount % 100 == 0) {\n"
+        "\t\t\tfprintf(stderr, \"[sub_830D6CD0] Polling *(0x%08X + 100) == %u (poll #%d)\\n\", ctx.r31.u32, PPC_LOAD_U8(ctx.r31.u32 + 100), s_pollCount);\n"
+        "\t\t}\n"
+        "\t\t// li r3,10\n"
+        "\t\tctx.r3.s64 = 10;\n"
+        "\t\t// bl 0x82548de0\n"
+        "\t\tctx.lr = 0x830D6CFC;\n"
+        "\t\tsub_82548DE0(ctx, base);\n"
+        "\t\t// lbz r11,100(r31)\n"
+        "\t\tctx.r11.u64 = PPC_LOAD_U8(ctx.r31.u32 + 100);\n"
+        "\t}\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x830d6cf4\n"
+        "\tif (cr6.eq) goto loc_830D6CF4;"
+    )
+    if prev_new in text:
+        text = text.replace(prev_new, clean_new)
+        path.write_text(text)
+        print(f"Updated recomp.245 poll guard (clean poll) in {path}")
+        return True
+    elif old in text:
+        text = text.replace(old, clean_new)
         path.write_text(text)
         print(f"Patched recomp.245 poll guard in {path}")
         return True
@@ -2945,8 +2987,42 @@ def patch_recomp265_shader_lookup_guard(path: pathlib.Path) -> bool:
         '\t// ble cr6,0x831edbfc\n'
         '\tif (!cr6.gt) goto loc_831EDBFC;'
     )
-    if old_lookup in text:
-        text = text.replace(old_lookup, new_lookup)
+    fixed_lookup = (
+        '\t// stwu r1,-384(r1)\n'
+        '\tea = -384 + ctx.r1.u32;\n'
+        '\tPPC_STORE_U32(ea, ctx.r1.u32);\n'
+        '\tctx.r1.u32 = ea;\n'
+        '\t// mr r31,r3\n'
+        '\tctx.r31.u64 = ctx.r3.u64;\n'
+        '\t// mr r28,r4\n'
+        '\tctx.r28.u64 = ctx.r4.u64;\n'
+        '\t// mr r27,r5\n'
+        '\tctx.r27.u64 = ctx.r5.u64;\n'
+        '\t// mr r29,r7\n'
+        '\tctx.r29.u64 = ctx.r7.u64;\n'
+        '\t// li r3,0\n'
+        '\tctx.r3.s64 = 0;\n'
+        '\tif (ctx.r31.u32 < 0x10000 || ctx.r31.u32 >= PPC_MEMORY_SIZE - 4096) goto loc_831EDBFC;\n'
+        '\tif (ctx.r28.u32 < 0x10000 || ctx.r28.u32 >= PPC_MEMORY_SIZE) goto loc_831EDBFC;\n'
+        '\t{\n'
+        '\t\tuint8_t first_char_831e = PPC_LOAD_U8(ctx.r28.u32);\n'
+        '\t\tif (first_char_831e < 32 || first_char_831e > 126) goto loc_831EDBFC;\n'
+        '\t}\n'
+        '\t// lwz r11,3076(r31)\n'
+        '\tctx.r11.u64 = PPC_LOAD_U32(ctx.r31.u32 + 3076);\n'
+        '\tif (ctx.r11.u32 > 350) ctx.r11.u64 = 0;\n'
+        '\t// li r30,0\n'
+        '\tctx.r30.s64 = 0;\n'
+        '\t// cmpwi cr6,r11,0\n'
+        '\tcr6.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n'
+        '\t// ble cr6,0x831edbfc\n'
+        '\tif (!cr6.gt) goto loc_831EDBFC;'
+    )
+    if new_lookup in text:
+        text = text.replace(new_lookup, fixed_lookup)
+        patched = True
+    elif old_lookup in text:
+        text = text.replace(old_lookup, fixed_lookup)
         patched = True
 
     old_loop_step = (
@@ -3210,7 +3286,7 @@ def patch_recomp18_bugcheck_guards(path: pathlib.Path) -> bool:
         "\t// KeBugCheck(245) bypassed: resume at loc_823BADC4\n"
         "\tgoto loc_823BADC4;"
     )
-    new_site1 = (
+    target1_prev = (
         "\t// li r3,245\n"
         "\tctx.r3.s64 = 245;\n"
         "\t// bl 0x8375339c\n"
@@ -3221,11 +3297,25 @@ def patch_recomp18_bugcheck_guards(path: pathlib.Path) -> bool:
         "\t}\n"
         "\tgoto loc_823BAC30;"
     )
+    new_site1 = (
+        "\t// li r3,245\n"
+        "\tctx.r3.s64 = 245;\n"
+        "\t// bl 0x8375339c\n"
+        "\tctx.lr = 0x823BAC30;\n"
+        "\t// KeBugCheck(245) bypassed: ensure command buffer recording active and resume at loc_823BADC4\n"
+        "\tif (ctx.r31.u32 != 0 && PPC_LOAD_U32(ctx.r31.u32 + 13904) == 0) {\n"
+        "\t\tPPC_STORE_U32(ctx.r31.u32 + 13904, 1);\n"
+        "\t}\n"
+        "\tgoto loc_823BADC4;"
+    )
     if target1_imp in text:
         text = text.replace(target1_imp, new_site1)
         patched = True
     elif target1_goto in text:
         text = text.replace(target1_goto, new_site1)
+        patched = True
+    elif target1_prev in text:
+        text = text.replace(target1_prev, new_site1)
         patched = True
 
     old_site2 = (
@@ -4006,6 +4096,1154 @@ def patch_recomp9_queue_guard(path: pathlib.Path) -> bool:
     if patched:
         path.write_text(text)
         print(f"Patched recomp.9 queue guard in {path}")
+        return True
+    return False
+
+def patch_recomp3_sub_822438F8_switch(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    
+    target_dispatch = (
+        "\t// cmplwi cr6,r10,15\n"
+        "\tcr6.compare<uint32_t>(ctx.r10.u32, 15, ctx.xer);\n"
+        "\t// bgt cr6,0x82243a40\n"
+        "\tif (cr6.gt) goto loc_82243A40;\n"
+        "\t// lis r12,-32220\n"
+        "\tctx.r12.s64 = -2111569920;\n"
+        "\t// rlwinm r0,r11,2,0,29\n"
+        "\tctx.r0.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\t// addi r12,r12,14676\n"
+        "\tctx.r12.s64 = ctx.r12.s64 + 14676;\n"
+        "\t// lwzx r0,r12,r0\n"
+        "\tctx.r0.u64 = PPC_LOAD_U32(ctx.r12.u32 + ctx.r0.u32);\n"
+        "\t// mtctr r0\n"
+        "\tctr.u64 = ctx.r0.u64;\n"
+        "\t// bctr \n"
+        "\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\treturn;\n"
+        "\t// lwz r17,14740(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14740);\n"
+        "\t// lwz r17,14764(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14764);\n"
+        "\t// lwz r17,14824(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14824);\n"
+        "\t// lwz r17,14772(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14772);\n"
+        "\t// lwz r17,14780(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14780);\n"
+        "\t// lwz r17,14800(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14800);\n"
+        "\t// lwz r17,14816(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14816);\n"
+        "\t// lwz r17,14852(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14852);\n"
+        "\t// lwz r17,14860(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14860);\n"
+        "\t// lwz r17,14868(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14868);\n"
+        "\t// lwz r17,14876(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14876);\n"
+        "\t// lwz r17,14928(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14928);\n"
+        "\t// lwz r17,14884(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14884);\n"
+        "\t// lwz r17,14892(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14892);\n"
+        "\t// lwz r17,14904(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14904);\n"
+        "\t// lwz r17,14808(r4)\n"
+        "\tctx.r17.u64 = PPC_LOAD_U32(ctx.r4.u32 + 14808);"
+    )
+
+    repl_dispatch = (
+        "\tswitch (ctx.r10.u32) {\n"
+        "\tcase 0: goto loc_82243994;\n"
+        "\tcase 1: goto loc_822439AC;\n"
+        "\tcase 2: goto loc_822439E8;\n"
+        "\tcase 3: goto loc_822439B4;\n"
+        "\tcase 4: goto loc_822439BC;\n"
+        "\tcase 5: goto loc_822439D0;\n"
+        "\tcase 6: goto loc_822439E0;\n"
+        "\tcase 7: goto loc_82243A04;\n"
+        "\tcase 8: goto loc_82243A0C;\n"
+        "\tcase 9: goto loc_82243A14;\n"
+        "\tcase 10: goto loc_82243A1C;\n"
+        "\tcase 11: goto loc_82243A50;\n"
+        "\tcase 12: goto loc_82243A24;\n"
+        "\tcase 13: goto loc_82243A2C;\n"
+        "\tcase 14: goto loc_82243A38;\n"
+        "\tcase 15: goto loc_822439D8;\n"
+        "\tdefault: goto loc_82243A40;\n"
+        "\t}"
+    )
+
+    target_body = (
+        "\t// lbz r10,-14809(r30)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U8(ctx.r30.u32 + -14809);\n"
+        "\t// cmplwi cr6,r10,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82243a50\n"
+        "\tif (cr6.eq) goto loc_82243A50;\n"
+        "\t// bl 0x829458a0\n"
+        "\tctx.lr = 0x822439A4;\n"
+        "\tsub_829458A0(ctx, base);\n"
+        "\t// stb r27,-14809(r30)\n"
+        "\tPPC_STORE_U8(ctx.r30.u32 + -14809, ctx.r27.u8);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// stw r22,-14788(r31)\n"
+        "\tPPC_STORE_U32(ctx.r31.u32 + -14788, ctx.r22.u32);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x82567ec8\n"
+        "\tctx.lr = 0x822439B8;\n"
+        "\tsub_82567EC8(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// li r4,1\n"
+        "\tctx.r4.s64 = 1;\n"
+        "\t// lwz r3,23808(r26)\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r26.u32 + 23808);\n"
+        "\t// bl 0x82525480\n"
+        "\tctx.lr = 0x822439C8;\n"
+        "\tsub_82525480(ctx, base);\n"
+        "\t// stw r24,-14788(r31)\n"
+        "\tPPC_STORE_U32(ctx.r31.u32 + -14788, ctx.r24.u32);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x8256fc30\n"
+        "\tctx.lr = 0x822439D4;\n"
+        "\tsub_8256FC30(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x82562720\n"
+        "\tctx.lr = 0x822439DC;\n"
+        "\tsub_82562720(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x82567f78\n"
+        "\tctx.lr = 0x822439E4;\n"
+        "\tsub_82567F78(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// li r10,1\n"
+        "\tctx.r10.s64 = 1;\n"
+        "\t// stw r27,22940(r29)\n"
+        "\tPPC_STORE_U32(ctx.r29.u32 + 22940, ctx.r27.u32);\n"
+        "\t// mr r11,r27\n"
+        "\tctx.r11.u64 = ctx.r27.u64;\n"
+        "\t// stb r10,-14809(r30)\n"
+        "\tPPC_STORE_U8(ctx.r30.u32 + -14809, ctx.r10.u8);\n"
+        "\t// bl 0x8294c5f0\n"
+        "\tctx.lr = 0x822439FC;\n"
+        "\tsub_8294C5F0(ctx, base);\n"
+        "\t// stw r28,-14788(r31)\n"
+        "\tPPC_STORE_U32(ctx.r31.u32 + -14788, ctx.r28.u32);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x82568000\n"
+        "\tctx.lr = 0x82243A08;\n"
+        "\tsub_82568000(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x8256dc20\n"
+        "\tctx.lr = 0x82243A10;\n"
+        "\tsub_8256DC20(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x8256bf90\n"
+        "\tctx.lr = 0x82243A18;\n"
+        "\tsub_8256BF90(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// stw r23,-14788(r31)\n"
+        "\tPPC_STORE_U32(ctx.r31.u32 + -14788, ctx.r23.u32);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x8256c048\n"
+        "\tctx.lr = 0x82243A28;\n"
+        "\tsub_8256C048(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// li r3,0\n"
+        "\tctx.r3.s64 = 0;\n"
+        "\t// bl 0x8256c230\n"
+        "\tctx.lr = 0x82243A34;\n"
+        "\tsub_8256C230(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "\t// bl 0x8256c190\n"
+        "\tctx.lr = 0x82243A3C;\n"
+        "\tsub_8256C190(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;"
+    )
+
+    repl_body = (
+        "loc_82243994:\n"
+        "\t// lbz r10,-14809(r30)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U8(ctx.r30.u32 + -14809);\n"
+        "\t// cmplwi cr6,r10,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r10.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82243a50\n"
+        "\tif (cr6.eq) goto loc_82243A50;\n"
+        "\t// bl 0x829458a0\n"
+        "\tctx.lr = 0x822439A4;\n"
+        "\tsub_829458A0(ctx, base);\n"
+        "\t// stb r27,-14809(r30)\n"
+        "\tPPC_STORE_U8(ctx.r30.u32 + -14809, ctx.r27.u8);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_822439AC:\n"
+        "\t// stw r22,-14788(r31)\n"
+        "\tPPC_STORE_U32(ctx.r31.u32 + -14788, ctx.r22.u32);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_822439B4:\n"
+        "\t// bl 0x82567ec8\n"
+        "\tctx.lr = 0x822439B8;\n"
+        "\tsub_82567EC8(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_822439BC:\n"
+        "\t// li r4,1\n"
+        "\tctx.r4.s64 = 1;\n"
+        "\t// lwz r3,23808(r26)\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r26.u32 + 23808);\n"
+        "\t// bl 0x82525480\n"
+        "\tctx.lr = 0x822439C8;\n"
+        "\tsub_82525480(ctx, base);\n"
+        "\t// stw r24,-14788(r31)\n"
+        "\tPPC_STORE_U32(ctx.r31.u32 + -14788, ctx.r24.u32);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_822439D0:\n"
+        "\t// bl 0x8256fc30\n"
+        "\tctx.lr = 0x822439D4;\n"
+        "\tsub_8256FC30(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_822439D8:\n"
+        "\t// bl 0x82562720\n"
+        "\tctx.lr = 0x822439DC;\n"
+        "\tsub_82562720(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_822439E0:\n"
+        "\t// bl 0x82567f78\n"
+        "\tctx.lr = 0x822439E4;\n"
+        "\tsub_82567F78(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_822439E8:\n"
+        "\t// li r10,1\n"
+        "\tctx.r10.s64 = 1;\n"
+        "\t// stw r27,22940(r29)\n"
+        "\tPPC_STORE_U32(ctx.r29.u32 + 22940, ctx.r27.u32);\n"
+        "\t// mr r11,r27\n"
+        "\tctx.r11.u64 = ctx.r27.u64;\n"
+        "\t// stb r10,-14809(r30)\n"
+        "\tPPC_STORE_U8(ctx.r30.u32 + -14809, ctx.r10.u8);\n"
+        "\t// bl 0x8294c5f0\n"
+        "\tctx.lr = 0x822439FC;\n"
+        "\tsub_8294C5F0(ctx, base);\n"
+        "\t// stw r28,-14788(r31)\n"
+        "\tPPC_STORE_U32(ctx.r31.u32 + -14788, ctx.r28.u32);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_82243A04:\n"
+        "\t// bl 0x82568000\n"
+        "\tctx.lr = 0x82243A08;\n"
+        "\tsub_82568000(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_82243A0C:\n"
+        "\t// bl 0x8256dc20\n"
+        "\tctx.lr = 0x82243A10;\n"
+        "\tsub_8256DC20(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_82243A14:\n"
+        "\t// bl 0x8256bf90\n"
+        "\tctx.lr = 0x82243A18;\n"
+        "\tsub_8256BF90(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_82243A1C:\n"
+        "\t// stw r23,-14788(r31)\n"
+        "\tPPC_STORE_U32(ctx.r31.u32 + -14788, ctx.r23.u32);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_82243A24:\n"
+        "\t// bl 0x8256c048\n"
+        "\tctx.lr = 0x82243A28;\n"
+        "\tsub_8256C048(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_82243A2C:\n"
+        "\t// li r3,0\n"
+        "\tctx.r3.s64 = 0;\n"
+        "\t// bl 0x8256c230\n"
+        "\tctx.lr = 0x82243A34;\n"
+        "\tsub_8256C230(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+        "loc_82243A38:\n"
+        "\t// bl 0x8256c190\n"
+        "\tctx.lr = 0x82243A3C;\n"
+        "\tsub_8256C190(ctx, base);\n"
+        "\t// b 0x82243a44\n"
+        "\tgoto loc_82243A44;\n"
+    )
+
+    patched = False
+    if target_dispatch in text:
+        text = text.replace(target_dispatch, repl_dispatch)
+        patched = True
+    if target_body in text:
+        text = text.replace(target_body, repl_body)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.3 sub_822438F8 switch in {path}")
+        return True
+    return False
+
+def patch_recomp33_sub_8252E5A0_switch(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "\t// mtctr r11\n"
+        "\tctr.u64 = ctx.r11.u64;\n"
+        "\t// cmpwi cr6,r11,0\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n"
+        "\t// bdzf 4*cr6+eq,0x8252e640\n"
+        "\t// bdzf 4*cr6+eq,0x8252e79c\n"
+        "\t// bdzf 4*cr6+eq,0x8252e64c\n"
+        "\t// bdzf 4*cr6+eq,0x8252e6c4\n"
+        "\t// bdzf 4*cr6+eq,0x8252e6f4\n"
+        "\t// bdzf 4*cr6+eq,0x8252e75c\n"
+        "\t// bne cr6,0x8252e794\n"
+        "\tif (!cr6.eq) goto loc_8252E794;"
+    )
+
+    repl = (
+        "\tswitch (ctx.r11.u32) {\n"
+        "\tcase 0: break;\n"
+        "\tcase 1: goto loc_8252E640;\n"
+        "\tcase 2: goto loc_8252E79C;\n"
+        "\tcase 3: goto loc_8252E64C;\n"
+        "\tcase 4: goto loc_8252E6C4;\n"
+        "\tcase 5: goto loc_8252E6F4;\n"
+        "\tcase 6: goto loc_8252E75C;\n"
+        "\tdefault: goto loc_8252E794;\n"
+        "\t}"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.33 sub_8252E5A0 switch in {path}")
+        return True
+    return False
+
+def patch_recomp101_sub_8294C6C0_switch(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "\t// mtctr r11\n"
+        "\tctr.u64 = ctx.r11.u64;\n"
+        "\t// cmpwi cr6,r11,0\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n"
+        "\t// bdzf 4*cr6+eq,0x8294c7d0\n"
+        "\t// bdzf 4*cr6+eq,0x8294c858\n"
+        "\t// bdzf 4*cr6+eq,0x8294c8b4\n"
+        "\t// bdzf 4*cr6+eq,0x8294c8ec\n"
+        "\t// bdzf 4*cr6+eq,0x8294c930\n"
+        "\t// bne cr6,0x8294c994\n"
+        "\tif (!cr6.eq) goto loc_8294C994;"
+    )
+
+    repl = (
+        "\tswitch (ctx.r11.u32) {\n"
+        "\tcase 0: break;\n"
+        "\tcase 1: goto loc_8294C7D0;\n"
+        "\tcase 2: goto loc_8294C858;\n"
+        "\tcase 3: goto loc_8294C8B4;\n"
+        "\tcase 4: goto loc_8294C8EC;\n"
+        "\tcase 5: goto loc_8294C930;\n"
+        "\tdefault: goto loc_8294C994;\n"
+        "\t}"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.101 sub_8294C6C0 switch in {path}")
+        return True
+    return False
+
+def patch_recomp10_event_loop_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "\t// mr r31,r29\n"
+        "\tctx.r31.u64 = ctx.r29.u64;\n"
+        "\t// cmplw cr6,r30,r29\n"
+        "\tcr6.compare<uint32_t>(ctx.r30.u32, ctx.r29.u32, ctx.xer);\n"
+        "\t// bne cr6,0x822da7b8\n"
+        "\tif (!cr6.eq) goto loc_822DA7B8;"
+    )
+    repl = (
+        "\t// mr r31,r29\n"
+        "\tctx.r31.u64 = ctx.r29.u64;\n"
+        "\t// cmplw cr6,r30,r29\n"
+        "\tcr6.compare<uint32_t>(ctx.r30.u32, ctx.r29.u32, ctx.xer);\n"
+        "\t// bne cr6,0x822da7b8 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount2DA770 = 0;\n"
+        "\t\tif (++s_loopCount2DA770 > 64) {\n"
+        "\t\t\ts_loopCount2DA770 = 0;\n"
+        "\t\t\tgoto loc_822DA834;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_822DA7B8;\n"
+        "\t\ts_loopCount2DA770 = 0;\n"
+        "\t}"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.10 event loop guard in {path}")
+        return True
+    return False
+
+def patch_recomp27_event_loop_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "\t// bl 0x82fc9798\n"
+        "\tctx.lr = 0x824BBC18;\n"
+        "\tsub_82FC9798(ctx, base);\n"
+        "\t// b 0x824bbb70\n"
+        "\tgoto loc_824BBB70;"
+    )
+    repl = (
+        "\t// bl 0x82fc9798\n"
+        "\tctx.lr = 0x824BBC18;\n"
+        "\tsub_82FC9798(ctx, base);\n"
+        "\t// b 0x824bbb70 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount4BBB30 = 0;\n"
+        "\t\tif (++s_loopCount4BBB30 > 64) {\n"
+        "\t\t\ts_loopCount4BBB30 = 0;\n"
+        "\t\t\tgoto loc_824BBC1C;\n"
+        "\t\t}\n"
+        "\t\tgoto loc_824BBB70;\n"
+        "\t}"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.27 event loop guard in {path}")
+        return True
+    return False
+
+def patch_recomp29_node_loop_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "\t// lwz r31,4(r31)\n"
+        "\tctx.r31.u64 = PPC_LOAD_U32(ctx.r31.u32 + 4);\n"
+        "\t// cmplw cr6,r27,r31\n"
+        "\tcr6.compare<uint32_t>(ctx.r27.u32, ctx.r31.u32, ctx.xer);\n"
+        "\t// bne cr6,0x824dbe18\n"
+        "\tif (!cr6.eq) goto loc_824DBE18;"
+    )
+    repl = (
+        "\t// lwz r31,4(r31)\n"
+        "\tctx.r31.u64 = PPC_LOAD_U32(ctx.r31.u32 + 4);\n"
+        "\t// cmplw cr6,r27,r31\n"
+        "\tcr6.compare<uint32_t>(ctx.r27.u32, ctx.r31.u32, ctx.xer);\n"
+        "\t// bne cr6,0x824dbe18 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCountDBE18 = 0;\n"
+        "\t\tif (++s_loopCountDBE18 > 64) {\n"
+        "\t\t\ts_loopCountDBE18 = 0;\n"
+        "\t\t\tgoto loc_824DBEC8;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_824DBE18;\n"
+        "\t\ts_loopCountDBE18 = 0;\n"
+        "\t}"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.29 node loop guard in {path}")
+        return True
+    return False
+
+def patch_recomp33_sub_8251ED60(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target_loop = (
+        "\t// lwz r30,0(r30)\n"
+        "\tctx.r30.u64 = PPC_LOAD_U32(ctx.r30.u32 + 0);\n"
+        "\t// bne cr6,0x8251ed9c\n"
+        "\tif (!cr6.eq) goto loc_8251ED9C;"
+    )
+    repl_loop = (
+        "\t// lwz r30,0(r30)\n"
+        "\tctx.r30.u64 = PPC_LOAD_U32(ctx.r30.u32 + 0);\n"
+        "\t// bne cr6,0x8251ed9c with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCountED9C = 0;\n"
+        "\t\tif (++s_loopCountED9C > 64) {\n"
+        "\t\t\ts_loopCountED9C = 0;\n"
+        "\t\t\tgoto loc_8251EDB4;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_8251ED9C;\n"
+        "\t\ts_loopCountED9C = 0;\n"
+        "\t}"
+    )
+
+    target_switch = (
+        "\t// mtctr r10\n"
+        "\tctr.u64 = ctx.r10.u64;\n"
+        "\t// cmpwi cr6,r10,0\n"
+        "\tcr6.compare<int32_t>(ctx.r10.s32, 0, ctx.xer);\n"
+        "\t// bdzf 4*cr6+eq,0x8251ee14\n"
+        "\t// bdzf 4*cr6+eq,0x8251ee4c\n"
+        "\t// bdzf 4*cr6+eq,0x8251ee98\n"
+        "\t// bdzf 4*cr6+eq,0x8251eebc\n"
+        "\t// bne cr6,0x8251eefc\n"
+        "\tif (!cr6.eq) goto loc_8251EEFC;"
+    )
+    repl_switch = (
+        "\tswitch (ctx.r10.u32) {\n"
+        "\tcase 0: break;\n"
+        "\tcase 1: goto loc_8251EE14;\n"
+        "\tcase 2: goto loc_8251EE4C;\n"
+        "\tcase 3: goto loc_8251EE98;\n"
+        "\tcase 4: goto loc_8251EEBC;\n"
+        "\tcase 5: goto loc_8251EEFC;\n"
+        "\tdefault: goto loc_8251EF84;\n"
+        "\t}"
+    )
+
+    patched = False
+    if target_loop in text:
+        text = text.replace(target_loop, repl_loop)
+        patched = True
+    if target_switch in text:
+        text = text.replace(target_switch, repl_switch)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.33 sub_8251ED60 loop and switch in {path}")
+        return True
+    return False
+
+def patch_recomp8_session_loop_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "loc_822996A0:\n"
+        "\t// mr r31,r26\n"
+        "\tctx.r31.u64 = ctx.r26.u64;\n"
+        "\t// lwz r26,60(r26)\n"
+        "\tctx.r26.u64 = PPC_LOAD_U32(ctx.r26.u32 + 60);\n"
+        "\t// cmplw cr6,r29,r31\n"
+        "\tcr6.compare<uint32_t>(ctx.r29.u32, ctx.r31.u32, ctx.xer);\n"
+        "\t// bne cr6,0x82299610\n"
+        "\tif (!cr6.eq) goto loc_82299610;"
+    )
+    repl = (
+        "loc_822996A0:\n"
+        "\t// mr r31,r26\n"
+        "\tctx.r31.u64 = ctx.r26.u64;\n"
+        "\t// lwz r26,60(r26)\n"
+        "\tctx.r26.u64 = PPC_LOAD_U32(ctx.r26.u32 + 60);\n"
+        "\t// cmplw cr6,r29,r31\n"
+        "\tcr6.compare<uint32_t>(ctx.r29.u32, ctx.r31.u32, ctx.xer);\n"
+        "\t// bne cr6,0x82299610 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount299610 = 0;\n"
+        "\t\tif (++s_loopCount299610 > 64) {\n"
+        "\t\t\ts_loopCount299610 = 0;\n"
+        "\t\t\tgoto loc_8229982C;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_82299610;\n"
+        "\t\ts_loopCount299610 = 0;\n"
+        "\t}"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.8 session loop guard in {path}")
+        return True
+    return False
+
+def patch_recomp47_sub_826060C0_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "\t// bl 0x825fc2d8\n"
+        "\tctx.lr = 0x826060E8;\n"
+        "\tsub_825FC2D8(ctx, base);\n"
+        "\t// clrlwi r29,r3,24\n"
+        "\tctx.r29.u64 = ctx.r3.u32 & 0xFF;\n"
+        "\t// cmplwi cr6,r29,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r29.u32, 0, ctx.xer);"
+    )
+    repl = (
+        "\t// bl 0x825fc2d8\n"
+        "\tctx.lr = 0x826060E8;\n"
+        "\tsub_825FC2D8(ctx, base);\n"
+        "\t// clrlwi r29,r3,24\n"
+        "\tctx.r29.u64 = ctx.r3.u32 & 0xFF;\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount6060DC = 0;\n"
+        "\t\tif (++s_loopCount6060DC > 5) {\n"
+        "\t\t\ts_loopCount6060DC = 0;\n"
+        "\t\t\tctx.r29.u64 = 1;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\t// cmplwi cr6,r29,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r29.u32, 0, ctx.xer);"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.47 sub_826060C0 loop guard in {path}")
+        return True
+    return False
+
+def patch_recomp38_stage_loop_guards(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    target1 = (
+        "loc_82567F90:\n"
+        "\t// li r3,1\n"
+        "\tctx.r3.s64 = 1;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x82567F98;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// bl 0x825628c8\n"
+        "\tctx.lr = 0x82567F9C;\n"
+        "\tsub_825628C8(ctx, base);\n"
+        "\t// bl 0x82945778\n"
+        "\tctx.lr = 0x82567FA0;\n"
+        "\tsub_82945778(ctx, base);\n"
+        "\t// cmpwi cr6,r3,0\n"
+        "\tcr6.compare<int32_t>(ctx.r3.s32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82567f90\n"
+        "\tif (cr6.eq) goto loc_82567F90;"
+    )
+    repl1 = (
+        "loc_82567F90:\n"
+        "\t// li r3,1\n"
+        "\tctx.r3.s64 = 1;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x82567F98;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// bl 0x825628c8\n"
+        "\tctx.lr = 0x82567F9C;\n"
+        "\tsub_825628C8(ctx, base);\n"
+        "\t// bl 0x82945778\n"
+        "\tctx.lr = 0x82567FA0;\n"
+        "\tsub_82945778(ctx, base);\n"
+        "\t// cmpwi cr6,r3,0 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount567F90 = 0;\n"
+        "\t\tif (++s_loopCount567F90 > 5) {\n"
+        "\t\t\ts_loopCount567F90 = 0;\n"
+        "\t\t\tctx.r3.s64 = 1;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\tcr6.compare<int32_t>(ctx.r3.s32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82567f90\n"
+        "\tif (cr6.eq) goto loc_82567F90;"
+    )
+
+    target2 = (
+        "loc_82568024:\n"
+        "\t// li r3,1\n"
+        "\tctx.r3.s64 = 1;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x8256802C;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// bl 0x825628c8\n"
+        "\tctx.lr = 0x82568030;\n"
+        "\tsub_825628C8(ctx, base);\n"
+        "\t// bl 0x82945638\n"
+        "\tctx.lr = 0x82568034;\n"
+        "\tsub_82945638(ctx, base);\n"
+        "\t// cmpwi cr6,r3,0\n"
+        "\tcr6.compare<int32_t>(ctx.r3.s32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82568024\n"
+        "\tif (cr6.eq) goto loc_82568024;"
+    )
+    repl2 = (
+        "loc_82568024:\n"
+        "\t// li r3,1\n"
+        "\tctx.r3.s64 = 1;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x8256802C;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// bl 0x825628c8\n"
+        "\tctx.lr = 0x82568030;\n"
+        "\tsub_825628C8(ctx, base);\n"
+        "\t// bl 0x82945638\n"
+        "\tctx.lr = 0x82568034;\n"
+        "\tsub_82945638(ctx, base);\n"
+        "\t// cmpwi cr6,r3,0 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount568024 = 0;\n"
+        "\t\tif (++s_loopCount568024 > 5) {\n"
+        "\t\t\ts_loopCount568024 = 0;\n"
+        "\t\t\tctx.r3.s64 = 1;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\tcr6.compare<int32_t>(ctx.r3.s32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82568024\n"
+        "\tif (cr6.eq) goto loc_82568024;"
+    )
+
+    target3 = (
+        "loc_82568048:\n"
+        "\t// li r3,1\n"
+        "\tctx.r3.s64 = 1;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x82568050;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// bl 0x825628c8\n"
+        "\tctx.lr = 0x82568054;\n"
+        "\tsub_825628C8(ctx, base);\n"
+        "\t// bl 0x82951c60\n"
+        "\tctx.lr = 0x82568058;\n"
+        "\tsub_82951C60(ctx, base);\n"
+        "\t// cmpwi cr6,r3,0\n"
+        "\tcr6.compare<int32_t>(ctx.r3.s32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82568048\n"
+        "\tif (cr6.eq) goto loc_82568048;"
+    )
+    repl3 = (
+        "loc_82568048:\n"
+        "\t// li r3,1\n"
+        "\tctx.r3.s64 = 1;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x82568050;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// bl 0x825628c8\n"
+        "\tctx.lr = 0x82568054;\n"
+        "\tsub_825628C8(ctx, base);\n"
+        "\t// bl 0x82951c60\n"
+        "\tctx.lr = 0x82568058;\n"
+        "\tsub_82951C60(ctx, base);\n"
+        "\t// cmpwi cr6,r3,0 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount568048 = 0;\n"
+        "\t\tif (++s_loopCount568048 > 5) {\n"
+        "\t\t\ts_loopCount568048 = 0;\n"
+        "\t\t\tctx.r3.s64 = 2;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\tcr6.compare<int32_t>(ctx.r3.s32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82568048\n"
+        "\tif (cr6.eq) goto loc_82568048;"
+    )
+
+    if target1 in text:
+        text = text.replace(target1, repl1)
+        patched = True
+    if target2 in text:
+        text = text.replace(target2, repl2)
+        patched = True
+    if target3 in text:
+        text = text.replace(target3, repl3)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.38 stage loop guards in {path}")
+        return True
+    return False
+
+def patch_recomp39_stage8_loop_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "loc_8256DC48:\n"
+        "\t// li r3,1\n"
+        "\tctx.r3.s64 = 1;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x8256DC50;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// bl 0x825628c8\n"
+        "\tctx.lr = 0x8256DC54;\n"
+        "\tsub_825628C8(ctx, base);\n"
+        "\t// bl 0x829541c0\n"
+        "\tctx.lr = 0x8256DC58;\n"
+        "\tsub_829541C0(ctx, base);\n"
+        "\t// mr r30,r3\n"
+        "\tctx.r30.u64 = ctx.r3.u64;\n"
+        "\t// cmpwi cr6,r3,1\n"
+        "\tcr6.compare<int32_t>(ctx.r3.s32, 1, ctx.xer);\n"
+        "\t// beq cr6,0x8256dc48\n"
+        "\tif (cr6.eq) goto loc_8256DC48;"
+    )
+    repl = (
+        "loc_8256DC48:\n"
+        "\t// li r3,1\n"
+        "\tctx.r3.s64 = 1;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x8256DC50;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// bl 0x825628c8\n"
+        "\tctx.lr = 0x8256DC54;\n"
+        "\tsub_825628C8(ctx, base);\n"
+        "\t// bl 0x829541c0\n"
+        "\tctx.lr = 0x8256DC58;\n"
+        "\tsub_829541C0(ctx, base);\n"
+        "\t// mr r30,r3\n"
+        "\tctx.r30.u64 = ctx.r3.u64;\n"
+        "\t// cmpwi cr6,r3,1 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount56DC48 = 0;\n"
+        "\t\tif (++s_loopCount56DC48 > 5) {\n"
+        "\t\t\ts_loopCount56DC48 = 0;\n"
+        "\t\t\tctx.r3.s64 = 0;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\tcr6.compare<int32_t>(ctx.r3.s32, 1, ctx.xer);\n"
+        "\t// beq cr6,0x8256dc48\n"
+        "\tif (cr6.eq) goto loc_8256DC48;"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.39 stage 8 loop guard in {path}")
+        return True
+    return False
+
+def patch_recomp212_sub_82F0F078_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    target1 = (
+        "\t// cmpw cr6,r11,r7\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, ctx.r7.s32, ctx.xer);\n"
+        "\t// add r8,r10,r9\n"
+        "\tctx.r8.u64 = ctx.r10.u64 + ctx.r9.u64;\n"
+        "\t// blt cr6,0x82f0f0ec\n"
+        "\tif (cr6.lt) goto loc_82F0F0EC;"
+    )
+    repl1 = (
+        "\t// cmpw cr6,r11,r7\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, ctx.r7.s32, ctx.xer);\n"
+        "\t// add r8,r10,r9\n"
+        "\tctx.r8.u64 = ctx.r10.u64 + ctx.r9.u64;\n"
+        "\t// blt cr6,0x82f0f0ec with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCountF0F0EC = 0;\n"
+        "\t\tif (++s_loopCountF0F0EC > 64) {\n"
+        "\t\t\ts_loopCountF0F0EC = 0;\n"
+        "\t\t\tgoto loc_82F0F10C;\n"
+        "\t\t}\n"
+        "\t\tif (cr6.lt) goto loc_82F0F0EC;\n"
+        "\t\ts_loopCountF0F0EC = 0;\n"
+        "\t}"
+    )
+
+    target2 = (
+        "loc_82F0F110:\n"
+        "\t// lwz r11,140(r3)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 140);\n"
+        "\t// cmpwi cr6,r11,-1\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, -1, ctx.xer);\n"
+        "\t// bne cr6,0x82f0f0b8\n"
+        "\tif (!cr6.eq) goto loc_82F0F0B8;"
+    )
+    repl2 = (
+        "loc_82F0F110:\n"
+        "\t// lwz r11,140(r3)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r3.u32 + 140);\n"
+        "\t// cmpwi cr6,r11,-1\n"
+        "\tcr6.compare<int32_t>(ctx.r11.s32, -1, ctx.xer);\n"
+        "\t// bne cr6,0x82f0f0b8 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCountF0F0B8 = 0;\n"
+        "\t\tif (++s_loopCountF0F0B8 > 64) {\n"
+        "\t\t\ts_loopCountF0F0B8 = 0;\n"
+        "\t\t\tgoto loc_82F0F11C;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_82F0F0B8;\n"
+        "\t\ts_loopCountF0F0B8 = 0;\n"
+        "\t}"
+    )
+
+    if target1 in text:
+        text = text.replace(target1, repl1)
+        patched = True
+    if target2 in text:
+        text = text.replace(target2, repl2)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.212 sub_82F0F078 loop guard in {path}")
+        return True
+    return False
+
+def patch_recomp51_sub_82626FE8_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "PPC_FUNC_IMPL(__imp__sub_82626FE8) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\t// lhz r11,4(r3)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U16(ctx.r3.u32 + 4);"
+    )
+    repl = (
+        "PPC_FUNC_IMPL(__imp__sub_82626FE8) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tif (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 8) return;\n"
+        "\tif (ctx.r4.u32 < 0x10000 || ctx.r4.u32 >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\tuint32_t tableData_8262 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n"
+        "\tif (tableData_8262 < 0x10000 || tableData_8262 >= PPC_MEMORY_SIZE - 4) return;\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\t// lhz r11,4(r3)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U16(ctx.r3.u32 + 4);"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.51 sub_82626FE8 guard in {path}")
+        return True
+    return False
+
+def patch_recomp118_sub_82A13988_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "loc_82A139B8:\n"
+        "\t// lwz r11,0(r29)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r29.u32 + 0);\n"
+        "\t// addi r4,r1,80\n"
+        "\tctx.r4.s64 = ctx.r1.s64 + 80;\n"
+        "\t// lwzx r11,r30,r11\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r30.u32 + ctx.r11.u32);\n"
+        "\t// addi r3,r11,4\n"
+        "\tctx.r3.s64 = ctx.r11.s64 + 4;\n"
+        "\t// bl 0x82626fe8\n"
+        "\tctx.lr = 0x82A139CC;\n"
+        "\tsub_82626FE8(ctx, base);"
+    )
+    repl = (
+        "loc_82A139B8:\n"
+        "\tif (ctx.r29.u32 < 0x10000 || ctx.r29.u32 >= PPC_MEMORY_SIZE - 4) goto loc_82A139D8;\n"
+        "\t// lwz r11,0(r29)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r29.u32 + 0);\n"
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 4) goto loc_82A139D8;\n"
+        "\t// addi r4,r1,80\n"
+        "\tctx.r4.s64 = ctx.r1.s64 + 80;\n"
+        "\t// lwzx r11,r30,r11\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r30.u32 + ctx.r11.u32);\n"
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 8) goto loc_82A139D8;\n"
+        "\t// addi r3,r11,4\n"
+        "\tctx.r3.s64 = ctx.r11.s64 + 4;\n"
+        "\t// bl 0x82626fe8\n"
+        "\tctx.lr = 0x82A139CC;\n"
+        "\tsub_82626FE8(ctx, base);"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.118 sub_82A13988 guard in {path}")
+        return True
+    return False
+
+def patch_recomp31_sub_824F8A48_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "\t// sth r9,0(r27)\n"
+        "\tPPC_STORE_U16(ctx.r27.u32 + 0, ctx.r9.u16);\n"
+        "\t// bne cr6,0x824f8aac\n"
+        "\tif (!cr6.eq) goto loc_824F8AAC;\n"
+        "loc_824F8BA4:"
+    )
+    repl = (
+        "\t// sth r9,0(r27)\n"
+        "\tPPC_STORE_U16(ctx.r27.u32 + 0, ctx.r9.u16);\n"
+        "\t// bne cr6,0x824f8aac with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCountF8AAC = 0;\n"
+        "\t\tif (++s_loopCountF8AAC > 64) {\n"
+        "\t\t\ts_loopCountF8AAC = 0;\n"
+        "\t\t\tgoto loc_824F8BA4;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_824F8AAC;\n"
+        "\t\ts_loopCountF8AAC = 0;\n"
+        "\t}\n"
+        "loc_824F8BA4:"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.31 sub_824F8A48 guard in {path}")
+        return True
+    return False
+
+def patch_recomp20_sub_823DF6A8_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    target1 = (
+        "\t// lwz r11,0(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x823df6f8\n"
+        "\tif (!cr6.eq) goto loc_823DF6F8;"
+    )
+    repl1 = (
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 4) goto loc_823DF730;\n"
+        "\t// lwz r11,0(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x823df6f8 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount3DF6F8 = 0;\n"
+        "\t\tif (++s_loopCount3DF6F8 > 128) {\n"
+        "\t\t\ts_loopCount3DF6F8 = 0;\n"
+        "\t\t\tgoto loc_823DF730;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_823DF6F8;\n"
+        "\t\ts_loopCount3DF6F8 = 0;\n"
+        "\t}"
+    )
+
+    target2 = (
+        "\t// lwz r11,0(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x823df74c\n"
+        "\tif (!cr6.eq) goto loc_823DF74C;"
+    )
+    repl2 = (
+        "\tif (ctx.r11.u32 < 0x10000 || ctx.r11.u32 >= PPC_MEMORY_SIZE - 4) goto loc_823DF730;\n"
+        "\t// lwz r11,0(r11)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r11.u32 + 0);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x823df74c with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount3DF74C = 0;\n"
+        "\t\tif (++s_loopCount3DF74C > 128) {\n"
+        "\t\t\ts_loopCount3DF74C = 0;\n"
+        "\t\t\tgoto loc_823DF730;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_823DF74C;\n"
+        "\t\ts_loopCount3DF74C = 0;\n"
+        "\t}"
+    )
+
+    if target1 in text:
+        text = text.replace(target1, repl1)
+        patched = True
+    if target2 in text:
+        text = text.replace(target2, repl2)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.20 sub_823DF6A8 guard in {path}")
+        return True
+    return False
+
+def patch_recomp106_sub_8299BD70_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "\t// clrlwi r11,r3,24\n"
+        "\tctx.r11.u64 = ctx.r3.u32 & 0xFF;\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x8299c020\n"
+        "\tif (!cr6.eq) goto loc_8299C020;\n"
+        "loc_8299C03C:"
+    )
+    repl = (
+        "\t// clrlwi r11,r3,24\n"
+        "\tctx.r11.u64 = ctx.r3.u32 & 0xFF;\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// bne cr6,0x8299c020 with loop guard\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount99C020 = 0;\n"
+        "\t\tif (++s_loopCount99C020 > 64) {\n"
+        "\t\t\ts_loopCount99C020 = 0;\n"
+        "\t\t\tgoto loc_8299C03C;\n"
+        "\t\t}\n"
+        "\t\tif (!cr6.eq) goto loc_8299C020;\n"
+        "\t\ts_loopCount99C020 = 0;\n"
+        "\t}\n"
+        "loc_8299C03C:"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.106 sub_8299BD70 loop in {path}")
         return True
     return False
 

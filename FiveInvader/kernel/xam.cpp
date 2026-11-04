@@ -149,9 +149,10 @@ uint32_t XamNotifyCreateListener(uint64_t qwAreas)
 
     listener->areas = qwAreas;
 
-    // Pre-seed storage devices changed notification (11) so content discovery worker triggers immediately
+    // Pre-seed storage devices changed notification (11) and system notification (10)
     {
         std::lock_guard lock(s_notifyLock);
+        listener->notifications.push_back({ 10, 0 });
         listener->notifications.push_back({ 11, 0 });
     }
 
@@ -872,15 +873,14 @@ uint32_t XamUserWriteProfileSettings(uint32_t dwUserIndex, uint32_t dwNumSetting
     return ERROR_SUCCESS;
 }
 
-// User signin state - always return signed in
+// User signin state
 PPC_FUNC(__imp__XamUserGetSigninState)
 {
     uint32_t dwUserIndex = ctx.r3.u32;
-    
-    if (dwUserIndex != 0)
-        ctx.r3.u32 = 0; // Not signed in
+    if (dwUserIndex == 0)
+        ctx.r3.u32 = 1; // eXUserSigninState_SignedInLocally
     else
-        ctx.r3.u32 = 1; // eXUserSigninState_SignedInToLive
+        ctx.r3.u32 = 0; // Not signed in
 }
 
 uint32_t XamUserGetSigninInfo(uint32_t dwUserIndex, uint32_t dwFlags, void* pInfo)
