@@ -9,6 +9,8 @@
 *.xex
 *.rpf
 *.iso
+aes_key.bin
+encryption_key.bin
 /FiveInvaderLib/private/*
 !/FiveInvaderLib/private/.gitkeep
 out/

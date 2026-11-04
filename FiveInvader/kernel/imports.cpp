@@ -1272,17 +1272,31 @@ namespace
         if (!g_aesKey.empty())
             return;
 
-        // Try multiple locations for AES key
-        std::vector<std::filesystem::path> keyPaths = {
-            GetGamePath().parent_path() / "aes_key.bin",  // Install dir
-            GetGamePath() / "aes_key.bin",                 // Game dir
-            std::filesystem::current_path() / "aes_key.bin"  // Current dir
-        };
+        // Try multiple locations for AES key (user local files)
+        const char* envPath = std::getenv("FIVEINVADER_AES_KEY");
+        std::vector<std::filesystem::path> keyPaths;
+        if (envPath && *envPath)
+        {
+            keyPaths.push_back(envPath);
+        }
+        keyPaths.push_back(GetGamePath() / "aes_key.bin");
+        keyPaths.push_back(GetGamePath() / "encryption_key.bin");
+        keyPaths.push_back(GetGamePath().parent_path() / "aes_key.bin");
+        keyPaths.push_back(GetGamePath().parent_path() / "encryption_key.bin");
+        keyPaths.push_back(std::filesystem::current_path() / "aes_key.bin");
+        keyPaths.push_back(std::filesystem::current_path() / "encryption_key.bin");
+        const char* homeDir = std::getenv("HOME");
+        if (homeDir && *homeDir)
+        {
+            keyPaths.push_back(std::filesystem::path(homeDir) / ".fiveinvader" / "aes_key.bin");
+            keyPaths.push_back(std::filesystem::path(homeDir) / ".fiveinvader" / "encryption_key.bin");
+        }
         
         std::filesystem::path keyPath;
         for (const auto& path : keyPaths)
         {
-            if (std::filesystem::exists(path))
+            std::error_code ec;
+            if (std::filesystem::exists(path, ec))
             {
                 keyPath = path;
                 break;
@@ -1291,19 +1305,7 @@ namespace
         
         if (keyPath.empty())
         {
-            keyPath = GetGamePath().parent_path() / "aes_key.bin";  // Default for error message
-        }
-        std::error_code ec;
-        if (!std::filesystem::exists(keyPath, ec))
-        {
-            static const uint8_t s_defaultXbox360Key[32] = {
-                0xa1, 0xe7, 0x29, 0x39, 0x5d, 0x8a, 0xd1, 0x0b, 
-                0x9b, 0x7b, 0xd0, 0x11, 0xd5, 0x28, 0x69, 0x3d, 
-                0x96, 0xe2, 0x2b, 0xd6, 0xa2, 0x8a, 0xab, 0xae, 
-                0xb4, 0xa6, 0x9a, 0xc6, 0xf9, 0x73, 0x62, 0x7f 
-            };
-            g_aesKey.assign(s_defaultXbox360Key, s_defaultXbox360Key + 32);
-            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "AES key file not found, using built-in Xbox 360 key (32 bytes)");
+            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "AES key file not found in search paths (aes_key.bin / encryption_key.bin)");
             return;
         }
 
@@ -1318,18 +1320,11 @@ namespace
         if (key.size() >= 32)
         {
             g_aesKey.assign(key.begin(), key.begin() + 32);
-            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "Loaded AES key ({} bytes)", (int)g_aesKey.size());
+            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "Loaded AES key ({} bytes) from '{}'", (int)g_aesKey.size(), keyPath.string());
         }
         else
         {
-            static const uint8_t s_defaultXbox360Key[32] = {
-                0xa1, 0xe7, 0x29, 0x39, 0x5d, 0x8a, 0xd1, 0x0b, 
-                0x9b, 0x7b, 0xd0, 0x11, 0xd5, 0x28, 0x69, 0x3d, 
-                0x96, 0xe2, 0x2b, 0xd6, 0xa2, 0x8a, 0xab, 0xae, 
-                0xb4, 0xa6, 0x9a, 0xc6, 0xf9, 0x73, 0x62, 0x7f 
-            };
-            g_aesKey.assign(s_defaultXbox360Key, s_defaultXbox360Key + 32);
-            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "AES key file too small, using retail Xbox 360 key fallback (32 bytes)");
+            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "AES key file too small: {} bytes in '{}'", (int)key.size(), keyPath.string());
         }
     }
 
@@ -1344,13 +1339,12 @@ namespace
         LoadAesKeyIfNeeded();
         if (g_aesKey.size() != 32)
         {
-            static const uint8_t s_defaultXbox360Key[32] = {
-                0xa1, 0xe7, 0x29, 0x39, 0x5d, 0x8a, 0xd1, 0x0b, 
-                0x9b, 0x7b, 0xd0, 0x11, 0xd5, 0x28, 0x69, 0x3d, 
-                0x96, 0xe2, 0x2b, 0xd6, 0xa2, 0x8a, 0xab, 0xae, 
-                0xb4, 0xa6, 0x9a, 0xc6, 0xf9, 0x73, 0x62, 0x7f 
-            };
-            g_aesKey.assign(s_defaultXbox360Key, s_defaultXbox360Key + 32);
+            static std::atomic<uint32_t> s_missingKeyCount{0};
+            if (++s_missingKeyCount <= 5)
+            {
+                LOGF_IMPL(Utility, "DecryptRpfBufferInPlace", "AES key not available (size={}), skipping RPF decryption", g_aesKey.size());
+            }
+            return;
         }
 
         // AES-ECB works on 16-byte blocks. We need to handle the case where the read
