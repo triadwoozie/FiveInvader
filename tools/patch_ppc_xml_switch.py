@@ -909,6 +909,7 @@ def main() -> int:
     patch_recomp338_worker_thread_guards(ppc_dir / "ppc_recomp.338.cpp")
     patch_recomp17_queue_guard(ppc_dir / "ppc_recomp.17.cpp")
     patch_recomp209_stream_wait_loop(ppc_dir / "ppc_recomp.209.cpp")
+    patch_recomp42_lang_loop(ppc_dir / "ppc_recomp.42.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -3187,14 +3188,14 @@ def patch_recomp18_bugcheck_guards(path: pathlib.Path) -> bool:
     text = path.read_text()
     patched = False
 
-    old_site1 = (
+    target1_imp = (
         "\t// li r3,245\n"
         "\tctx.r3.s64 = 245;\n"
         "\t// bl 0x8375339c\n"
         "\tctx.lr = 0x823BAC30;\n"
         "\t__imp__KeBugCheck(ctx, base);"
     )
-    new_site1 = (
+    target1_goto = (
         "\t// li r3,245\n"
         "\tctx.r3.s64 = 245;\n"
         "\t// bl 0x8375339c\n"
@@ -3202,8 +3203,22 @@ def patch_recomp18_bugcheck_guards(path: pathlib.Path) -> bool:
         "\t// KeBugCheck(245) bypassed: resume at loc_823BADC4\n"
         "\tgoto loc_823BADC4;"
     )
-    if old_site1 in text:
-        text = text.replace(old_site1, new_site1)
+    new_site1 = (
+        "\t// li r3,245\n"
+        "\tctx.r3.s64 = 245;\n"
+        "\t// bl 0x8375339c\n"
+        "\tctx.lr = 0x823BAC30;\n"
+        "\t// KeBugCheck(245) bypassed: ensure command buffer recording active and resume at loc_823BAC30\n"
+        "\tif (ctx.r31.u32 != 0 && PPC_LOAD_U32(ctx.r31.u32 + 13904) == 0) {\n"
+        "\t\tPPC_STORE_U32(ctx.r31.u32 + 13904, 1);\n"
+        "\t}\n"
+        "\tgoto loc_823BAC30;"
+    )
+    if target1_imp in text:
+        text = text.replace(target1_imp, new_site1)
+        patched = True
+    elif target1_goto in text:
+        text = text.replace(target1_goto, new_site1)
         patched = True
 
     old_site2 = (
@@ -3493,6 +3508,46 @@ def patch_recomp209_stream_wait_loop(path: pathlib.Path) -> bool:
     if patched:
         path.write_text(text)
         print(f"Patched recomp.209 stream wait loop in {path}")
+        return True
+    return False
+
+def patch_recomp42_lang_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target = (
+        "loc_82591D08:\n"
+        "\t// mr r4,r29\n"
+        "\tctx.r4.u64 = ctx.r29.u64;\n"
+        "\t// mr r3,r31\n"
+        "\tctx.r3.u64 = ctx.r31.u64;\n"
+        "\t// bl 0x82985458\n"
+        "\tctx.lr = 0x82591D14;\n"
+        "\tsub_82985458(ctx, base);"
+    )
+    repl = (
+        "loc_82591D08:\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount1D08 = 0;\n"
+        "\t\tif (++s_loopCount1D08 > 5) {\n"
+        "\t\t\ts_loopCount1D08 = 0;\n"
+        "\t\t\tgoto loc_82591D94;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\t// mr r4,r29\n"
+        "\tctx.r4.u64 = ctx.r29.u64;\n"
+        "\t// mr r3,r31\n"
+        "\tctx.r3.u64 = ctx.r31.u64;\n"
+        "\t// bl 0x82985458\n"
+        "\tctx.lr = 0x82591D14;\n"
+        "\tsub_82985458(ctx, base);"
+    )
+
+    if target in text:
+        text = text.replace(target, repl)
+        path.write_text(text)
+        print(f"Patched recomp.42 lang loop in {path}")
         return True
     return False
 

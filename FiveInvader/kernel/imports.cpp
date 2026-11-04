@@ -1296,7 +1296,14 @@ namespace
         std::error_code ec;
         if (!std::filesystem::exists(keyPath, ec))
         {
-            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "AES key not found: '{}'", keyPath.string());
+            static const uint8_t s_defaultXbox360Key[32] = {
+                0xa1, 0xe7, 0x29, 0x39, 0x5d, 0x8a, 0xd1, 0x0b, 
+                0x9b, 0x7b, 0xd0, 0x11, 0xd5, 0x28, 0x69, 0x3d, 
+                0x96, 0xe2, 0x2b, 0xd6, 0xa2, 0x8a, 0xab, 0xae, 
+                0xb4, 0xa6, 0x9a, 0xc6, 0xf9, 0x73, 0x62, 0x7f 
+            };
+            g_aesKey.assign(s_defaultXbox360Key, s_defaultXbox360Key + 32);
+            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "AES key file not found, using built-in Xbox 360 key (32 bytes)");
             return;
         }
 
@@ -1315,7 +1322,14 @@ namespace
         }
         else
         {
-            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "AES key too small: {} bytes", (int)key.size());
+            static const uint8_t s_defaultXbox360Key[32] = {
+                0xa1, 0xe7, 0x29, 0x39, 0x5d, 0x8a, 0xd1, 0x0b, 
+                0x9b, 0x7b, 0xd0, 0x11, 0xd5, 0x28, 0x69, 0x3d, 
+                0x96, 0xe2, 0x2b, 0xd6, 0xa2, 0x8a, 0xab, 0xae, 
+                0xb4, 0xa6, 0x9a, 0xc6, 0xf9, 0x73, 0x62, 0x7f 
+            };
+            g_aesKey.assign(s_defaultXbox360Key, s_defaultXbox360Key + 32);
+            LOGF_IMPL(Utility, "LoadAesKeyIfNeeded", "AES key file too small, using retail Xbox 360 key fallback (32 bytes)");
         }
     }
 
@@ -1330,8 +1344,13 @@ namespace
         LoadAesKeyIfNeeded();
         if (g_aesKey.size() != 32)
         {
-            LOGF_IMPL(Utility, "DecryptRpfBufferInPlace", "AES key not available (size={})", g_aesKey.size());
-            return;
+            static const uint8_t s_defaultXbox360Key[32] = {
+                0xa1, 0xe7, 0x29, 0x39, 0x5d, 0x8a, 0xd1, 0x0b, 
+                0x9b, 0x7b, 0xd0, 0x11, 0xd5, 0x28, 0x69, 0x3d, 
+                0x96, 0xe2, 0x2b, 0xd6, 0xa2, 0x8a, 0xab, 0xae, 
+                0xb4, 0xa6, 0x9a, 0xc6, 0xf9, 0x73, 0x62, 0x7f 
+            };
+            g_aesKey.assign(s_defaultXbox360Key, s_defaultXbox360Key + 32);
         }
 
         // AES-ECB works on 16-byte blocks. We need to handle the case where the read
@@ -10203,7 +10222,12 @@ PPC_FUNC(sub_8255DC20)
     else
     {
         ctx.r3.u32 = 0;
-        LOGF_ERROR("[ALLOC] sub_8255DC20 #{} FAILED for size={}", s_allocCount, size);
+        static std::atomic<uint32_t> s_failedAllocCount{0};
+        uint32_t fcount = ++s_failedAllocCount;
+        if (fcount <= 30 || (fcount % 5000 == 0))
+        {
+            LOGF_ERROR("[ALLOC] sub_8255DC20 #{} FAILED for size={} (fail #{})", s_allocCount, size, fcount);
+        }
     }
 }
 
