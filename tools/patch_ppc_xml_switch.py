@@ -908,6 +908,7 @@ def main() -> int:
     patch_recomp18_bugcheck_guards(ppc_dir / "ppc_recomp.18.cpp")
     patch_recomp338_worker_thread_guards(ppc_dir / "ppc_recomp.338.cpp")
     patch_recomp17_queue_guard(ppc_dir / "ppc_recomp.17.cpp")
+    patch_recomp209_stream_wait_loop(ppc_dir / "ppc_recomp.209.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -3319,6 +3320,179 @@ def patch_recomp17_queue_guard(path: pathlib.Path) -> bool:
     if patched:
         path.write_text(text)
         print(f"Patched recomp.17 queue guard in {path}")
+        return True
+    return False
+
+def patch_recomp209_stream_wait_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    patched = False
+
+    target1 = (
+        "loc_82EF5D94:\n"
+        "\t// li r3,10\n"
+        "\tctx.r3.s64 = 10;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x82EF5D9C;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// li r8,0\n"
+        "\tctx.r8.s64 = 0;\n"
+        "\t// mr r7,r31\n"
+        "\tctx.r7.u64 = ctx.r31.u64;\n"
+        "\t// fmr f1,f31\n"
+        "\tctx.fpscr.disableFlushMode();\n"
+        "\tctx.f1.f64 = ctx.f31.f64;\n"
+        "\t// li r6,0\n"
+        "\tctx.r6.s64 = 0;\n"
+        "\t// li r5,1\n"
+        "\tctx.r5.s64 = 1;\n"
+        "\t// addi r4,r1,104\n"
+        "\tctx.r4.s64 = ctx.r1.s64 + 104;\n"
+        "\t// mr r3,r30\n"
+        "\tctx.r3.u64 = ctx.r30.u64;\n"
+        "\t// bl 0x8319b1f0\n"
+        "\tctx.lr = 0x82EF5DBC;\n"
+        "\tsub_8319B1F0(ctx, base);\n"
+        "\t// cmplwi cr6,r3,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82ef5d94\n"
+        "\tif (cr6.eq) goto loc_82EF5D94;"
+    )
+
+    repl1 = (
+        "loc_82EF5D94:\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount5D94 = 0;\n"
+        "\t\tif (++s_loopCount5D94 > 5) {\n"
+        "\t\t\ts_loopCount5D94 = 0;\n"
+        "\t\t\tif (ctx.r31.u32 != 0) {\n"
+        "\t\t\t\tctx.r3.u64 = ctx.r31.u64;\n"
+        "\t\t\t\tsub_831921F8(ctx, base);\n"
+        "\t\t\t}\n"
+        "\t\t\tgoto loc_82EF5E6C;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\t// li r3,10\n"
+        "\tctx.r3.s64 = 10;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x82EF5D9C;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// li r8,0\n"
+        "\tctx.r8.s64 = 0;\n"
+        "\t// mr r7,r31\n"
+        "\tctx.r7.u64 = ctx.r31.u64;\n"
+        "\t// fmr f1,f31\n"
+        "\tctx.fpscr.disableFlushMode();\n"
+        "\tctx.f1.f64 = ctx.f31.f64;\n"
+        "\t// li r6,0\n"
+        "\tctx.r6.s64 = 0;\n"
+        "\t// li r5,1\n"
+        "\tctx.r5.s64 = 1;\n"
+        "\t// addi r4,r1,104\n"
+        "\tctx.r4.s64 = ctx.r1.s64 + 104;\n"
+        "\t// mr r3,r30\n"
+        "\tctx.r3.u64 = ctx.r30.u64;\n"
+        "\t// bl 0x8319b1f0\n"
+        "\tctx.lr = 0x82EF5DBC;\n"
+        "\tsub_8319B1F0(ctx, base);\n"
+        "\t// cmplwi cr6,r3,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82ef5d94\n"
+        "\tif (cr6.eq) goto loc_82EF5D94;"
+    )
+
+    target2 = (
+        "loc_82EF5E30:\n"
+        "\t// li r3,10\n"
+        "\tctx.r3.s64 = 10;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x82EF5E38;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// lis r11,-32017\n"
+        "\tctx.r11.s64 = -2098266112;\n"
+        "\t// li r10,0\n"
+        "\tctx.r10.s64 = 0;\n"
+        "\t// fmr f1,f31\n"
+        "\tctx.fpscr.disableFlushMode();\n"
+        "\tctx.f1.f64 = ctx.f31.f64;\n"
+        "\t// li r9,0\n"
+        "\tctx.r9.s64 = 0;\n"
+        "\t// mr r8,r28\n"
+        "\tctx.r8.u64 = ctx.r28.u64;\n"
+        "\t// addi r7,r11,8440\n"
+        "\tctx.r7.s64 = ctx.r11.s64 + 8440;\n"
+        "\t// li r6,0\n"
+        "\tctx.r6.s64 = 0;\n"
+        "\t// li r5,1\n"
+        "\tctx.r5.s64 = 1;\n"
+        "\t// addi r4,r1,104\n"
+        "\tctx.r4.s64 = ctx.r1.s64 + 104;\n"
+        "\t// mr r3,r30\n"
+        "\tctx.r3.u64 = ctx.r30.u64;\n"
+        "\t// bl 0x8319a4c8\n"
+        "\tctx.lr = 0x82EF5E64;\n"
+        "\tsub_8319A4C8(ctx, base);\n"
+        "\t// cmplwi cr6,r3,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82ef5e30\n"
+        "\tif (cr6.eq) goto loc_82EF5E30;"
+    )
+
+    repl2 = (
+        "loc_82EF5E30:\n"
+        "\t{\n"
+        "\t\tstatic thread_local int s_loopCount5E30 = 0;\n"
+        "\t\tif (++s_loopCount5E30 > 5) {\n"
+        "\t\t\ts_loopCount5E30 = 0;\n"
+        "\t\t\tgoto loc_82EF5E6C;\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\t// li r3,10\n"
+        "\tctx.r3.s64 = 10;\n"
+        "\t// bl 0x82548de0\n"
+        "\tctx.lr = 0x82EF5E38;\n"
+        "\tsub_82548DE0(ctx, base);\n"
+        "\t// lis r11,-32017\n"
+        "\tctx.r11.s64 = -2098266112;\n"
+        "\t// li r10,0\n"
+        "\tctx.r10.s64 = 0;\n"
+        "\t// fmr f1,f31\n"
+        "\tctx.fpscr.disableFlushMode();\n"
+        "\tctx.f1.f64 = ctx.f31.f64;\n"
+        "\t// li r9,0\n"
+        "\tctx.r9.s64 = 0;\n"
+        "\t// mr r8,r28\n"
+        "\tctx.r8.u64 = ctx.r28.u64;\n"
+        "\t// addi r7,r11,8440\n"
+        "\tctx.r7.s64 = ctx.r11.s64 + 8440;\n"
+        "\t// li r6,0\n"
+        "\tctx.r6.s64 = 0;\n"
+        "\t// li r5,1\n"
+        "\tctx.r5.s64 = 1;\n"
+        "\t// addi r4,r1,104\n"
+        "\tctx.r4.s64 = ctx.r1.s64 + 104;\n"
+        "\t// mr r3,r30\n"
+        "\tctx.r3.u64 = ctx.r30.u64;\n"
+        "\t// bl 0x8319a4c8\n"
+        "\tctx.lr = 0x82EF5E64;\n"
+        "\tsub_8319A4C8(ctx, base);\n"
+        "\t// cmplwi cr6,r3,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x82ef5e30\n"
+        "\tif (cr6.eq) goto loc_82EF5E30;"
+    )
+
+    if target1 in text:
+        text = text.replace(target1, repl1)
+        patched = True
+    if target2 in text:
+        text = text.replace(target2, repl2)
+        patched = True
+
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.209 stream wait loop in {path}")
         return True
     return False
 

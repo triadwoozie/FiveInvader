@@ -13670,6 +13670,19 @@ PPC_FUNC(sub_825777D0)
     LOGF_INFO("[sub_825777D0] State 1 handler exit #{} ret={}", c, (int32_t)ctx.r3.s32);
 }
 
+extern "C" void __imp__sub_82574338(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82574338)
+{
+    static std::atomic<uint64_t> s_s2Calls{0};
+    uint64_t c = ++s_s2Calls;
+    LOGF_INFO("[sub_82574338] State 2 handler enter #{} obj=0x{:08X}", c, ctx.r3.u32);
+    auto t0 = std::chrono::steady_clock::now();
+    __imp__sub_82574338(ctx, base);
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    LOGF_INFO("[sub_82574338] State 2 handler exit #{} ret={} elapsed={}ms", c, (int32_t)ctx.r3.s32, ms);
+}
+
 PPC_EXTERN_FUNC(sub_82F3A5B8);
 PPC_EXTERN_FUNC(sub_828FD100);
 PPC_EXTERN_FUNC(sub_82918D28);
