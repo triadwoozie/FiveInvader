@@ -937,6 +937,7 @@ def main() -> int:
     patch_recomp159_sub_82C78900_guard(ppc_dir / "ppc_recomp.159.cpp")
     patch_recomp72_sub_827898A0_loop(ppc_dir / "ppc_recomp.72.cpp")
     patch_recomp297_sub_83444728_loop(ppc_dir / "ppc_recomp.297.cpp")
+    patch_recomp296_sub_8343D548_loop(ppc_dir / "ppc_recomp.296.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -5497,6 +5498,66 @@ def patch_recomp297_sub_83444728_loop(path: pathlib.Path) -> bool:
         text = text.replace(target_loop2, repl_loop2)
         path.write_text(text)
         print(f"Patched recomp.297 sub_83444728 loops in {path}")
+        patched = True
+    return patched
+
+def patch_recomp296_sub_8343D548_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target_prologue = (
+        "PPC_FUNC_IMPL(__imp__sub_8343D548) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};"
+    )
+    repl_prologue = (
+        "PPC_FUNC_IMPL(__imp__sub_8343D548) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\tint loopIter1 = 0;\n"
+        "\tint loopIter2 = 0;\n"
+        "\tint loopIter3 = 0;"
+    )
+
+    target_loop1 = (
+        "loc_8343D5A8:\n"
+        "\t// lwz r11,0(r11)"
+    )
+    repl_loop1 = (
+        "loc_8343D5A8:\n"
+        "\tif (++loopIter1 > 128) goto loc_8343D5BC;\n"
+        "\t// lwz r11,0(r11)"
+    )
+
+    target_loop2 = (
+        "loc_8343D5D4:\n"
+        "\t// lwz r10,0(r11)"
+    )
+    repl_loop2 = (
+        "loc_8343D5D4:\n"
+        "\tif (++loopIter2 > 128) goto loc_8343D634;\n"
+        "\t// lwz r10,0(r11)"
+    )
+
+    target_loop3 = (
+        "loc_8343D670:\n"
+        "\t// addi r11,r10,140"
+    )
+    repl_loop3 = (
+        "loc_8343D670:\n"
+        "\tif (++loopIter3 > 128) goto loc_8343D68C;\n"
+        "\t// addi r11,r10,140"
+    )
+
+    patched = False
+    if target_prologue in text and target_loop1 in text and target_loop2 in text and target_loop3 in text:
+        text = text.replace(target_prologue, repl_prologue)
+        text = text.replace(target_loop1, repl_loop1)
+        text = text.replace(target_loop2, repl_loop2)
+        text = text.replace(target_loop3, repl_loop3)
+        path.write_text(text)
+        print(f"Patched recomp.296 sub_8343D548 loops in {path}")
         patched = True
     return patched
 
