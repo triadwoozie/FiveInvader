@@ -938,6 +938,7 @@ def main() -> int:
     patch_recomp72_sub_827898A0_loop(ppc_dir / "ppc_recomp.72.cpp")
     patch_recomp297_sub_83444728_loop(ppc_dir / "ppc_recomp.297.cpp")
     patch_recomp296_sub_8343D548_loop(ppc_dir / "ppc_recomp.296.cpp")
+    patch_recomp33_sub_8252E920_loop(ppc_dir / "ppc_recomp.33.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -5589,6 +5590,83 @@ def patch_recomp296_sub_8343D548_loop(path: pathlib.Path) -> bool:
         path.write_text(text)
         print(f"Patched recomp.296 sub_8343D548 loops in {path}")
         patched = True
+    return patched
+
+def patch_recomp33_sub_8252E920_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target_prologue1 = (
+        "PPC_FUNC_IMPL(__imp__sub_8252E858) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};"
+    )
+    repl_prologue1 = (
+        "PPC_FUNC_IMPL(__imp__sub_8252E858) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\tint loopIter = 0;"
+    )
+
+    target_loop1 = (
+        "loc_8252E8F0:\n"
+        "\t// lwz r11,28(r11)"
+    )
+    repl_loop1 = (
+        "loc_8252E8F0:\n"
+        "\tif (++loopIter > 128) goto loc_8252E918;\n"
+        "\t// lwz r11,28(r11)"
+    )
+
+    target_prologue2 = (
+        "PPC_FUNC_IMPL(__imp__sub_8252E920) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCRegister ctr{};\n"
+        "\tPPCCRRegister cr6{};"
+    )
+    repl_prologue2 = (
+        "PPC_FUNC_IMPL(__imp__sub_8252E920) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCRegister ctr{};\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\tint loopIter1 = 0;\n"
+        "\tint loopIter2 = 0;"
+    )
+
+    target_loop2 = (
+        "loc_8252E94C:\n"
+        "\t// lwz r11,12(r11)"
+    )
+    repl_loop2 = (
+        "loc_8252E94C:\n"
+        "\tif (++loopIter1 > 128) goto loc_8252EAB8;\n"
+        "\t// lwz r11,12(r11)"
+    )
+
+    target_loop3 = (
+        "loc_8252E988:\n"
+        "\t// mr r31,r27"
+    )
+    repl_loop3 = (
+        "loc_8252E988:\n"
+        "\tif (++loopIter2 > 128) goto loc_8252EAB8;\n"
+        "\t// mr r31,r27"
+    )
+
+    patched = False
+    if target_prologue1 in text and target_loop1 in text:
+        text = text.replace(target_prologue1, repl_prologue1)
+        text = text.replace(target_loop1, repl_loop1)
+        patched = True
+    if target_prologue2 in text and target_loop2 in text and target_loop3 in text:
+        text = text.replace(target_prologue2, repl_prologue2)
+        text = text.replace(target_loop2, repl_loop2)
+        text = text.replace(target_loop3, repl_loop3)
+        patched = True
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.33 sub_8252E920 loops in {path}")
     return patched
 
 if __name__ == "__main__":
