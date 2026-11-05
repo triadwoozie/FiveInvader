@@ -939,6 +939,10 @@ def main() -> int:
     patch_recomp297_sub_83444728_loop(ppc_dir / "ppc_recomp.297.cpp")
     patch_recomp296_sub_8343D548_loop(ppc_dir / "ppc_recomp.296.cpp")
     patch_recomp33_sub_8252E920_loop(ppc_dir / "ppc_recomp.33.cpp")
+    patch_recomp268_sub_832196F0_guard(ppc_dir / "ppc_recomp.268.cpp")
+    patch_recomp39_state2_transition_guard(ppc_dir / "ppc_recomp.39.cpp")
+    patch_recomp11_sub_822DE960_barrier(ppc_dir / "ppc_recomp.11.cpp")
+    patch_recomp18_sub_823B5CC0_null_pool_guard(ppc_dir / "ppc_recomp.18.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -5668,6 +5672,176 @@ def patch_recomp33_sub_8252E920_loop(path: pathlib.Path) -> bool:
         path.write_text(text)
         print(f"Patched recomp.33 sub_8252E920 loops in {path}")
     return patched
+
+def patch_recomp268_sub_832196F0_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    if "ctx.r8.u32 >= 0xFFFF0000" in text:
+        print(f"Already patched recomp.268 sub_832196F0 guard in {path}")
+        return True
+    old1 = (
+        "\t// lhz r7,212(r31)\n"
+        "\tctx.r7.u64 = PPC_LOAD_U16(ctx.r31.u32 + 212);\n"
+        "\t// li r10,0\n"
+        "\tctx.r10.s64 = 0;\n"
+        "\t// cmpwi cr6,r7,0\n"
+        "\tcr6.compare<int32_t>(ctx.r7.s32, 0, ctx.xer);\n"
+        "\t// ble cr6,0x8321975c\n"
+        "\tif (!cr6.gt) goto loc_8321975C;\n"
+        "\t// lwz r8,208(r31)\n"
+        "\tctx.r8.u64 = PPC_LOAD_U32(ctx.r31.u32 + 208);\n"
+        "\t// li r11,0\n"
+        "\tctx.r11.s64 = 0;\n"
+        "loc_83219730:\n"
+        "\t// lwzx r6,r11,r8\n"
+        "\tctx.r6.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r8.u32);"
+    )
+    new1 = (
+        "\tif (ctx.r31.u32 < 0x10000 || ctx.r31.u32 >= 0xFFFF0000) goto loc_8321975C;\n"
+        "\t// lhz r7,212(r31)\n"
+        "\tctx.r7.u64 = PPC_LOAD_U16(ctx.r31.u32 + 212);\n"
+        "\t// li r10,0\n"
+        "\tctx.r10.s64 = 0;\n"
+        "\t// cmpwi cr6,r7,0\n"
+        "\tcr6.compare<int32_t>(ctx.r7.s32, 0, ctx.xer);\n"
+        "\t// ble cr6,0x8321975c\n"
+        "\tif (!cr6.gt) goto loc_8321975C;\n"
+        "\t// lwz r8,208(r31)\n"
+        "\tctx.r8.u64 = PPC_LOAD_U32(ctx.r31.u32 + 208);\n"
+        "\tif (ctx.r8.u32 < 0x10000 || ctx.r8.u32 >= 0xFFFF0000) goto loc_8321975C;\n"
+        "\t// li r11,0\n"
+        "\tctx.r11.s64 = 0;\n"
+        "loc_83219730:\n"
+        "\tif ((ctx.r11.u32 + ctx.r8.u32) < 0x10000 || (ctx.r11.u32 + ctx.r8.u32) >= 0xFFFF0000) goto loc_8321975C;\n"
+        "\t// lwzx r6,r11,r8\n"
+        "\tctx.r6.u64 = PPC_LOAD_U32(ctx.r11.u32 + ctx.r8.u32);"
+    )
+    old2 = (
+        "loc_83219778:\n"
+        "\t// rlwinm r11,r10,1,0,30\n"
+        "\tctx.r11.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0xFFFFFFFE;\n"
+        "\t// add r11,r10,r11\n"
+        "\tctx.r11.u64 = ctx.r10.u64 + ctx.r11.u64;\n"
+        "\t// rlwinm r11,r11,2,0,29\n"
+        "\tctx.r11.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\t// add r10,r11,r8\n"
+        "\tctx.r10.u64 = ctx.r11.u64 + ctx.r8.u64;\n"
+        "\t// lwz r3,8(r10)\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r10.u32 + 8);"
+    )
+    new2 = (
+        "loc_83219778:\n"
+        "\t// rlwinm r11,r10,1,0,30\n"
+        "\tctx.r11.u64 = __builtin_rotateleft64(ctx.r10.u32 | (ctx.r10.u64 << 32), 1) & 0xFFFFFFFE;\n"
+        "\t// add r11,r10,r11\n"
+        "\tctx.r11.u64 = ctx.r10.u64 + ctx.r11.u64;\n"
+        "\t// rlwinm r11,r11,2,0,29\n"
+        "\tctx.r11.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 2) & 0xFFFFFFFC;\n"
+        "\t// add r10,r11,r8\n"
+        "\tctx.r10.u64 = ctx.r11.u64 + ctx.r8.u64;\n"
+        "\tif (ctx.r10.u32 + 8 < 0x10000 || ctx.r10.u32 + 8 >= 0xFFFF0000) goto loc_8321975C;\n"
+        "\t// lwz r3,8(r10)\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r10.u32 + 8);"
+    )
+    patched = False
+    if old1 in text:
+        text = text.replace(old1, new1)
+        patched = True
+    if old2 in text:
+        text = text.replace(old2, new2)
+        patched = True
+    if patched:
+        path.write_text(text)
+        print(f"Patched recomp.268 sub_832196F0 guard in {path}")
+    return patched
+
+def patch_recomp39_state2_transition_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    if "0x83887150" in text:
+        print(f"Already patched recomp.39 state 2 transition guard in {path}")
+        return True
+    old = (
+        "loc_8257785C:\n"
+        "\t// li r4,2\n"
+        "\tctx.r4.s64 = 2;\n"
+        "\t// mr r3,r31\n"
+        "\tctx.r3.u64 = ctx.r31.u64;\n"
+        "\t// bl 0x8229ad78"
+    )
+    new = (
+        "loc_8257785C:\n"
+        "\t// li r4,2\n"
+        "\tctx.r4.s64 = 2;\n"
+        "\t// mr r3,r31\n"
+        "\tctx.r3.u64 = (ctx.r31.u32 >= 0x10000) ? ctx.r31.u64 : 0x83887150;\n"
+        "\t// bl 0x8229ad78"
+    )
+    if old in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched recomp.39 state 2 transition guard in {path}")
+        return True
+    return False
+
+def patch_recomp11_sub_822DE960_barrier(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    if "ctx.r3.s64 = 1;" in text and "0x822DE9C0" in text:
+        print(f"Already patched recomp.11 sub_822DE960 barrier in {path}")
+        return True
+    old = (
+        "\t// bl 0x82381a70\n"
+        "\tctx.lr = 0x822DE9C0;\n"
+        "\tsub_82381A70(ctx, base);"
+    )
+    new = (
+        "\t// bl 0x82381a70\n"
+        "\tctx.lr = 0x822DE9C0;\n"
+        "\t// sub_82381A70(ctx, base);\n"
+        "\tctx.r3.s64 = 1;"
+    )
+    if old in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched recomp.11 sub_822DE960 barrier in {path}")
+        return True
+    return False
+
+def patch_recomp18_sub_823B5CC0_null_pool_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+    if "PPC_MEMORY_SIZE - 2500" in text and "ctx.r30.u32 + 30304" in text:
+        print(f"Already patched recomp.18 sub_823B5CC0 null pool guard in {path}")
+        return True
+    old = (
+        "\t// lwz r3,30304(r30)\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + 30304);\n"
+        "\t// lwz r10,2408(r3)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 2408);"
+    )
+    new = (
+        "\t// lwz r3,30304(r30)\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + 30304);\n"
+        "\tif (ctx.r3.u32 < 0x10000 || ctx.r3.u32 >= PPC_MEMORY_SIZE - 2500) {\n"
+        "\t\tctx.r3.s64 = 0;\n"
+        "\t\tctx.r1.s64 = ctx.r1.s64 + 112;\n"
+        "\t\tctx.r12.u64 = PPC_LOAD_U32(ctx.r1.u32 + -8);\n"
+        "\t\tctx.lr = ctx.r12.u64;\n"
+        "\t\tctx.r30.u64 = PPC_LOAD_U64(ctx.r1.u32 + -24);\n"
+        "\t\tctx.r31.u64 = PPC_LOAD_U64(ctx.r1.u32 + -16);\n"
+        "\t\treturn;\n"
+        "\t}\n"
+        "\t// lwz r10,2408(r3)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 2408);"
+    )
+    if old in text:
+        path.write_text(text.replace(old, new))
+        print(f"Patched recomp.18 sub_823B5CC0 null pool guard in {path}")
+        return True
+    return False
 
 if __name__ == "__main__":
     raise SystemExit(main())

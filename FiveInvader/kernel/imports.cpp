@@ -3343,12 +3343,12 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
         return (ShouldFailOpenWait() && isMainThread) ? STATUS_SUCCESS : STATUS_TIMEOUT;
     }
 
-    // KERNEL POLICY: Fail-open during Boot/Init only for the main thread (workers must sleep on queues)
-    if (ShouldFailOpenWait() && isMainThread) {
+    // KERNEL POLICY: On the main thread, infinite waits must never hang the process!
+    if (isMainThread) {
         static uint32_t s_lastMainHandle = 0;
         static int s_consecutiveTimeouts = 0;
-        uint32_t waitMs = (timeout == INFINITE) ? 1000 : std::min(timeout, 1000u);
-        uint32_t result = obj->Wait(waitMs);
+        uint32_t maxWait = (timeout == INFINITE) ? 50 : std::min(timeout, 50u);
+        uint32_t result = obj->Wait(maxWait);
         if (result == STATUS_TIMEOUT) {
             if (Handle == s_lastMainHandle) {
                 ++s_consecutiveTimeouts;
@@ -3356,7 +3356,7 @@ uint32_t NtWaitForSingleObjectEx(uint32_t Handle, uint32_t WaitMode, uint32_t Al
                 s_lastMainHandle = Handle;
                 s_consecutiveTimeouts = 1;
             }
-            if (s_consecutiveTimeouts >= 5) {
+            if (s_consecutiveTimeouts >= 2) {
                 static int s_failOpenObj = 0;
                 if (++s_failOpenObj <= 50 || s_failOpenObj % 100 == 0) {
                     LOGF_WARNING("[FAIL-OPEN] NtWaitEx #{} (timeout={}ms, consecutive={}) -> SUCCESS handle=0x{:08X} caller=0x{:08X}", 
@@ -13824,6 +13824,8 @@ PPC_FUNC(sub_822DA770)
     __imp__sub_822DA770(ctx, base);
 }
 
+static std::atomic<uint32_t> g_lastStateMachineObj{0x83887150};
+
 extern "C" void __imp__sub_824B9C20(PPCContext& ctx, uint8_t* base);
 PPC_FUNC(sub_824B9C20)
 {
@@ -13831,6 +13833,7 @@ PPC_FUNC(sub_824B9C20)
     uint64_t c = ++s_smCalls;
     uint32_t obj = ctx.r3.u32;
     if (obj >= 0x10000 && obj < PPC_MEMORY_SIZE - 20) {
+        g_lastStateMachineObj.store(obj);
         if (PPC_LOAD_U32(obj) == 0) {
             PPC_STORE_U32(obj, 0x82001554);
             LOGF_WARNING("[sub_824B9C20] Restored vtable 0x82001554 on obj=0x{:08X}", obj);
@@ -13900,6 +13903,9 @@ PPC_FUNC(sub_825777D0)
 {
     static std::atomic<uint64_t> s_s1Calls{0};
     uint64_t c = ++s_s1Calls;
+    if (ctx.r3.u32 >= 0x10000) {
+        g_lastStateMachineObj.store(ctx.r3.u32);
+    }
     LOGF_INFO("[sub_825777D0] State 1 handler enter #{} obj=0x{:08X}", c, ctx.r3.u32);
     __imp__sub_825777D0(ctx, base);
     LOGF_INFO("[sub_825777D0] State 1 handler exit #{} ret={}", c, (int32_t)ctx.r3.s32);
@@ -13951,18 +13957,20 @@ PPC_FUNC(sub_822D9768)
     static std::atomic<uint64_t> s_calls{0};
     uint64_t c = ++s_calls;
     uint32_t pool = ctx.r3.u32;
-    uint32_t freeBlocks = (pool >= 0x10000 && pool < PPC_MEMORY_SIZE - 2200) ? PPC_LOAD_U32(pool + 2184) : 0;
-    uint32_t activeBlocks = (pool >= 0x10000 && pool < PPC_MEMORY_SIZE - 2400) ? PPC_LOAD_U32(pool + 2380) : 0;
+    if (pool < 0x10000 || pool >= PPC_MEMORY_SIZE - 2500) {
+        ctx.r3.u64 = 0;
+        return;
+    }
+    uint32_t freeBlocks = PPC_LOAD_U32(pool + 2184);
+    uint32_t activeBlocks = (pool < PPC_MEMORY_SIZE - 2400) ? PPC_LOAD_U32(pool + 2380) : 0;
 
-    if (pool >= 0x10000 && pool < PPC_MEMORY_SIZE - 2500) {
-        if (freeBlocks == 0 && activeBlocks == 0) {
-            LOGF_WARNING("[sub_822D9768] Pool 0x{:08X} uninitialized: 0 free, 0 active. Populating 48 free slots!", pool);
-            PPC_STORE_U32(pool + 2184, 48);
-            for (uint32_t i = 0; i < 48; ++i) {
-                PPC_STORE_U32(pool + 1992 + i * 4, i);
-            }
-            freeBlocks = 48;
+    if (freeBlocks == 0 && activeBlocks == 0) {
+        LOGF_WARNING("[sub_822D9768] Pool 0x{:08X} uninitialized: 0 free, 0 active. Populating 48 free slots!", pool);
+        PPC_STORE_U32(pool + 2184, 48);
+        for (uint32_t i = 0; i < 48; ++i) {
+            PPC_STORE_U32(pool + 1992 + i * 4, i);
         }
+        freeBlocks = 48;
     }
 
     if (c <= 30 || c % 100 == 0) {
@@ -13983,6 +13991,10 @@ PPC_FUNC(sub_822D9690)
     static std::atomic<uint64_t> s_calls{0};
     uint64_t c = ++s_calls;
     uint32_t pool = ctx.r3.u32;
+    if (pool < 0x10000 || pool >= PPC_MEMORY_SIZE - 2500) {
+        ctx.r3.s64 = -1;
+        return;
+    }
     if (c <= 30 || c % 100 == 0) {
         LOGF_INFO("[sub_822D9690] #{} pool=0x{:08X} r4={} r5={} r6={} r7={}",
                   c, pool, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32);
@@ -15466,16 +15478,24 @@ PPC_FUNC(sub_8266BB00)
 // RAGE State transition function (sub_8229AD78)
 PPC_FUNC(sub_8229AD78)
 {
-    uint16_t oldState = (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 16) ? PPC_LOAD_U16(ctx.r3.u32 + 14) : 0;
-    if (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 16) {
-        PPC_STORE_U16(ctx.r3.u32 + 14, ctx.r4.u16);
+    uint32_t obj = ctx.r3.u32;
+    if (obj < 0x10000 || obj >= PPC_MEMORY_SIZE - 20) {
+        obj = g_lastStateMachineObj.load();
+        if (obj < 0x10000) obj = 0x83887150;
+        ctx.r3.u64 = obj;
+    } else {
+        g_lastStateMachineObj.store(obj);
+    }
+    uint16_t oldState = (obj >= 0x10000 && obj < PPC_MEMORY_SIZE - 16) ? PPC_LOAD_U16(obj + 14) : 0;
+    if (obj >= 0x10000 && obj < PPC_MEMORY_SIZE - 16) {
+        PPC_STORE_U16(obj + 14, ctx.r4.u16);
         if (ctx.r4.u16 == 2) {
-            PPC_STORE_U16(ctx.r3.u32 + 16, 0xFFFF);
+            PPC_STORE_U16(obj + 16, 0xFFFF);
             KernelPhase_EnterRuntime();
         }
     }
     LOGF_WARNING("===============================================================");
-    LOGF_WARNING("[RAGE_STATE] Transition: State {} -> State {} (obj=0x{:08X})", oldState, ctx.r4.u16, ctx.r3.u32);
+    LOGF_WARNING("[RAGE_STATE] Transition: State {} -> State {} (obj=0x{:08X})", oldState, ctx.r4.u16, obj);
     LOGF_WARNING("===============================================================");
 }
 
