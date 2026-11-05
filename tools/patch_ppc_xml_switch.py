@@ -936,6 +936,7 @@ def main() -> int:
     patch_recomp106_sub_8299BD70_loop(ppc_dir / "ppc_recomp.106.cpp")
     patch_recomp159_sub_82C78900_guard(ppc_dir / "ppc_recomp.159.cpp")
     patch_recomp72_sub_827898A0_loop(ppc_dir / "ppc_recomp.72.cpp")
+    patch_recomp297_sub_83444728_loop(ppc_dir / "ppc_recomp.297.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -5448,6 +5449,54 @@ def patch_recomp72_sub_827898A0_loop(path: pathlib.Path) -> bool:
         text = text.replace(target_loop, repl_loop)
         path.write_text(text)
         print(f"Patched recomp.72 sub_827898A0 loop in {path}")
+        patched = True
+    return patched
+
+def patch_recomp297_sub_83444728_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target_prologue = (
+        "PPC_FUNC_IMPL(__imp__sub_83444728) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};"
+    )
+    repl_prologue = (
+        "PPC_FUNC_IMPL(__imp__sub_83444728) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\tint loopIter1 = 0;\n"
+        "\tint loopIter2 = 0;"
+    )
+
+    target_loop1 = (
+        "loc_83444754:\n"
+        "\t// lwz r11,0(r30)"
+    )
+    repl_loop1 = (
+        "loc_83444754:\n"
+        "\tif (++loopIter1 > 128) goto loc_834447B0;\n"
+        "\t// lwz r11,0(r30)"
+    )
+
+    target_loop2 = (
+        "loc_834447F0:\n"
+        "\t// lwz r11,0(r31)"
+    )
+    repl_loop2 = (
+        "loc_834447F0:\n"
+        "\tif (++loopIter2 > 128) goto loc_83444858;\n"
+        "\t// lwz r11,0(r31)"
+    )
+
+    patched = False
+    if target_prologue in text and target_loop1 in text and target_loop2 in text:
+        text = text.replace(target_prologue, repl_prologue)
+        text = text.replace(target_loop1, repl_loop1)
+        text = text.replace(target_loop2, repl_loop2)
+        path.write_text(text)
+        print(f"Patched recomp.297 sub_83444728 loops in {path}")
         patched = True
     return patched
 
