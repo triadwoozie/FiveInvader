@@ -28,6 +28,7 @@
 #include <os/registry.h>
 #include <ui/game_window.h>
 #include <ui/installer_wizard.h>
+#include <ui/launcher.h>
 #include <mod/mod_loader.h>
 #include <preload_executable.h>
 #include <iostream>
@@ -427,6 +428,7 @@ int main(int argc, char *argv[])
     bool useDefaultWorkingDirectory = false;
     bool forceInstallationCheck = false;
     bool graphicsApiRetry = false;
+    bool skipLauncher = false;
     const char *sdlVideoDriver = nullptr;
     std::string cliConfigPath;
     std::string cliLang;
@@ -576,6 +578,10 @@ int main(int argc, char *argv[])
             {
                 cliFps = std::atoi(argv[++i]);
             }
+        }
+        else if (strcmp(argv[i], "--skip-launcher") == 0 || strcmp(argv[i], "--no-launcher") == 0)
+        {
+            skipLauncher = true;
         }
     }
 
@@ -731,6 +737,36 @@ int main(int argc, char *argv[])
         os::process::ShowConsole();
     LOGN_WARNING("Host Startup");
     HostStartup();
+
+    std::filesystem::path currentPath = GetGamePath();
+    if (!skipLauncher)
+    {
+        if (!Launcher::Run(currentPath))
+        {
+            LOGN_INFO("[Main] Launcher closed by user. Exiting.");
+            return 0;
+        }
+        SetUserPath(currentPath);
+    }
+    else
+    {
+        // If launcher is skipped and current path lacks default.xex, check saved config
+        std::filesystem::path dummyXex;
+        if (!Launcher::ValidateGameDirectory(currentPath, dummyXex))
+        {
+            std::filesystem::path savedPath;
+            int dummyW = 0, dummyH = 0, dummyFps = 0;
+            bool dummyFs = false, dummyVs = false;
+            if (Launcher::LoadConfig(savedPath, dummyW, dummyH, dummyFs, dummyVs, dummyFps))
+            {
+                if (Launcher::ValidateGameDirectory(savedPath, dummyXex))
+                {
+                    currentPath = savedPath;
+                    SetUserPath(currentPath);
+                }
+            }
+        }
+    }
 
     std::filesystem::path modulePath;
     bool isGameInstalled = Installer::checkGameInstall(GetGamePath(), modulePath);

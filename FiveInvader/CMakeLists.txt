@@ -187,6 +187,7 @@ set(FIVEINVADER_UI_CXX_SOURCES
     "ui/game_window.cpp"
     "ui/imgui_utils.cpp"
     "ui/installer_wizard.cpp"
+    "ui/launcher.cpp"
     "ui/message_window_stub.cpp"   # Stub - GTA V version needed
     "ui/network_status_overlay.cpp"
     "ui/options_menu_stub.cpp"     # Stub - GTA V version needed
@@ -231,6 +232,7 @@ set(FIVEINVADER_UTILS_CXX_SOURCES
 
 set(FIVEINVADER_THIRDPARTY_SOURCES
     "${FIVEINVADER_THIRDPARTY_ROOT}/imgui/backends/imgui_impl_sdl2.cpp"
+    "${FIVEINVADER_THIRDPARTY_ROOT}/imgui/backends/imgui_impl_sdlrenderer2.cpp"
     "${FIVEINVADER_THIRDPARTY_ROOT}/imgui/imgui.cpp"
     "${FIVEINVADER_THIRDPARTY_ROOT}/imgui/imgui_demo.cpp"
     "${FIVEINVADER_THIRDPARTY_ROOT}/imgui/imgui_draw.cpp"
@@ -246,6 +248,7 @@ set(FIVEINVADER_THIRDPARTY_INCLUDES
     "${FIVEINVADER_THIRDPARTY_ROOT}/concurrentqueue"
     "${FIVEINVADER_THIRDPARTY_ROOT}/ddspp"
     "${FIVEINVADER_THIRDPARTY_ROOT}/imgui"
+    "${FIVEINVADER_THIRDPARTY_ROOT}/imgui/backends"
     "${FIVEINVADER_THIRDPARTY_ROOT}/implot"
     "${FIVEINVADER_THIRDPARTY_ROOT}/json/include"
     "${FIVEINVADER_THIRDPARTY_ROOT}/magic_enum/include"

@@ -5640,7 +5640,7 @@ void FireVBlankCallback() {
 
         // Set up context with valid stack and TLS on the dedicated vblank context
         PPCContext ctx = s_vblankContext->ppcContext;
-        ctx.r3.u32 = 1;  // Xenon graphics interrupt source 1 = VBlank
+        ctx.r3.u32 = 0;  // Xenon graphics interrupt source 0 = VBlank
         ctx.r4.u32 = g_gpuRingBuffer.interruptUserData;  // Context/userData
         if (ctx.r13.u32 < PPC_MEMORY_SIZE - 269)
             *reinterpret_cast<uint8_t*>(g_memory.Translate(ctx.r13.u32 + 268)) = 2;
@@ -15713,8 +15713,8 @@ PPC_FUNC(sub_836B1768)
     }
     // Check if reason == 0 (VBlank), call sub_836B4A68 to advance D3D frame presentation
     if (interruptReason == 0) {
-        if (vblankCount > 0 && vblankCount <= 4)
-            LOGF_INFO("[GPU IRQ] VBlank dispatch calling __imp__sub_836B4A68 device=0x{:08X}", ctx.r4.u32);
+        if (vblankCount > 0 && (vblankCount <= 10 || (vblankCount % 60) == 0))
+            LOGF_INFO("[GPU IRQ] VBlank dispatch calling __imp__sub_836B4A68 device=0x{:08X} #{}", ctx.r4.u32, vblankCount);
         ctx.r3.u64 = ctx.r4.u64;
         __imp__sub_836B4A68(ctx, base);
     }
