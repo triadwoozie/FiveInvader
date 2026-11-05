@@ -935,6 +935,7 @@ def main() -> int:
     patch_recomp20_sub_823DF6A8_guard(ppc_dir / "ppc_recomp.20.cpp")
     patch_recomp106_sub_8299BD70_loop(ppc_dir / "ppc_recomp.106.cpp")
     patch_recomp159_sub_82C78900_guard(ppc_dir / "ppc_recomp.159.cpp")
+    patch_recomp72_sub_827898A0_loop(ppc_dir / "ppc_recomp.72.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -5408,6 +5409,47 @@ def patch_recomp159_sub_82C78900_guard(path: pathlib.Path) -> bool:
         print(f"Patched recomp.159 sub_82C78900 guard in {path}")
         return True
     return False
+
+def patch_recomp72_sub_827898A0_loop(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target_72 = (
+        "PPC_FUNC_IMPL(__imp__sub_827898A0) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\t// lhz r11,80(r3)"
+    )
+    repl_72 = (
+        "PPC_FUNC_IMPL(__imp__sub_827898A0) {\n"
+        "\tPPC_FUNC_PROLOGUE();\n"
+        "\tPPCCRRegister cr6{};\n"
+        "\tint loopIter = 0;\n"
+        "\t// lhz r11,80(r3)"
+    )
+
+    target_loop = (
+        "loc_827898CC:\n"
+        "\t// rlwinm r11,r11,3,0,28"
+    )
+    repl_loop = (
+        "loc_827898CC:\n"
+        "\tif (++loopIter > 128) {\n"
+        "\t\tctx.r3.s64 = -1;\n"
+        "\t\treturn;\n"
+        "\t}\n"
+        "\t// rlwinm r11,r11,3,0,28"
+    )
+
+    patched = False
+    if target_72 in text and target_loop in text:
+        text = text.replace(target_72, repl_72)
+        text = text.replace(target_loop, repl_loop)
+        path.write_text(text)
+        print(f"Patched recomp.72 sub_827898A0 loop in {path}")
+        patched = True
+    return patched
 
 if __name__ == "__main__":
     raise SystemExit(main())
