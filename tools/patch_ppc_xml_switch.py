@@ -2291,16 +2291,46 @@ def patch_recomp245_poll_guard(path: pathlib.Path) -> bool:
         "\t\tsub_82548DE0(ctx, base);\n"
         "\t\t// lbz r11,100(r31)\n"
         "\t\tctx.r11.u64 = PPC_LOAD_U8(ctx.r31.u32 + 100);\n"
+        "\t\tif (s_pollCount >= 10 && ctx.r11.u32 == 0) {\n"
+        "\t\t\tfprintf(stderr, \"[sub_830D6CD0] Worker task 2 timeout after %d polls! Forcing packfile mount complete!\\n\", s_pollCount);\n"
+        "\t\t\tPPC_STORE_U8(ctx.r31.u32 + 100, 1);\n"
+        "\t\t\tctx.r11.u64 = 1;\n"
+        "\t\t}\n"
         "\t}\n"
         "\t// cmplwi cr6,r11,0\n"
         "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
         "\t// beq cr6,0x830d6cf4\n"
         "\tif (cr6.eq) goto loc_830D6CF4;"
     )
-    if prev_new in text:
+    prev_clean = (
+        "loc_830D6CF4:\n"
+        "\t{\n"
+        "\t\tstatic int s_pollCount = 0;\n"
+        "\t\tif (++s_pollCount <= 5 || s_pollCount % 100 == 0) {\n"
+        "\t\t\tfprintf(stderr, \"[sub_830D6CD0] Polling *(0x%08X + 100) == %u (poll #%d)\\n\", ctx.r31.u32, PPC_LOAD_U8(ctx.r31.u32 + 100), s_pollCount);\n"
+        "\t\t}\n"
+        "\t\t// li r3,10\n"
+        "\t\tctx.r3.s64 = 10;\n"
+        "\t\t// bl 0x82548de0\n"
+        "\t\tctx.lr = 0x830D6CFC;\n"
+        "\t\tsub_82548DE0(ctx, base);\n"
+        "\t\t// lbz r11,100(r31)\n"
+        "\t\tctx.r11.u64 = PPC_LOAD_U8(ctx.r31.u32 + 100);\n"
+        "\t}\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x830d6cf4\n"
+        "\tif (cr6.eq) goto loc_830D6CF4;"
+    )
+    if prev_clean in text:
+        text = text.replace(prev_clean, clean_new)
+        path.write_text(text)
+        print(f"Updated recomp.245 poll guard (with timeout fallback) in {path}")
+        return True
+    elif prev_new in text:
         text = text.replace(prev_new, clean_new)
         path.write_text(text)
-        print(f"Updated recomp.245 poll guard (clean poll) in {path}")
+        print(f"Updated recomp.245 poll guard in {path}")
         return True
     elif old in text:
         text = text.replace(old, clean_new)
