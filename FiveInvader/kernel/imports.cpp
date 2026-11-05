@@ -176,6 +176,8 @@ void sub_82948308(PPCContext& ctx, uint8_t* base);
 void sub_822438F8(PPCContext& ctx, uint8_t* base);
 void sub_824BBB30(PPCContext& ctx, uint8_t* base);
 void sub_822DA770(PPCContext& ctx, uint8_t* base);
+void sub_82985760(PPCContext& ctx, uint8_t* base);
+void sub_82574450(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -260,6 +262,8 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x822D9768, &::sub_822D9768);
     PatchFuncMapping(0x822D9690, &::sub_822D9690);
     PatchFuncMapping(0x834DFFA0, &::sub_834DFFA0);
+    PatchFuncMapping(0x82985760, &::sub_82985760);
+    PatchFuncMapping(0x82574450, &::sub_82574450);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -13913,6 +13917,32 @@ PPC_FUNC(sub_82574338)
     auto t1 = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     LOGF_INFO("[sub_82574338] State 2 handler exit #{} ret={} elapsed={}ms", c, (int32_t)ctx.r3.s32, ms);
+}
+
+extern "C" void __imp__sub_82985760(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82985760)
+{
+    static std::atomic<uint64_t> s_calls{0};
+    uint64_t c = ++s_calls;
+    __imp__sub_82985760(ctx, base);
+    uint32_t origRet = ctx.r3.u32;
+    // Packfile status check: Ensure loc_8257785C (sub_8229AD78 state 2 dispatch) is unblocked
+    if (ctx.lr == 0x82577834 || ctx.lr == 0x82577800) {
+        ctx.r3.u64 = 1;
+    }
+    LOGF_INFO("[sub_82985760] #{} packfile status check callerLR=0x{:08X} origRet={} -> ret={}",
+              c, ctx.lr, origRet, ctx.r3.u32);
+}
+
+extern "C" void __imp__sub_82574450(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_82574450)
+{
+    static std::atomic<uint64_t> s_calls{0};
+    uint64_t c = ++s_calls;
+    if (c <= 30 || c % 60 == 0) {
+        LOGF_INFO("[sub_82574450] State 2 Frame Update #{} obj=0x{:08X}", c, ctx.r3.u32);
+    }
+    __imp__sub_82574450(ctx, base);
 }
 
 extern "C" void __imp__sub_822D9768(PPCContext& ctx, uint8_t* base);
