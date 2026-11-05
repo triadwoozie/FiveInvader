@@ -934,6 +934,7 @@ def main() -> int:
     patch_recomp31_sub_824F8A48_guard(ppc_dir / "ppc_recomp.31.cpp")
     patch_recomp20_sub_823DF6A8_guard(ppc_dir / "ppc_recomp.20.cpp")
     patch_recomp106_sub_8299BD70_loop(ppc_dir / "ppc_recomp.106.cpp")
+    patch_recomp159_sub_82C78900_guard(ppc_dir / "ppc_recomp.159.cpp")
     return 0
 
 def patch_atmap_insert_guard(path: pathlib.Path) -> bool:
@@ -3395,6 +3396,90 @@ def patch_recomp338_worker_thread_guards(path: pathlib.Path) -> bool:
         text = text.replace(old_beea0, new_beea0)
         patched = True
 
+    target_present = (
+        "\t// lbz r11,11070(r31)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U8(ctx.r31.u32 + 11070);\n"
+        "\t// rlwinm. r11,r11,0,30,30\n"
+        "\tctx.r11.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 0) & 0x2;\n"
+        "\tcr0.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n"
+        "\t// beq 0x836befb4\n"
+        "\tif (cr0.eq) goto loc_836BEFB4;"
+    )
+    repl_present = (
+        "\t// lbz r11,11070(r31)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U8(ctx.r31.u32 + 11070);\n"
+        "\t// rlwinm. r11,r11,0,30,30\n"
+        "\tctx.r11.u64 = __builtin_rotateleft64(ctx.r11.u32 | (ctx.r11.u64 << 32), 0) & 0x2;\n"
+        "\tcr0.compare<int32_t>(ctx.r11.s32, 0, ctx.xer);\n"
+        "\t// Present scene dirty check bypassed: always invoke sub_822D41E8 to execute VdSwap and BeginScene\n"
+        "\tif (ctx.r31.u32 < 0x10000 || ctx.r31.u32 >= PPC_MEMORY_SIZE - 25000) goto loc_836BEFB4;"
+    )
+    if target_present in text:
+        text = text.replace(target_present, repl_present)
+        patched = True
+
+    # Ensure loc_836BF00C branches to loc_836BEF5C on timeout (STATUS_TIMEOUT=258)
+    # so sub_822D41E8 (VdSwap) is invoked on initial present wait (callerLR 0x836BEF3C)
+    target_unblock = (
+        "loc_836BF00C:\n"
+        "\t// cmplwi cr6,r3,258\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 258, ctx.xer);\n"
+        "\t// Present timeout loop unblocked: fall through to loc_836BF014 so Present() returns to game\n"
+        "\t// if (cr6.eq) goto loc_836BEF5C;"
+    )
+    repl_unblock = (
+        "loc_836BF00C:\n"
+        "\t// cmplwi cr6,r3,258\n"
+        "\tcr6.compare<uint32_t>(ctx.r3.u32, 258, ctx.xer);\n"
+        "\t// beq cr6,0x836bef5c\n"
+        "\tif (cr6.eq) goto loc_836BEF5C;"
+    )
+    if target_unblock in text:
+        text = text.replace(target_unblock, repl_unblock)
+        patched = True
+
+    # In loc_836BF014, acknowledge swapchain flip and return STATUS_SUCCESS (D3D_OK=0)
+    target_f014 = (
+        "loc_836BF014:\n"
+        "\t// addi r3,r28,60\n"
+        "\tctx.r3.s64 = ctx.r28.s64 + 60;\n"
+        "\t// bl 0x8375366c\n"
+        "\tctx.lr = 0x836BF01C;\n"
+        "\t__imp__KeResetEvent(ctx, base);\n"
+        "\t// lwz r11,4(r25)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r25.u32 + 4);\n"
+        "\t// cmplwi cr6,r11,0\n"
+        "\tcr6.compare<uint32_t>(ctx.r11.u32, 0, ctx.xer);\n"
+        "\t// beq cr6,0x836bf034\n"
+        "\tif (cr6.eq) goto loc_836BF034;\n"
+        "\t// mr r3,r28\n"
+        "\tctx.r3.u64 = ctx.r28.u64;\n"
+        "\t// bl 0x836bebe0\n"
+        "\tctx.lr = 0x836BF030;\n"
+        "\tsub_836BEBE0(ctx, base);\n"
+        "\t// b 0x836beec4\n"
+        "\tgoto loc_836BEEC4;"
+    )
+    repl_f014 = (
+        "loc_836BF014:\n"
+        "\t// addi r3,r28,60\n"
+        "\tctx.r3.s64 = ctx.r28.s64 + 60;\n"
+        "\t// bl 0x8375366c\n"
+        "\tctx.lr = 0x836BF01C;\n"
+        "\t__imp__KeResetEvent(ctx, base);\n"
+        "\t// Acknowledge swapchain flip so D3D Present returns cleanly to game loop\n"
+        "\tif (ctx.r28.u32 >= 0x10000 && ctx.r28.u32 < PPC_MEMORY_SIZE - 92) {\n"
+        "\t\tPPC_STORE_U32(ctx.r28.u32 + 84, PPC_LOAD_U32(ctx.r28.u32 + 88));\n"
+        "\t}\n"
+        "\tif (ctx.r25.u32 >= 0x10000 && ctx.r25.u32 < PPC_MEMORY_SIZE - 8) {\n"
+        "\t\tPPC_STORE_U32(ctx.r25.u32 + 4, 0);\n"
+        "\t}\n"
+        "\tgoto loc_836BF034;"
+    )
+    if target_f014 in text:
+        text = text.replace(target_f014, repl_f014)
+        patched = True
+
     if patched:
         path.write_text(text)
         print(f"Patched recomp.338 worker thread guards in {path}")
@@ -5244,6 +5329,83 @@ def patch_recomp106_sub_8299BD70_loop(path: pathlib.Path) -> bool:
         text = text.replace(target, repl)
         path.write_text(text)
         print(f"Patched recomp.106 sub_8299BD70 loop in {path}")
+        return True
+    return False
+
+def patch_recomp159_sub_82C78900_guard(path: pathlib.Path) -> bool:
+    if not path.exists():
+        return False
+    text = path.read_text()
+
+    target_159 = (
+        "\t// lwz r3,-20708(r10)\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r10.u32 + -20708);\n"
+        "\t// mr r6,r29\n"
+        "\tctx.r6.u64 = ctx.r29.u64;\n"
+        "\t// li r5,0\n"
+        "\tctx.r5.s64 = 0;\n"
+        "\t// lwz r7,0(r3)\n"
+        "\tctx.r7.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n"
+        "\t// lwz r11,28(r7)\n"
+        "\tctx.r11.u64 = PPC_LOAD_U32(ctx.r7.u32 + 28);\n"
+        "\t// mtctr r11\n"
+        "\tctr.u64 = ctx.r11.u64;\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x82C78AA4;\n"
+        "\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\t// lwzx r3,r30,r31\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + ctx.r31.u32);\n"
+        "\t// li r4,6\n"
+        "\tctx.r4.s64 = 6;\n"
+        "\t// lwz r10,0(r3)\n"
+        "\tctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n"
+        "\t// lwz r9,44(r10)\n"
+        "\tctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 44);\n"
+        "\t// mtctr r9\n"
+        "\tctr.u64 = ctx.r9.u64;\n"
+        "\t// bctrl \n"
+        "\tctx.lr = 0x82C78ABC;\n"
+        "\tPPC_CALL_INDIRECT_FUNC(ctr.u32);"
+    )
+    repl_159 = (
+        "\t// lwz r3,-20708(r10)\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r10.u32 + -20708);\n"
+        "\t// mr r6,r29\n"
+        "\tctx.r6.u64 = ctx.r29.u64;\n"
+        "\t// li r5,0\n"
+        "\tctx.r5.s64 = 0;\n"
+        "\tif (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 32) {\n"
+        "\t\tctx.r7.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n"
+        "\t\tif (ctx.r7.u32 >= 0x10000 && ctx.r7.u32 < PPC_MEMORY_SIZE - 32) {\n"
+        "\t\t\tctx.r11.u64 = PPC_LOAD_U32(ctx.r7.u32 + 28);\n"
+        "\t\t\tctr.u64 = ctx.r11.u64;\n"
+        "\t\t\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < PPC_CODE_BASE + PPC_CODE_SIZE) {\n"
+        "\t\t\t\tctx.lr = 0x82C78AA4;\n"
+        "\t\t\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+        "\t}\n"
+        "\t// lwzx r3,r30,r31\n"
+        "\tctx.r3.u64 = PPC_LOAD_U32(ctx.r30.u32 + ctx.r31.u32);\n"
+        "\t// li r4,6\n"
+        "\tctx.r4.s64 = 6;\n"
+        "\tif (ctx.r3.u32 >= 0x10000 && ctx.r3.u32 < PPC_MEMORY_SIZE - 48) {\n"
+        "\t\tctx.r10.u64 = PPC_LOAD_U32(ctx.r3.u32 + 0);\n"
+        "\t\tif (ctx.r10.u32 >= 0x10000 && ctx.r10.u32 < PPC_MEMORY_SIZE - 48) {\n"
+        "\t\t\tctx.r9.u64 = PPC_LOAD_U32(ctx.r10.u32 + 44);\n"
+        "\t\t\tctr.u64 = ctx.r9.u64;\n"
+        "\t\t\tif (ctr.u32 >= PPC_CODE_BASE && ctr.u32 < PPC_CODE_BASE + PPC_CODE_SIZE) {\n"
+        "\t\t\t\tctx.lr = 0x82C78ABC;\n"
+        "\t\t\t\tPPC_CALL_INDIRECT_FUNC(ctr.u32);\n"
+        "\t\t\t}\n"
+        "\t\t}\n"
+        "\t}"
+    )
+
+    if target_159 in text:
+        text = text.replace(target_159, repl_159)
+        path.write_text(text)
+        print(f"Patched recomp.159 sub_82C78900 guard in {path}")
         return True
     return False
 

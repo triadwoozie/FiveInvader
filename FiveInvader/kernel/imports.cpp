@@ -2821,44 +2821,19 @@ uint32_t NtCreateFile
                     return STATUS_SUCCESS;
                 }
                 
-                // =======================================================================
-                // SONIC UNLEASHED APPROACH: Bypass shader directory enumeration.
-                // All 1132 shaders are pre-compiled and embedded in g_shaderCacheEntries[].
-                // Return STATUS_OBJECT_NAME_NOT_FOUND to force use of embedded cache.
-                // =======================================================================
-                if (pathLower.find("fxl_final") != std::string::npos ||
-                    pathLower.find("shaders") != std::string::npos)
-                {
-                    static int s_shaderBypassCount = 0;
-                    if (++s_shaderBypassCount <= 5) {
-                        if (App::s_logVfs)
-                            LOGF_IMPL(Utility, "NtCreateFile", "SHADER BYPASS #{}: '{}' - using embedded cache (1132 pre-compiled shaders)",
-                                      s_shaderBypassCount, guestPath);
-                    }
-                    
-                    // Return "not found" - forces game to use embedded shader cache
-                    if (IoStatusBlock)
-                    {
-                        IoStatusBlock->Status = STATUS_OBJECT_NAME_NOT_FOUND;
-                        IoStatusBlock->Information = 0;
-                    }
-                    return STATUS_OBJECT_NAME_NOT_FOUND;
-                }
-                
-                // For non-shader paths, try extracted directory
-                std::filesystem::path extractedPath = GetGamePath() / "RPF DUMP" / "common";
-                if (std::filesystem::exists(extractedPath))
+                // For directories inside extracted game tree (shaders, data, etc.), return directory handle
+                if (std::filesystem::exists(resolved) && std::filesystem::is_directory(resolved))
                 {
                     NtDirHandle* hDir = CreateKernelObject<NtDirHandle>();
-                    hDir->path = extractedPath;
+                    hDir->path = resolved;
 
                     const uint32_t handleValue = GetKernelHandle(hDir);
                     g_ntDirHandles.emplace(handleValue, hDir);
 
                     *FileHandle = handleValue;
                     if (App::s_logVfs)
-                        LOGF_IMPL(Utility, "NtCreateFile", "RPF path -> extracted dir: {} (handle=0x{:08X})",
-                                  extractedPath.string(), handleValue);
+                        LOGF_IMPL(Utility, "NtCreateFile", "Directory mount '{}' -> directory handle 0x{:08X} for {}",
+                                  guestPath, handleValue, resolved.string());
                     
                     if (IoStatusBlock)
                     {
@@ -2873,12 +2848,12 @@ uint32_t NtCreateFile
                 hVirt->debugPath = resolved;
                 hVirt->data = MakeEmptyRpfImage();
 
-                const uint32_t handleValue = GetKernelHandle(hVirt);
-                g_ntVirtFileHandles.emplace(handleValue, hVirt);
+                const uint32_t virtHandleValue = GetKernelHandle(hVirt);
+                g_ntVirtFileHandles.emplace(virtHandleValue, hVirt);
 
-                *FileHandle = handleValue;
+                *FileHandle = virtHandleValue;
                 if (App::s_logVfs)
-                    LOGF_IMPL(Utility, "NtCreateFile", "RPF mount '{}' -> virtual empty RPF (handle=0x{:08X})", guestPath, handleValue);
+                    LOGF_IMPL(Utility, "NtCreateFile", "RPF mount '{}' -> virtual empty RPF (handle=0x{:08X})", guestPath, virtHandleValue);
                 
                 if (IoStatusBlock)
                 {
@@ -5208,26 +5183,17 @@ static uint32_t ExecutePM4Buffer(uint32_t* buffer, uint32_t dwordCount,
                         {
                             std::memcpy(&current, targetPointer, sizeof(current));
                             current = GpuSwapPM4(current, target & 0x3u);
-                        }
-                        else
-                        {
-                            waitConditionMet = false;
+                            // Satisfy the memory fence so synchronous PM4 command processing is never deadlocked
+                            StoreGpuWrite(target, reference);
                         }
                     }
-                    const uint32_t compare = current & mask;
-                    const uint32_t relationBits =
-                        (static_cast<uint32_t>(compare < reference) << 1) |
-                        (static_cast<uint32_t>(compare <= reference) << 2) |
-                        (static_cast<uint32_t>(compare == reference) << 3) |
-                        (static_cast<uint32_t>(compare != reference) << 4) |
-                        (static_cast<uint32_t>(compare >= reference) << 5) |
-                        (static_cast<uint32_t>(compare > reference) << 6) |
-                        (1u << 7);
-                    waitConditionMet = waitConditionMet &&
-                        ((relationBits >> (waitInfo & 0x7u)) & 1u) != 0;
-                    LOGF_INFO("[PM4] WAIT_REG_MEM memory={} target=0x{:08X} current=0x{:08X} ref=0x{:08X} mask=0x{:08X} matched={}",
-                              (waitInfo & 0x10u) != 0, target, current, reference, mask,
-                              waitConditionMet);
+                    else
+                    {
+                        s_registerFile[target & 0xFFFFu] = reference;
+                    }
+                    waitConditionMet = true;
+                    LOGF_INFO("[PM4] WAIT_REG_MEM memory={} target=0x{:08X} current=0x{:08X} ref=0x{:08X} mask=0x{:08X} satisfied=true",
+                              (waitInfo & 0x10u) != 0, target, current, reference, mask);
                 }
                 break;
             case PM4_EVENT_WRITE:
@@ -5284,7 +5250,7 @@ static uint32_t ExecutePM4Buffer(uint32_t* buffer, uint32_t dwordCount,
 // Returns number of packets found
 static uint32_t ScanPM4Buffer(uint32_t* buffer, uint32_t bufferDwords, bool isIndirect, uint32_t scanCount, uint32_t depth = 0) {
     static uint32_t s_loggedWaitCount = 0;
-    const bool accountPackets = true;
+    const bool accountPackets = false;
     uint32_t packetsFound = 0;
     uint32_t pos = 0;
     uint32_t maxScan = std::min(bufferDwords, 1024u);
@@ -5960,6 +5926,21 @@ uint32_t KeWaitForSingleObject(XDISPATCHER_HEADER* Object, uint32_t WaitReason, 
 
     if (!Object)
         return STATUS_INVALID_PARAMETER;
+
+    // D3D Present VBlank/Flip synchronization handshake:
+    // 1) 0x836BEF3C: Initial wait in sub_836BEEA0. Return STATUS_TIMEOUT (258)
+    //    so the routine immediately dispatches loc_836BEF5C to execute sub_822D41E8 (VdSwap).
+    if (callerLR == 0x836BEF3C)
+    {
+        return 258; // STATUS_TIMEOUT
+    }
+
+    // 2) 0x836BEFF0: Post-VdSwap wait in sub_836BEEA0. Return STATUS_SUCCESS (0)
+    //    so the routine proceeds to loc_836BF014 (flip complete).
+    if (callerLR == 0x836BEFF0)
+    {
+        return 0; // STATUS_SUCCESS
+    }
 
     switch (Object->Type)
     {
@@ -13647,7 +13628,8 @@ loc_83480FE0:
         if (flag != 0) {
             ctx.r4.s64 = 1;
             ctx.r3.u64 = PPC_LOAD_U32(ctx.r27.u32 + 32);
-            sub_82381A70(ctx, base);
+            // Worker barrier wait bypassed: tasks complete synchronously on host
+            LOGF_INFO("[83480F88] Worker barrier wait on sem=0x{:08X} bypassed", ctx.r3.u32);
         }
     }
 
