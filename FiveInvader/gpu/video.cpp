@@ -1851,8 +1851,12 @@ static void CreateImGuiBackend()
 #endif
 }
 
+static std::mutex s_presentMutex;
+static std::recursive_mutex s_swapChainMutex;
+
 static void CheckSwapChain()
 {
+    std::lock_guard<std::recursive_mutex> lock(s_swapChainMutex);
     if (!g_swapChain || !g_backBuffer || !g_device)
         return;
 
@@ -1975,6 +1979,7 @@ static void ApplyLowEndDefaults()
 
 bool Video::CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry)
 {
+    std::lock_guard<std::mutex> presentLock(s_presentMutex);
     for (uint32_t i = 0; i < 16; i++)
         g_inputSlots[i].index = i;
 
@@ -3281,7 +3286,6 @@ static bool g_shouldPrecompilePipelines;
 static std::atomic<bool> g_executedCommandList;
 std::atomic<uint64_t> g_frameCounter{0};
 static std::atomic<uint64_t> g_guestDrawCommandCount{0};
-static std::mutex s_presentMutex;
 
 void Video::Present() 
 {

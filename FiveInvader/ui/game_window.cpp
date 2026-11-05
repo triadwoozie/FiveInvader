@@ -170,6 +170,7 @@ void GameWindow::ShowAndRaise()
 
 void GameWindow::Init(const char* sdlVideoDriver)
 {
+    s_showOnInit = true;
 #ifdef __linux__
     SDL_SetHint("SDL_APP_ID", "io.github.ozordi.libertyrecomp");
 #endif
@@ -464,7 +465,7 @@ void GameWindow::ResetDimensions()
 
 uint32_t GameWindow::GetWindowFlags()
 {
-    uint32_t flags = SDL_WINDOW_HIDDEN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+    uint32_t flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 
     if (Config::WindowState == EWindowState::Maximised)
         flags |= SDL_WINDOW_MAXIMIZED;
