@@ -12,7 +12,7 @@ public:
     static bool Run(std::filesystem::path& outGameDir);
 
     // Helper to find and validate the 32-byte retail AES key file.
-    static bool ValidateAesKey(std::filesystem::path& outPath);
+    static bool ValidateAesKey(const std::filesystem::path& gameDir, std::filesystem::path& outPath);
 
     // Helper to check whether default.xex exists in the target directory.
     static bool ValidateGameDirectory(const std::filesystem::path& dir, std::filesystem::path& outXexPath);

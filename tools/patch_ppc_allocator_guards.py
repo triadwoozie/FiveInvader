@@ -212,5 +212,38 @@ def main():
 
     patch_file(ppc_dir / "ppc_recomp.269.cpp", target_269_old, target_269_new)
 
+    # Patch 95: sub_828E1370 / sub_828E24D8 container sentinel exits
+    patch_file(ppc_dir / "ppc_recomp.95.cpp",
+               "loc_828E14A4:\n\t// addi r30,r6,36\n\tctx.r30.s64 = ctx.r6.s64 + 36;\nloc_828E14A8:",
+               "loc_828E14A4:\n\t// addi r30,r6,36\n\tctx.r30.s64 = ctx.r6.s64 + 36;\n\tgoto loc_828E14D0;\nloc_828E14A8:")
+    patch_file(ppc_dir / "ppc_recomp.95.cpp",
+               "loc_828E150C:\n\t// addi r31,r6,36\n\tctx.r31.s64 = ctx.r6.s64 + 36;\nloc_828E1510:",
+               "loc_828E150C:\n\t// addi r31,r6,36\n\tctx.r31.s64 = ctx.r6.s64 + 36;\n\tgoto loc_828E1668;\nloc_828E1510:")
+    patch_file(ppc_dir / "ppc_recomp.95.cpp",
+               "loc_828E262C:\n\t// addi r30,r6,36\n\tctx.r30.s64 = ctx.r6.s64 + 36;\nloc_828E2630:",
+               "loc_828E262C:\n\t// addi r30,r6,36\n\tctx.r30.s64 = ctx.r6.s64 + 36;\n\tgoto loc_828E2640;\nloc_828E2630:")
+
+    # Patch 109: sub_829BFB30 cycle detection & sentinel exit
+    patch_file(ppc_dir / "ppc_recomp.109.cpp",
+               "PPC_FUNC_IMPL(__imp__sub_829BFB30) {\n\tPPC_FUNC_PROLOGUE();",
+               "PPC_FUNC_IMPL(__imp__sub_829BFB30) {\n\tPPC_FUNC_PROLOGUE();\n\tuint32_t prev_829b{};\n\tuint32_t loop_829bfb{};")
+    patch_file(ppc_dir / "ppc_recomp.109.cpp",
+               "\t// lhz r11,6(r11)\n\tctx.r11.u64 = PPC_LOAD_U16(ctx.r11.u32 + 6);\n\t// cmplwi cr6,r11,65535\n\tcr6.compare<uint32_t>(ctx.r11.u32, 65535, ctx.xer);\n\t// bne cr6,0x829bfbe0\n\tif (!cr6.eq) goto loc_829BFBE0;\n\t// b 0x829bfcac\n\tgoto loc_829BFCAC;",
+               "\t// lhz r11,6(r11)\n\tprev_829b = ctx.r11.u32;\n\tctx.r11.u64 = PPC_LOAD_U16(ctx.r11.u32 + 6);\n\t// cmplwi cr6,r11,65535\n\tcr6.compare<uint32_t>(ctx.r11.u32, 65535, ctx.xer);\n\t// bne cr6,0x829bfbe0\n\tif (!cr6.eq) {\n\t\tif ((ctx.r11.u32 << 3) + ctx.r10.u32 == prev_829b || ++loop_829bfb > 1000) {\n\t\t\tloop_829bfb = 0;\n\t\t\tgoto loc_829BFCAC;\n\t\t}\n\t\tgoto loc_829BFBE0;\n\t}\n\tloop_829bfb = 0;\n\t// b 0x829bfcac\n\tgoto loc_829BFCAC;")
+    patch_file(ppc_dir / "ppc_recomp.109.cpp",
+               "loc_829BFCFC:\n\t// addi r29,r6,36\n\tctx.r29.s64 = ctx.r6.s64 + 36;\nloc_829BFD00:",
+               "loc_829BFCFC:\n\t// addi r29,r6,36\n\tctx.r29.s64 = ctx.r6.s64 + 36;\n\tgoto loc_829BFD0C;\nloc_829BFD00:")
+
+    # Patch 214: sub_82F51830 / sub_82F524F0 / sub_82F52900 container sentinel exits
+    patch_file(ppc_dir / "ppc_recomp.214.cpp",
+               "loc_82F5245C:\n\t// addi r16,r6,36\n\tctx.r16.s64 = ctx.r6.s64 + 36;\nloc_82F52460:",
+               "loc_82F5245C:\n\t// addi r16,r6,36\n\tctx.r16.s64 = ctx.r6.s64 + 36;\n\tgoto loc_82F5246C;\nloc_82F52460:")
+    patch_file(ppc_dir / "ppc_recomp.214.cpp",
+               "loc_82F528C8:\n\t// addi r27,r6,36\n\tctx.r27.s64 = ctx.r6.s64 + 36;\nloc_82F528CC:",
+               "loc_82F528C8:\n\t// addi r27,r6,36\n\tctx.r27.s64 = ctx.r6.s64 + 36;\n\tgoto loc_82F528D8;\nloc_82F528CC:")
+    patch_file(ppc_dir / "ppc_recomp.214.cpp",
+               "loc_82F52BE4:\n\t// addi r29,r6,36\n\tctx.r29.s64 = ctx.r6.s64 + 36;\nloc_82F52BE8:",
+               "loc_82F52BE4:\n\t// addi r29,r6,36\n\tctx.r29.s64 = ctx.r6.s64 + 36;\n\tgoto loc_82F52BF4;\nloc_82F52BE8:")
+
 if __name__ == "__main__":
     main()

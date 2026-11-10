@@ -14,9 +14,15 @@
 #include <cstring>
 #include <algorithm>
 
-bool Launcher::ValidateAesKey(std::filesystem::path& outPath)
+bool Launcher::ValidateAesKey(const std::filesystem::path& gameDir, std::filesystem::path& outPath)
 {
     std::vector<std::filesystem::path> candidates;
+
+    if (!gameDir.empty())
+    {
+        candidates.push_back(gameDir / "aes_key.bin");
+        candidates.push_back(gameDir / "encryption_key.bin");
+    }
 
     if (const char* envPath = std::getenv("FIVEINVADER_AES_KEY"))
     {
@@ -372,7 +378,7 @@ bool Launcher::Run(std::filesystem::path& outGameDir)
         // Section 2: Retail AES Key Status
         ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.95f, 1.0f), "Retail AES-256 Encryption Key:");
         std::filesystem::path foundKeyPath;
-        bool keyValid = ValidateAesKey(foundKeyPath);
+        bool keyValid = ValidateAesKey(currentCheckDir, foundKeyPath);
 
         if (keyValid)
         {

@@ -178,6 +178,10 @@ void sub_824BBB30(PPCContext& ctx, uint8_t* base);
 void sub_822DA770(PPCContext& ctx, uint8_t* base);
 void sub_82985760(PPCContext& ctx, uint8_t* base);
 void sub_82574450(PPCContext& ctx, uint8_t* base);
+void sub_8344F920(PPCContext& ctx, uint8_t* base);
+void sub_827D1138(PPCContext& ctx, uint8_t* base);
+void sub_831EDB68(PPCContext& ctx, uint8_t* base);
+void sub_831D7BD8(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -264,6 +268,10 @@ void PatchSyncPrimitives() {
     PatchFuncMapping(0x834DFFA0, &::sub_834DFFA0);
     PatchFuncMapping(0x82985760, &::sub_82985760);
     PatchFuncMapping(0x82574450, &::sub_82574450);
+    PatchFuncMapping(0x8344F920, &::sub_8344F920);
+    PatchFuncMapping(0x827D1138, &::sub_827D1138);
+    PatchFuncMapping(0x831EDB68, &::sub_831EDB68);
+    PatchFuncMapping(0x831D7BD8, &::sub_831D7BD8);
     
     printf("[PATCH] Sync primitive patching complete.\n");
     fflush(stdout);
@@ -12536,7 +12544,7 @@ PPC_FUNC(sub_831ECC48)
 	}
 
 	{
-		uint32_t r11_base = 0x83CE0000 + 14060;
+		uint32_t r11_base = 0x83BE0000 + 14060;
 		uint32_t hookFn = (r11_base < PPC_MEMORY_SIZE) ? PPC_LOAD_U32(r11_base) : 0;
 		if (hookFn != 0) {
 			if (hookFn >= PPC_CODE_BASE && hookFn < (PPC_CODE_BASE + PPC_CODE_SIZE)) {
@@ -13799,6 +13807,163 @@ PPC_FUNC(sub_822438F8)
     __imp__sub_822438F8(ctx, base);
     uint32_t stageAfter = PPC_LOAD_U32(0x8388C63C);
     LOGF_INFO("[sub_822438F8] #{} EXIT stage={}", s_count, stageAfter);
+}
+
+PPC_FUNC(sub_8344F920)
+{
+    static int s_count = 0;
+    const char* str = nullptr;
+    if (ctx.r3.u32 < PPC_MEMORY_SIZE) {
+        str = (const char*)(base + ctx.r3.u32);
+    }
+    
+    uint32_t savedLr = ctx.lr;
+    
+    ctx.r4.s64 = 0;
+    sub_823C0348(ctx, base);
+    uint32_t hash = ctx.r3.u32;
+    
+    uint32_t tableAddr = 0x83C90890;
+    uint32_t entriesBase = PPC_LOAD_U32(tableAddr + 0);
+    uint32_t bucketsBase = PPC_LOAD_U32(tableAddr + 4);
+    uint16_t modulus = PPC_LOAD_U16(tableAddr + 8);
+    
+    if (modulus == 0 || bucketsBase == 0 || entriesBase == 0) {
+        LOGF_WARNING("[sub_8344F920] Table uninitialized: entries=0x{:08X} buckets=0x{:08X} mod={}",
+            entriesBase, bucketsBase, modulus);
+        ctx.r3.s64 = -1;
+        ctx.lr = savedLr;
+        return;
+    }
+    
+    uint32_t bucketIdx = hash % modulus;
+    uint16_t entryIdx = PPC_LOAD_U16(bucketsBase + bucketIdx * 2);
+    
+    int loopCount = 0;
+    while (entryIdx != 0xFFFF && loopCount < 1000) {
+        uint32_t entryAddr = entriesBase + entryIdx * 8;
+        uint32_t key = PPC_LOAD_U32(entryAddr + 0);
+        if (key == hash) {
+            uint16_t value = PPC_LOAD_U16(entryAddr + 4);
+            ctx.r3.u64 = value;
+            ctx.lr = savedLr;
+            if (++s_count <= 20 || (s_count % 500 == 0)) {
+                LOGF_INFO("[sub_8344F920] #{} FOUND str='{}' hash=0x{:08X} val={}", s_count, str ? str : "", hash, value);
+            }
+            return;
+        }
+        uint16_t nextIdx = PPC_LOAD_U16(entryAddr + 6);
+        if (nextIdx == entryIdx) {
+            LOGF_WARNING("[sub_8344F920] CYCLE detected in bucket {}: entry {} points to itself (str='{}' hash=0x{:08X})",
+                bucketIdx, entryIdx, str ? str : "", hash);
+            break;
+        }
+        entryIdx = nextIdx;
+        loopCount++;
+    }
+    
+    if (loopCount >= 1000) {
+        LOGF_WARNING("[sub_8344F920] LOOP LIMIT EXCEEDED in bucket {}: entryIdx={} for str='{}' hash=0x{:08X}",
+            bucketIdx, entryIdx, str ? str : "", hash);
+    }
+    
+    ctx.r3.s64 = -1;
+    ctx.lr = savedLr;
+}
+
+PPC_FUNC(sub_827D1138)
+{
+    static int s_count = 0;
+    uint32_t mapPtr = ctx.r3.u32;
+    uint32_t key = ctx.r4.u32;
+    
+    if (mapPtr < PPC_MEMORY_SIZE) {
+        uint16_t modulus = PPC_LOAD_U16(mapPtr + 80);
+        uint32_t bucketsBase = PPC_LOAD_U32(mapPtr + 76);
+        uint32_t entriesBase = PPC_LOAD_U32(mapPtr + 72);
+        
+        if (modulus == 0 || bucketsBase == 0 || entriesBase == 0) {
+            ctx.r3.s64 = -1;
+            return;
+        }
+        
+        uint32_t bucketIdx = key % modulus;
+        uint16_t entryIdx = PPC_LOAD_U16(bucketsBase + bucketIdx * 2);
+        
+        int loopCount = 0;
+        while (entryIdx != 0xFFFF && loopCount < 1000) {
+            uint32_t entryAddr = entriesBase + entryIdx * 8;
+            uint32_t entryKey = PPC_LOAD_U32(entryAddr + 0);
+            if (entryKey == key) {
+                uint16_t val11 = PPC_LOAD_U16(entryAddr + 4);
+                if (val11 == 0xFFFF) {
+                    ctx.r3.s64 = -1;
+                    return;
+                }
+                uint32_t r8_addr = PPC_LOAD_U32(mapPtr + 40);
+                uint32_t r7_stride = PPC_LOAD_U32(mapPtr + 48);
+                uint32_t r10_base = PPC_LOAD_U32(mapPtr + 36);
+                uint32_t r9_off = r7_stride * val11;
+                uint8_t r6_byte = PPC_LOAD_U8(r8_addr + val11);
+                uint32_t r5 = r6_byte & 0x80;
+                uint32_t r4_res = r9_off + r10_base;
+                uint32_t r3_neg = (uint32_t)(- (int32_t)r5);
+                uint32_t r10_or = r3_neg | r5;
+                int32_t r9_srawi = (int32_t)r10_or >> 31;
+                uint32_t r8_andc = r4_res & ~((uint32_t)r9_srawi);
+                if (r8_andc != 0) {
+                    ctx.r3.u64 = val11;
+                    if (++s_count <= 20 || (s_count % 500 == 0)) {
+                        LOGF_INFO("[sub_827D1138] #{} FOUND map=0x{:08X} key=0x{:08X} val={}", s_count, mapPtr, key, val11);
+                    }
+                    return;
+                }
+                ctx.r3.s64 = -1;
+                return;
+            }
+            uint16_t nextIdx = PPC_LOAD_U16(entryAddr + 6);
+            if (nextIdx == entryIdx) {
+                LOGF_WARNING("[sub_827D1138] CYCLE detected in bucket {}: entry {} points to itself (map=0x{:08X} key=0x{:08X})",
+                    bucketIdx, entryIdx, mapPtr, key);
+                break;
+            }
+            entryIdx = nextIdx;
+            loopCount++;
+        }
+        if (loopCount >= 1000) {
+            LOGF_WARNING("[sub_827D1138] LOOP LIMIT EXCEEDED in bucket {}: entryIdx={} for key=0x{:08X}",
+                bucketIdx, entryIdx, key);
+        }
+    }
+    ctx.r3.s64 = -1;
+}
+
+extern "C" void __imp__sub_831EDB68(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_831EDB68)
+{
+    static int s_count = 0;
+    uint32_t r31 = ctx.r3.u32;
+    uint32_t r28 = ctx.r4.u32;
+    const char* pathStr = (r28 >= 0x10000 && r28 < PPC_MEMORY_SIZE) ? (const char*)(base + r28) : "null";
+    uint32_t count = (r31 >= 0x10000 && r31 < PPC_MEMORY_SIZE - 4096) ? PPC_LOAD_U32(r31 + 3076) : 0;
+    if (++s_count <= 50 || s_count % 100 == 0) {
+        LOGF_INFO("[sub_831EDB68] #{} enter r3=0x{:08X} path='{}' packCount={} callerLR=0x{:08X}", s_count, r31, pathStr, count, ctx.lr);
+    }
+    __imp__sub_831EDB68(ctx, base);
+    if (s_count <= 50 || s_count % 100 == 0) {
+        LOGF_INFO("[sub_831EDB68] #{} exit ret=0x{:08X}", s_count, ctx.r3.u32);
+    }
+}
+
+extern "C" void __imp__sub_831D7BD8(PPCContext& ctx, uint8_t* base);
+PPC_FUNC(sub_831D7BD8)
+{
+    static std::atomic<uint64_t> s_calls{0};
+    uint64_t c = ++s_calls;
+    if (c <= 30 || (c % 100000) == 0) {
+        LOGF_INFO("[sub_831D7BD8] #{} called by LR=0x{:08X} r3=0x{:08X} r4=0x{:08X}", c, ctx.lr, ctx.r3.u32, ctx.r4.u32);
+    }
+    __imp__sub_831D7BD8(ctx, base);
 }
 
 extern "C" void __imp__sub_824BBB30(PPCContext& ctx, uint8_t* base);

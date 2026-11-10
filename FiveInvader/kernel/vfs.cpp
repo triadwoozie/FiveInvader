@@ -15,6 +15,7 @@ namespace VFS
     
     // File index for fast lookups (lowercase normalized path -> actual path)
     static std::unordered_map<std::string, std::filesystem::path> g_fileIndex;
+    static std::unordered_map<std::string, std::filesystem::path> g_filenameIndex;
     
     // Statistics
     static Stats g_stats;
@@ -128,13 +129,20 @@ namespace VFS
         }
 
         for (const std::string_view devicePrefix : {
-                 "device/cdrom0/",
-                 "device/harddisk0/partition0/",
-                 "device/harddisk0/partition1/"})
+                 "device/cdrom0",
+                 "device/harddisk0/partition0",
+                 "device/harddisk0/partition1"})
         {
-            if (result.rfind(devicePrefix, 0) == 0)
+            if (result == devicePrefix)
             {
-                result.erase(0, devicePrefix.size());
+                result.clear();
+                break;
+            }
+            if (result.size() > devicePrefix.size() &&
+                result.compare(0, devicePrefix.size(), devicePrefix) == 0 &&
+                result[devicePrefix.size()] == '/')
+            {
+                result.erase(0, devicePrefix.size() + 1);
                 break;
             }
         }
@@ -323,6 +331,21 @@ namespace VFS
             }
         }
         
+        // Try fallback to filename index for root/packfile-relative queries
+        {
+            std::string baseFilename = std::filesystem::path(stripped).filename().string();
+            std::transform(baseFilename.begin(), baseFilename.end(), baseFilename.begin(), ::tolower);
+            std::lock_guard<std::mutex> lock(g_mutex);
+            auto it = g_filenameIndex.find(baseFilename);
+            if (it != g_filenameIndex.end())
+            {
+                g_stats.cacheHits++;
+                printf("[VFS] FOUND via filename fallback: '%s' -> '%s'\n", guestPath.c_str(), it->second.string().c_str());
+                fflush(stdout);
+                return it->second;
+            }
+        }
+
         g_stats.cacheMisses++;
         printf("[VFS] NOT FOUND: '%s' (stripped='%s')\n", guestPath.c_str(), stripped.c_str());
         fflush(stdout);
@@ -417,6 +440,7 @@ namespace VFS
         // std::lock_guard<std::mutex> lock(g_mutex);
         
         g_fileIndex.clear();
+        g_filenameIndex.clear();
         g_stats = Stats{};
         
         if (!g_initialized || g_extractedRoot.empty())
@@ -455,6 +479,16 @@ namespace VFS
             
             // Add to index
             g_fileIndex[normalizedKey] = entry.path();
+            
+            if (entry.is_regular_file(ec))
+            {
+                std::string baseFilename = entry.path().filename().string();
+                std::transform(baseFilename.begin(), baseFilename.end(), baseFilename.begin(), ::tolower);
+                if (g_filenameIndex.find(baseFilename) == g_filenameIndex.end())
+                {
+                    g_filenameIndex[baseFilename] = entry.path();
+                }
+            }
         }
     }
     

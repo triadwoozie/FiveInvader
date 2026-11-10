@@ -4995,7 +4995,7 @@ def patch_recomp38_stage_loop_guards(path: pathlib.Path) -> bool:
         "\t\tstatic thread_local int s_loopCount568048 = 0;\n"
         "\t\tif (++s_loopCount568048 > 5) {\n"
         "\t\t\ts_loopCount568048 = 0;\n"
-        "\t\t\tctx.r3.s64 = 2;\n"
+        "\t\t\tctx.r3.s64 = 1;\n"
         "\t\t}\n"
         "\t}\n"
         "\tcr6.compare<int32_t>(ctx.r3.s32, 0, ctx.xer);\n"

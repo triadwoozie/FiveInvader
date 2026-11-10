@@ -4160,12 +4160,10 @@ static void ExecutePendingStretchRectCommands(GuestSurface* renderTarget, GuestS
                         }
                     }
 
-                    if (g_framebuffer != framebuffer.get())
-                    {
-                        commandList->setFramebuffer(framebuffer.get());
-                        g_framebuffer = framebuffer.get();
-                    }
+                    commandList->setFramebuffer(framebuffer.get());
+                    g_framebuffer = framebuffer.get();
 
+                    commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
                     commandList->setPipeline(pipeline);
                     commandList->setViewports(RenderViewport(0.0f, 0.0f, float(texture->width), float(texture->height), 0.0f, 1.0f));
                     commandList->setScissors(RenderRect(0, 0, texture->width, texture->height));
@@ -4283,11 +4281,8 @@ static void SetFramebuffer(GuestSurface* renderTarget, GuestSurface* depthStenci
                 framebuffer = g_device->createFramebuffer(desc);
             }
 
-            if (g_framebuffer != framebuffer.get())
-            {
-                commandList->setFramebuffer(framebuffer.get());
-                g_framebuffer = framebuffer.get();
-            }
+            commandList->setFramebuffer(framebuffer.get());
+            g_framebuffer = framebuffer.get();
         }
         else if (g_framebuffer != nullptr)
         {
@@ -5280,6 +5275,7 @@ static void FlushRenderStateForRenderThread()
 
     if (g_dirtyStates.pipelineState)
     {
+        commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
         commandList->setPipeline(CreateGraphicsPipelineInRenderThread(g_pipelineState));
 
         // D3D12 resets the depth bias values. Check if they need to be set again.
@@ -5501,8 +5497,11 @@ static void ProcDrawPrimitive(const RenderCommand& cmd)
         AddBarrier(renderTarget, RenderTextureLayout::COLOR_WRITE);
         FlushBarriers();
         SetFramebuffer(renderTarget, nullptr, true);
+        if (g_framebuffer == nullptr)
+            return;
 
         auto& commandList = g_commandLists[g_frame];
+        commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
         commandList->setPipeline(pipeline);
         commandList->setViewports(RenderViewport(0.0f, 0.0f, float(renderTarget->width), float(renderTarget->height), 0.0f, 1.0f));
         commandList->setScissors(RenderRect(0, 0, renderTarget->width, renderTarget->height));
@@ -5545,6 +5544,7 @@ static void ProcDrawPrimitive(const RenderCommand& cmd)
         return;
 
     auto& commandList = g_commandLists[g_frame];
+    commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
     commandList->drawInstanced(args.primitiveCount, 1, args.startVertex, 0);
     if (args.primitiveCount > 0)
         g_guestDrawCommandCount.fetch_add(1, std::memory_order_relaxed);
@@ -5582,7 +5582,9 @@ static void ProcDrawIndexedPrimitive(const RenderCommand& cmd)
     FlushRenderStateForRenderThread();
     if (g_framebuffer == nullptr)
         return;
-    g_commandLists[g_frame]->drawIndexedInstanced(args.primCount, 1, args.startIndex, args.baseVertexIndex, 0);
+    auto& commandList = g_commandLists[g_frame];
+    commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
+    commandList->drawIndexedInstanced(args.primCount, 1, args.startIndex, args.baseVertexIndex, 0);
     if (args.primCount > 0)
         g_guestDrawCommandCount.fetch_add(1, std::memory_order_relaxed);
 }
@@ -5638,10 +5640,12 @@ static void ProcDrawPrimitiveUP(const RenderCommand& cmd)
     if (g_framebuffer == nullptr)
         return;
 
+    auto& commandList = g_commandLists[g_frame];
+    commandList->setGraphicsPipelineLayout(g_pipelineLayout.get());
     if (indexCount != 0)
-        g_commandLists[g_frame]->drawIndexedInstanced(indexCount, 1, 0, 0, 0);
+        commandList->drawIndexedInstanced(indexCount, 1, 0, 0, 0);
     else
-        g_commandLists[g_frame]->drawInstanced(args.primitiveCount, 1, 0, 0);
+        commandList->drawInstanced(args.primitiveCount, 1, 0, 0);
     if (args.primitiveCount > 0)
         g_guestDrawCommandCount.fetch_add(1, std::memory_order_relaxed);
 }
